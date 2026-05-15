@@ -7,6 +7,9 @@ import SwiftUI
 @MainActor
 final class ChatWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
+    /// 强引用 NSHostingController —— 因为我们用 NSVisualEffectView 作为 window.contentView，
+    /// 不再走 contentViewController 的路径，但仍要让 hosting controller 活着持有 SwiftUI 状态
+    private let hosting: NSHostingController<ChatView>
 
     /// 上次触发显示时用的锚点（灵动岛胶囊或菜单栏按钮），用于 hide 时收回方向
     private weak var lastAnchor: NSView?
@@ -48,9 +51,32 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         // SwiftUI 内容
         let hosting = NSHostingController(rootView: ChatView(viewModel: viewModel))
         hosting.sizingOptions = []  // 让 SwiftUI 跟着窗口大小走
-        window.contentViewController = hosting
+
+        // 用 NSVisualEffectView 作为 contentView 提供"浮窗白磨砂" —— 这是 Spotlight /
+        // 通知中心 / Control Center 同款效果。SwiftUI 的 .background(.regularMaterial)
+        // 套在 backgroundColor = .clear 的 NSWindow 上偏灰偏暗，缺少原生 vibrancy；
+        // 必须用 AppKit 原生的 NSVisualEffectView 才能拿到那种通透白磨砂。
+        let effect = NSVisualEffectView()
+        // .popover：Spotlight / Calendar popover 同款，亮、白、干净的浮窗磨砂
+        effect.material = .popover
+        effect.blendingMode = .behindWindow
+        effect.state = .active            // 即使窗口失焦也保持磨砂（浮窗一直在前）
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 14   // 跟 ChatView 的 clipShape 对齐
+        effect.layer?.masksToBounds = true
+        // SwiftUI hosting view 作为子视图填满 effect，保证 SwiftUI 内容渲染在磨砂层之上
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(hosting.view)
+        NSLayoutConstraint.activate([
+            hosting.view.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            hosting.view.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            hosting.view.topAnchor.constraint(equalTo: effect.topAnchor),
+            hosting.view.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+        ])
+        window.contentView = effect
 
         self.window = window
+        self.hosting = hosting
         super.init()
         window.delegate = self
     }

@@ -75,8 +75,11 @@ struct ChatView: View {
         }
         // 不固定 frame，跟随 NSWindow 自适应。设最小尺寸保证不会被拖太小
         .frame(minWidth: 360, minHeight: 360)
-        // 整体填一层磨砂材质背景 —— 否则窗口（透明 NSWindow）中部会漏出桌面
-        .background(.ultraThinMaterial)
+        // 注：背景磨砂层不在这里画 —— 由 ChatWindowController 给 NSWindow 挂的
+        // NSVisualEffectView (material = .popover) 提供，那才是 Spotlight / 通知中心
+        // 同款"浮窗白磨砂"的来源。SwiftUI 的 .background(.regularMaterial) 套在
+        // backgroundColor = .clear 的 NSWindow 上得到的只是叠加层，缺少原生 vibrancy，
+        // 会偏灰偏暗。
         // 圆角浮窗：clipShape + window.hasShadow=true 让阴影也跟着圆角走
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         // 极淡边框增强层次感
