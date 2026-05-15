@@ -1,6 +1,10 @@
 # HermesPet 优化路线图
 
 ## [P0] 界面体验 ✅
+- [x] **聊天窗顶部标题栏留白去掉（2026-05-15）** —— `ChatHostingView` 归零 top safe area，让 header 贴住窗口顶边，底部输入栏随整体布局上移而不是被裁掉
+- [x] **发送按钮固定贴右下角（2026-05-15）** —— 输入框 `HStack` 改为 `.bottom` 对齐，发送按钮轻微下沉 1pt，长文本多行时始终贴住右下角而不是垂直居中漂着
+- [x] **输入框多行时改为固定圆角矩形（2026-05-15）** —— 外壳从“高度驱动的胶囊”改成固定 `18pt` 圆角矩形；单行仍接近 iMessage 风格，多行展开时不再像被粗暴拉长的胶囊
+- [x] **右侧黑色滚动槽修复（2026-05-15）** —— 聊天消息区隐藏系统 scroll indicator；输入框内部 `NSTextView` 所在 `NSScrollView` 关闭 scroller UI + 清透明背景，去掉深色毛玻璃上那两条发黑的"导航条"
 - [x] Markdown 渲染：标题、粗体、斜体、行内代码、链接
 - [x] **Markdown GFM 表格渲染** —— `MarkdownRenderer` 加 `Block.table` + `TableBlockView`（SwiftUI Grid 列宽自动对齐）。解析支持 `:--/--/-:/:-:` 列对齐符；表头加底色+加粗+底部 hairline、隔行底色、行间细线、单元格内复用 InlineMarkdownView（bold/italic/code/link 全部生效）、长内容自动换行不横滚。流式期间至少 header+separator 两行齐了才进入表格识别，避免半截被错位渲染。空 cell 用 `Text(" ")` 占位防列塌缩
 - [x] 代码块：深色背景 + 语言标签 + 复制按钮（带"已复制"反馈）

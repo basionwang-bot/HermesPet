@@ -283,7 +283,7 @@ struct ChatView: View {
     private var messagesView: some View {
         ScrollViewReader { proxy in
             GeometryReader { viewport in
-                ScrollView {
+                ScrollView(showsIndicators: false) {
                     LazyVStack(spacing: 10) {
                         // 新对话欢迎页：精致的 WelcomeView 替代纯文字欢迎语
                         if showSuggestions {

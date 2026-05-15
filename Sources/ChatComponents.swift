@@ -440,11 +440,10 @@ struct ChatInputField: View {
         // 拖拽 hover 反馈和文件处理都由 ChatView 顶层统一负责
     }
 
-    /// iMessage 风格：Capsule 容器 + 简短 placeholder + 28pt 圆按钮，符合 Apple HIG。
-    /// 关键约束：Capsule 左右各有半径 = height/2 的半圆区域，内容必须避开它，
-    /// 否则会"陷"进圆弧里看起来贴边。容器高度 36pt → 半径 18pt → leading/trailing 至少 14pt。
+    /// 外壳固定用 18pt 圆角矩形：单行时视觉上仍接近 iMessage 胶囊，
+    /// 但多行展开后圆角半径不再跟着高度一起变大，避免被"拉长的胶囊"观感。
     private var inputRow: some View {
-        HStack(alignment: .center, spacing: 6) {
+        HStack(alignment: .bottom, spacing: 6) {
             // 输入区
             ZStack(alignment: .topLeading) {
                 if text.isEmpty {
@@ -474,16 +473,17 @@ struct ChatInputField: View {
                 action: { isLoading ? onCancel() : onSend() }
             )
             .keyboardShortcut(.defaultAction)
+            .padding(.bottom, 1)   // 跟容器下边线轻贴齐，视觉上固定在右下角
         }
         .padding(.leading, 14)       // 避开 Capsule 左半圆，让文字落在直线段上
         .padding(.trailing, 6)       // 按钮自己 28pt + 6 = 距右 20pt，刚好出半圆区
         .padding(.vertical, 4)       // 容器总高 = 28 + 8 = 36pt（HIG 标准）
         .background(
-            Capsule(style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(.primary.opacity(0.06))
         )
         .overlay(
-            Capsule(style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(.primary.opacity(0.14), lineWidth: 0.5)
         )
         .padding(.horizontal, 12)
@@ -577,6 +577,14 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = PasteAwareTextView.scrollableTextView()
+        // AppKit 默认 overlay scroller 在深色玻璃背景上会显出一条发黑的滚动槽，
+        // 尤其输入框很矮时会变成右侧一截黑条。这里保留可滚动能力，但隐藏 scroller UI。
+        scrollView.hasVerticalScroller = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.backgroundColor = .clear
         // documentView 理论上一定是 PasteAwareTextView（由 scrollableTextView() 工厂创建），
         // 但 AppKit 不在类型系统保证这一点，强制 cast 失败会崩，所以走安全路径。
         guard let textView = scrollView.documentView as? PasteAwareTextView else {

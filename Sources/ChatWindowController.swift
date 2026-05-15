@@ -1,15 +1,24 @@
 import AppKit
 import SwiftUI
 
+/// 聊天窗是隐藏标题栏的 full-size content window。默认 NSHostingView 仍会把
+/// 标题栏高度当作 top safe area 留给 SwiftUI，导致 header 上方多一截空白。
+/// 这里只对聊天窗归零 safeAreaInsets，让内容在窗口内部重新排布，而不是裁掉底部。
+final class ChatHostingView<Content: View>: NSHostingView<Content> {
+    override var safeAreaInsets: NSEdgeInsets {
+        NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+    }
+}
+
 /// 聊天窗口控制器：用 NSWindow 替代 NSPopover，
 /// 显示/隐藏时从灵动岛位置「展开/收回」动画，
 /// 但保留 NSWindow 可拖拽调整大小的能力。
 @MainActor
 final class ChatWindowController: NSObject, NSWindowDelegate {
     private let window: NSWindow
-    /// 强引用 NSHostingController —— 因为我们用 NSVisualEffectView 作为 window.contentView，
-    /// 不再走 contentViewController 的路径，但仍要让 hosting controller 活着持有 SwiftUI 状态
-    private let hosting: NSHostingController<ChatView>
+    /// 强引用 SwiftUI 宿主 view。聊天窗自己隐藏了标题栏，因此这里把标题栏 safe area 归零，
+    /// 让 header 贴住窗口顶边，同时保持底部输入栏参与正常布局。
+    private let hostingView: ChatHostingView<ChatView>
 
     /// 上次触发显示时用的锚点（灵动岛胶囊或菜单栏按钮），用于 hide 时收回方向
     private weak var lastAnchor: NSView?
@@ -49,8 +58,7 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         window.standardWindowButton(.zoomButton)?.isHidden = true
 
         // SwiftUI 内容
-        let hosting = NSHostingController(rootView: ChatView(viewModel: viewModel))
-        hosting.sizingOptions = []  // 让 SwiftUI 跟着窗口大小走
+        let hostingView = ChatHostingView(rootView: ChatView(viewModel: viewModel))
 
         // 用 NSVisualEffectView 作为 contentView 提供"浮窗白磨砂" —— 这是 Spotlight /
         // 通知中心 / Control Center 同款效果。SwiftUI 的 .background(.regularMaterial)
@@ -65,18 +73,18 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         effect.layer?.cornerRadius = 14   // 跟 ChatView 的 clipShape 对齐
         effect.layer?.masksToBounds = true
         // SwiftUI hosting view 作为子视图填满 effect，保证 SwiftUI 内容渲染在磨砂层之上
-        hosting.view.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(hosting.view)
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(hostingView)
         NSLayoutConstraint.activate([
-            hosting.view.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            hosting.view.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            hosting.view.topAnchor.constraint(equalTo: effect.topAnchor),
-            hosting.view.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
+            hostingView.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
+            hostingView.topAnchor.constraint(equalTo: effect.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: effect.bottomAnchor)
         ])
         window.contentView = effect
 
         self.window = window
-        self.hosting = hosting
+        self.hostingView = hostingView
         super.init()
         window.delegate = self
     }
