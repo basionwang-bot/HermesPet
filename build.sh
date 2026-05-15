@@ -10,11 +10,13 @@ BUNDLE_ID="com.nousresearch.hermespet"
 BUILD_DIR="$SCRIPT_DIR/.build"
 APP_BUNDLE="$SCRIPT_DIR/$APP_NAME.app"
 
-echo "🏗️  Building $APP_NAME..."
-swift build -c release --disable-sandbox
+echo "🏗️  Building $APP_NAME (universal: arm64 + x86_64)..."
+# 双架构 universal binary —— Intel Mac 也能跑（issue #6）
+# 多架构构建产物路径变为 .build/apple/Products/Release/
+swift build -c release --disable-sandbox --arch arm64 --arch x86_64
 
 echo "📦 Creating .app bundle..."
-BINARY="$BUILD_DIR/release/$APP_NAME"
+BINARY="$BUILD_DIR/apple/Products/Release/$APP_NAME"
 
 # Clean previous bundle
 rm -rf "$APP_BUNDLE"

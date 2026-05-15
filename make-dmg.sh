@@ -27,11 +27,13 @@ TMP_DMG="$DIST_DIR/${APP_NAME}-${VERSION}.tmp.dmg"
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-echo "🏗️  Release 构建..."
-swift build -c release --disable-sandbox
+echo "🏗️  Release 构建（universal: arm64 + x86_64，Intel Mac 也能跑）..."
+# issue #6：原来只编当前架构（开发机是 Apple Silicon → 只产出 arm64），
+# Intel Mac 装上后报 "Bad CPU type in executable"。改 universal 一份通杀。
+swift build -c release --disable-sandbox --arch arm64 --arch x86_64
 
 echo "📦 组装 .app bundle..."
-BINARY="$BUILD_DIR/release/$APP_NAME"
+BINARY="$BUILD_DIR/apple/Products/Release/$APP_NAME"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
