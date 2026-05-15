@@ -171,6 +171,9 @@ struct SettingsView: View {
             configViewingMode = viewModel.agentMode
             // 反查"在线 AI"当前是哪个预设
             selectedProvider = ProviderPreset.detect(baseURL: viewModel.directAPIBaseURL)
+            // CLI 模型清单首次加载（actor 有缓存，第二次起秒出；force=false 不重新 spawn）
+            refreshModelList(for: .claudeCode)
+            refreshModelList(for: .codex)
         }
     }
 
@@ -386,7 +389,10 @@ struct SettingsView: View {
             tint: .orange,
             title: "通过 claude CLI 调用 Claude Code",
             body: "能读写文件、运行命令、分析图片。需要先在终端用 npm / brew 等装好 claude CLI。",
-            installURL: "https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview"
+            installURL: "https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview",
+            modelBinding: $viewModel.claudeModel,
+            modelList: claudeModelList,
+            onRefreshModels: { refreshModelList(for: .claudeCode, force: true) }
         )
     }
 
@@ -397,18 +403,47 @@ struct SettingsView: View {
             tint: .cyan,
             title: "通过 codex CLI 调用 OpenAI Codex",
             body: "强项是写代码 + 生成图片。生图自动显示在对话气泡里。需要装好 codex CLI 并用 codex login 登录 OpenAI 账号。",
-            installURL: "https://github.com/openai/codex"
+            installURL: "https://github.com/openai/codex",
+            modelBinding: $viewModel.codexModel,
+            modelList: codexModelList,
+            onRefreshModels: { refreshModelList(for: .codex, force: true) }
         )
     }
 
-    /// CLI 模式（Claude / Codex）的配置卡 —— 说明 + 当前探测到的路径 + 重新检测按钮
+    /// 已探测到的模型清单 —— `.task` / 刷新按钮触发更新。
+    /// 空数组也不会崩，CLIModelPickerRow 自己有"默认 + 自定义"兜底
+    @State private var claudeModelList: [String] = []
+    @State private var codexModelList: [String] = []
+    /// 哪个 mode 正在刷新（按钮 disable / 旋转图标用）
+    @State private var refreshingModelsFor: AgentMode?
+
+    /// 触发 ModelCatalog 探测/查缓存，结果回写到对应 @State
+    private func refreshModelList(for mode: AgentMode, force: Bool = false) {
+        if force { refreshingModelsFor = mode }
+        Task { @MainActor in
+            if force { await ModelCatalog.shared.invalidate() }
+            let list = await ModelCatalog.shared.models(for: mode, forceRefresh: force)
+            switch mode {
+            case .claudeCode: claudeModelList = list
+            case .codex:      codexModelList  = list
+            default:          break
+            }
+            if refreshingModelsFor == mode { refreshingModelsFor = nil }
+        }
+    }
+
+    /// CLI 模式（Claude / Codex）的配置卡 —— 说明 + 当前探测到的路径 + 模型选择 + 重新检测按钮。
+    /// modelBinding 非 nil 时在检测行下方插一行"模型"Picker（默认 / 已探测列表 / 自定义）
     @ViewBuilder
     private func cliConfigCard(mode: AgentMode,
                                icon: String,
                                tint: Color,
                                title: String,
                                body: String,
-                               installURL: String) -> some View {
+                               installURL: String,
+                               modelBinding: Binding<String>? = nil,
+                               modelList: [String] = [],
+                               onRefreshModels: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: icon)
@@ -434,6 +469,17 @@ struct SettingsView: View {
 
             // 当前检测到的路径 + 重新检测按钮
             cliDetectionRow(mode: mode, tint: tint)
+
+            // 模型选择（沿用检测行的灰底圆角风格，视觉上跟它是同一组配置项）
+            if let mb = modelBinding {
+                CLIModelPickerRow(
+                    value: mb,
+                    models: modelList,
+                    tint: tint,
+                    isRefreshing: refreshingModelsFor == mode,
+                    onRefresh: { onRefreshModels?() }
+                )
+            }
 
             // 安装指南链接
             HStack(spacing: 4) {
@@ -1003,6 +1049,120 @@ struct SettingsView: View {
                 }
             }
             testing = false
+        }
+    }
+}
+
+// MARK: - CLI 模型选择行（被 cliConfigCard 嵌入）
+
+/// 灰底圆角的"模型"选择行 —— 视觉跟 cliDetectionRow 配套（一上一下两条），让 Picker
+/// 落在卡片体系里而不是甩在卡片外。
+///
+/// 三种状态：
+/// 1. 默认（value == ""）—— 不传 --model，CLI 自选
+/// 2. 列表中某模型（探测得到 + 内置预设合并）
+/// 3. 自定义（value 既非空也不在列表里）—— 露出 TextField 让用户手填
+///
+/// 状态用本地 @State `selection` 和 @State `isCustom` 表示，跟 value 双向同步。
+/// 切换 / 输入逻辑全在 syncFromValue + onChange 两处闭包里，比把 get/set 全塞进
+/// Picker 的 Binding 更稳（SwiftUI Picker 在选中不存在的 tag 时会丢同步状态）
+private struct CLIModelPickerRow: View {
+    @Binding var value: String
+    let models: [String]
+    let tint: Color
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
+
+    @State private var selection: String = ""
+    @State private var isCustom: Bool = false
+
+    private let defaultTag = ""
+    private let customTag = "__hermespet_custom__"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 12))
+                    .foregroundStyle(tint)
+                Text("模型")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Picker("", selection: $selection) {
+                    Text("默认（CLI 自带）").tag(defaultTag)
+                    if !models.isEmpty {
+                        Divider()
+                        ForEach(models, id: \.self) { m in
+                            Text(m).tag(m)
+                        }
+                    }
+                    Divider()
+                    Text("自定义…").tag(customTag)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(maxWidth: 230)
+
+                Spacer()
+
+                Button(action: onRefresh) {
+                    HStack(spacing: 3) {
+                        if isRefreshing {
+                            ProgressView().controlSize(.small).scaleEffect(0.55)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        Text("刷新")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(isRefreshing)
+                .help("尝试从 CLI 的 --help 输出抓最新模型列表；失败则用内置预设")
+            }
+
+            // 自定义模式下露出输入框；占左 18pt 跟图标列对齐
+            if isCustom {
+                HStack(spacing: 8) {
+                    Spacer().frame(width: 18)
+                    TextField("输入模型 ID（留空 = 默认）", text: $value)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11, design: .monospaced))
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.06))
+        )
+        .onAppear { syncFromValue() }
+        .onChange(of: value) { _, _ in syncFromValue() }
+        .onChange(of: models) { _, _ in syncFromValue() }
+        .onChange(of: selection) { _, new in
+            if new == customTag {
+                isCustom = true
+                // 保留 value 的当前值让 TextField 接着编辑；如果原本是预设里的某项，留着用户在它基础上改
+            } else {
+                isCustom = false
+                value = new
+            }
+        }
+    }
+
+    /// 从 value 反推 Picker 的 selection / isCustom；进设置面板、列表刷新、外部改 value 时都跑一次
+    private func syncFromValue() {
+        if value.isEmpty {
+            if selection != defaultTag { selection = defaultTag }
+            isCustom = false
+        } else if models.contains(value) {
+            if selection != value { selection = value }
+            isCustom = false
+        } else {
+            if selection != customTag { selection = customTag }
+            isCustom = true
         }
     }
 }

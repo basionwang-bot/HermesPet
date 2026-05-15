@@ -157,6 +157,13 @@ final class CodexClient: @unchecked Sendable {
                 "--skip-git-repo-check",
                 "--dangerously-bypass-approvals-and-sandbox"
             ]
+            // 用户在设置里指定了模型才传 --model；留空 = 沿用 codex CLI 自己的默认
+            let userModel = (UserDefaults.standard.string(forKey: "codexModel") ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !userModel.isEmpty {
+                args.append("--model")
+                args.append(userModel)
+            }
             // 每张输入图加一个 -i <path>，让 codex 视觉识别
             for path in imageFiles {
                 args.append("-i")

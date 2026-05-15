@@ -93,6 +93,16 @@ final class ChatViewModel {
     var directAPIModel: String {
         didSet { UserDefaults.standard.set(directAPIModel, forKey: "directAPIModel") }
     }
+
+    /// Claude Code CLI 的模型名 —— 空串 = 不传 `--model`，沿用 claude CLI 自己的默认。
+    /// 常见值：`sonnet` / `opus` / `haiku` 别名，或完整 ID（如 `claude-opus-4-7`）
+    var claudeModel: String {
+        didSet { UserDefaults.standard.set(claudeModel, forKey: "claudeModel") }
+    }
+    /// Codex CLI 的模型名 —— 空串 = 不传 `--model`，沿用 codex CLI 自己的默认。
+    var codexModel: String {
+        didSet { UserDefaults.standard.set(codexModel, forKey: "codexModel") }
+    }
     /// 上一次用过的 mode —— 持久化到 UserDefaults["agentMode"]。
     /// 新建对话时把这个值作为默认 mode 继承下去；切对话 / 切 mode 时也会跟着更新，
     /// 这样下次启动 / 下次新建都能记住"我习惯用什么"。
@@ -239,6 +249,9 @@ final class ChatViewModel {
         self.directAPIBaseURL = UserDefaults.standard.string(forKey: "directAPIBaseURL") ?? ""
         self.directAPIKey = UserDefaults.standard.string(forKey: "directAPIKey") ?? ""
         self.directAPIModel = UserDefaults.standard.string(forKey: "directAPIModel") ?? ""
+        // Claude / Codex 的模型名 —— 默认空串 = 让 CLI 自己挑默认模型，老用户行为零变化
+        self.claudeModel = UserDefaults.standard.string(forKey: "claudeModel") ?? ""
+        self.codexModel = UserDefaults.standard.string(forKey: "codexModel") ?? ""
         let savedMode = UserDefaults.standard.string(forKey: "agentMode")
         // 全新用户默认走「在线 AI」—— 对方拿到 dmg 多半没装 Hermes Gateway 也没 claude/codex CLI，
         // directAPI 配上 API Key 就能立刻用。老用户的 agentMode UserDefaults 还在，不受影响
