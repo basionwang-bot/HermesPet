@@ -7,17 +7,20 @@ import Carbon
 ///   - Cmd+Shift+J → 截屏并附加到聊天（id=2，仅 down）
 ///   - Cmd+Shift+V → 按住说话（id=3，监听 down + up，实现 push-to-talk）
 ///   - Cmd+Shift+Space → Spotlight 风快问（id=4，仅 down）
+///   - Cmd+Shift+P → Pin 当前对话最新 AI 回答到桌面（id=5，仅 down）
 final class GlobalHotkey {
     private var toggleHotKeyRef:  EventHotKeyRef?
     private var captureHotKeyRef: EventHotKeyRef?
     private var voiceHotKeyRef:   EventHotKeyRef?
     private var quickAskHotKeyRef: EventHotKeyRef?
+    private var pinLastAnswerHotKeyRef: EventHotKeyRef?
 
     private nonisolated(unsafe) static var _toggleHandler:    (() -> Void)?
     private nonisolated(unsafe) static var _captureHandler:   (() -> Void)?
     private nonisolated(unsafe) static var _voiceDownHandler: (() -> Void)?
     private nonisolated(unsafe) static var _voiceUpHandler:   (() -> Void)?
     private nonisolated(unsafe) static var _quickAskHandler:  (() -> Void)?
+    private nonisolated(unsafe) static var _pinLastAnswerHandler: (() -> Void)?
     nonisolated(unsafe) static let shared = GlobalHotkey()
 
     private nonisolated(unsafe) static var handlerInstalled = false
@@ -28,13 +31,15 @@ final class GlobalHotkey {
         capture: @escaping () -> Void,
         voiceDown: @escaping () -> Void,
         voiceUp: @escaping () -> Void,
-        quickAsk: @escaping () -> Void
+        quickAsk: @escaping () -> Void,
+        pinLastAnswer: @escaping () -> Void
     ) {
-        GlobalHotkey._toggleHandler    = toggle
-        GlobalHotkey._captureHandler   = capture
-        GlobalHotkey._voiceDownHandler = voiceDown
-        GlobalHotkey._voiceUpHandler   = voiceUp
-        GlobalHotkey._quickAskHandler  = quickAsk
+        GlobalHotkey._toggleHandler        = toggle
+        GlobalHotkey._captureHandler       = capture
+        GlobalHotkey._voiceDownHandler     = voiceDown
+        GlobalHotkey._voiceUpHandler       = voiceUp
+        GlobalHotkey._quickAskHandler      = quickAsk
+        GlobalHotkey._pinLastAnswerHandler = pinLastAnswer
 
         if !isObservingChanges {
             NotificationCenter.default.addObserver(
@@ -78,6 +83,8 @@ final class GlobalHotkey {
                                 GlobalHotkey._voiceUpHandler?()
                             case (4, kEventHotKeyPressed):
                                 GlobalHotkey._quickAskHandler?()
+                            case (5, kEventHotKeyPressed):
+                                GlobalHotkey._pinLastAnswerHandler?()
                             default: break
                             }
                         }
@@ -130,10 +137,11 @@ final class GlobalHotkey {
 
     private func setRef(_ ref: EventHotKeyRef, for action: HotkeyAction) {
         switch action {
-        case .toggleChat:    toggleHotKeyRef = ref
-        case .captureScreen: captureHotKeyRef = ref
-        case .voiceInput:    voiceHotKeyRef = ref
-        case .quickAsk:      quickAskHotKeyRef = ref
+        case .toggleChat:     toggleHotKeyRef = ref
+        case .captureScreen:  captureHotKeyRef = ref
+        case .voiceInput:     voiceHotKeyRef = ref
+        case .quickAsk:       quickAskHotKeyRef = ref
+        case .pinLastAnswer:  pinLastAnswerHotKeyRef = ref
         }
     }
 
@@ -158,13 +166,15 @@ final class GlobalHotkey {
     }
 
     private func unregisterAll() {
-        if let ref = toggleHotKeyRef   { UnregisterEventHotKey(ref) }
-        if let ref = captureHotKeyRef  { UnregisterEventHotKey(ref) }
-        if let ref = voiceHotKeyRef    { UnregisterEventHotKey(ref) }
-        if let ref = quickAskHotKeyRef { UnregisterEventHotKey(ref) }
+        if let ref = toggleHotKeyRef        { UnregisterEventHotKey(ref) }
+        if let ref = captureHotKeyRef       { UnregisterEventHotKey(ref) }
+        if let ref = voiceHotKeyRef         { UnregisterEventHotKey(ref) }
+        if let ref = quickAskHotKeyRef      { UnregisterEventHotKey(ref) }
+        if let ref = pinLastAnswerHotKeyRef { UnregisterEventHotKey(ref) }
         toggleHotKeyRef = nil
         captureHotKeyRef = nil
         voiceHotKeyRef = nil
         quickAskHotKeyRef = nil
+        pinLastAnswerHotKeyRef = nil
     }
 }

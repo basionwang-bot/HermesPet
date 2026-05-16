@@ -640,7 +640,7 @@ struct DynamicIslandPillView: View {
         .transition(.opacity.combined(with: .scale(scale: 0.92)))
     }
 
-    /// 工具调用卡片：[Clawd] [verb] [arg] · [M/N 步] · [Xs]
+    /// 工具调用卡片：[Clawd] [verb] [arg] · [M/N 步] · [Xs] + 底部进度条
     private func toolStateCard(_ toolKind: ToolKind) -> some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: notchHeight)
@@ -672,7 +672,88 @@ struct DynamicIslandPillView: View {
             .frame(maxHeight: .infinity)
             .padding(.horizontal, 12)
         }
+        .overlay(alignment: .bottom) {
+            toolProgressBar
+                .padding(.horizontal, 14)
+                .padding(.bottom, 5)
+        }
         .transition(.opacity.combined(with: .scale(scale: 0.94)))
+    }
+
+    /// a) 工具卡底部迷你进度条 v3 —— Apple Music / Now Playing 风高级感设计：
+    /// - **色彩调性**：底色用 mode 主色暗变体（同源），不引入中性白做轨道，避免三色撞色
+    /// - **实色填充**：mode 主色 leading→trailing 渐变（暗→亮），暗示"还在生长"的方向感
+    /// - **前导亮线**：填充末端叠 1.2pt 白色 capsule + blur 0.7，模拟"光头"在向前推进（类 Apple Music）
+    /// - **玻璃感描边**：顶部 0.5pt 白色 0.4→0.05 渐变描边，让 capsule 像有反光的玻璃条而非平面色块
+    /// - **进度算法**：TimelineView 30fps 合并步骤离散 + 时间软进度，displayRatio 连续变化永不卡住；
+    ///   封顶 92% 留出 TaskFinished 时跳到 100% 的仪式感
+    private var toolProgressBar: some View {
+        let tint = modeTint(currentMode)
+        // 步骤离散信号：已知步数则按精确比例
+        let stepRatio: CGFloat = stepStarted > 0
+            ? min(1, CGFloat(stepEnded) / CGFloat(stepStarted))
+            : 0
+        // 时间软进度的"预期总时长"：有步数信息按 4s/步估算（最低 8s 上限），无信息按 25s
+        let expectedDuration: CGFloat = stepStarted > 0
+            ? max(8, CGFloat(stepStarted) * 4)
+            : 25
+        let taskStart = taskStartTime
+
+        return GeometryReader { geo in
+            TimelineView(.periodic(from: Date(), by: 1.0 / 30.0)) { ctx in
+                // 精确 elapsed（不像 elapsedSeconds 是每秒跳一下的整数）
+                let elapsed: CGFloat = {
+                    guard let start = taskStart else { return 0 }
+                    return CGFloat(ctx.date.timeIntervalSince(start))
+                }()
+                let timeRatio: CGFloat = min(0.92, elapsed / expectedDuration)
+                // 三信号合并取最大：永远只前进不后退
+                let displayRatio: CGFloat = max(0.06, stepRatio, timeRatio)
+                let fillWidth = max(6, geo.size.width * displayRatio)
+
+                ZStack(alignment: .leading) {
+                    // 1) 底色轨道 —— mode 主色暗变体，跟整体色调同源
+                    Capsule()
+                        .fill(tint.opacity(0.18))
+
+                    // 2) 实色填充 —— 深→亮渐变暗示生长方向
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [tint.opacity(0.55), tint],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .frame(width: fillWidth)
+
+                    // 3) 前导亮线 —— 填充末端的"光头"，1.2pt 白色 + 微 blur，类 Apple Music progress
+                    RoundedRectangle(cornerRadius: 0.6, style: .continuous)
+                        .fill(Color.white)
+                        .frame(width: 1.2, height: 3)
+                        .blur(radius: 0.7)
+                        .opacity(0.92)
+                        .offset(x: max(0, fillWidth - 1.2))
+
+                    // 4) 玻璃感顶部反光描边 —— 让 capsule 看起来有"厚度"而非贴纸
+                    Capsule()
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.42),
+                                    Color.white.opacity(0.05)
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            ),
+                            lineWidth: 0.5
+                        )
+                }
+                .clipShape(Capsule())
+                .shadow(color: tint.opacity(0.55), radius: 3, y: 0.5)
+            }
+        }
+        .frame(height: 3)
     }
 
     /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名）

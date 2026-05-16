@@ -719,8 +719,12 @@ struct HermesFeatherSprite: View {
     let isWorking: Bool
     let size: CGFloat
 
-    @State private var sway: Double = 0
     @State private var animating = false
+    /// 庆祝时旋转一周（0 → 360°），由 HermesPetTaskFinished(success=true) 触发
+    @State private var celebrateRotation: Double = 0
+    @State private var celebrateScale: CGFloat = 1.0
+    @State private var celebrateGlow: Double = 0
+    @State private var celebrateTask: Task<Void, Never>?
 
     private static let featherGradient = LinearGradient(
         colors: [
@@ -732,18 +736,62 @@ struct HermesFeatherSprite: View {
     )
 
     var body: some View {
-        // feather SF Symbol 是 iOS 17+，旧系统兜底用 leaf.fill
-        Image(systemName: "leaf.fill")
-            .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(Self.featherGradient)
-            .rotationEffect(.degrees(animating ? (isWorking ? 12 : 4) : -(isWorking ? 12 : 4)))
-            .animation(
-                .easeInOut(duration: isWorking ? 1.2 : 3.0).repeatForever(autoreverses: true),
-                value: animating
-            )
-            .onAppear {
-                animating = true
+        ZStack {
+            // 庆祝光晕：成功后从中心扩散的绿色淡圈
+            Circle()
+                .stroke(Color(red: 0.42, green: 0.86, blue: 0.52), lineWidth: 1.5)
+                .frame(width: size + 4, height: size + 4)
+                .scaleEffect(1.0 + celebrateGlow * 1.5)
+                .opacity(celebrateGlow > 0 ? (1 - celebrateGlow) * 0.8 : 0)
+                .blur(radius: 0.6)
+
+            // feather SF Symbol 是 iOS 17+，旧系统兜底用 leaf.fill
+            Image(systemName: "leaf.fill")
+                .font(.system(size: size, weight: .semibold))
+                .foregroundStyle(Self.featherGradient)
+                .rotationEffect(.degrees(animating ? (isWorking ? 12 : 4) : -(isWorking ? 12 : 4)))
+                .animation(
+                    .easeInOut(duration: isWorking ? 1.2 : 3.0).repeatForever(autoreverses: true),
+                    value: animating
+                )
+                .rotationEffect(.degrees(celebrateRotation))   // 庆祝时叠加 360° 旋转
+                .scaleEffect(celebrateScale)
+        }
+        .onAppear {
+            animating = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetTaskFinished"))) { note in
+            let success = (note.userInfo?["success"] as? Bool) ?? false
+            if success { startCelebrate() }
+        }
+        .onDisappear {
+            celebrateTask?.cancel()
+        }
+    }
+
+    /// 任务成功结束：羽毛转一圈 + 弹跳 + 绿色光圈扩散
+    private func startCelebrate() {
+        celebrateTask?.cancel()
+        celebrateTask = Task { @MainActor in
+            // 起势：scale 弹起 + 旋转启动 + 光圈出现
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.55)) {
+                celebrateScale = 1.25
             }
+            withAnimation(.easeOut(duration: 0.55)) {
+                celebrateRotation += 360
+                celebrateGlow = 1.0
+            }
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            if Task.isCancelled { return }
+            // 收势：scale 回到 1.0
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                celebrateScale = 1.0
+            }
+            // 等光圈淡完
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            if Task.isCancelled { return }
+            celebrateGlow = 0   // reset，下次再触发能从 0 开始
+        }
     }
 }
 
@@ -754,6 +802,13 @@ struct CodexCursorSprite: View {
     let size: CGFloat
 
     @State private var cursorVisible = true
+    /// 庆祝时整体 scale 弹跳
+    @State private var celebrateScale: CGFloat = 1.0
+    /// 庆祝光晕的 0 → 1 推进值（用于扩散圆环）
+    @State private var celebrateGlow: Double = 0
+    /// 庆祝时光标超速闪烁（≥1 时切到 0.08s 频率）
+    @State private var celebrateBlinkBurst: Int = 0
+    @State private var celebrateTask: Task<Void, Never>?
 
     private static let codeGradient = LinearGradient(
         colors: [
@@ -766,12 +821,20 @@ struct CodexCursorSprite: View {
 
     var body: some View {
         ZStack {
+            // 庆祝光晕：青色圆圈从中心扩散
+            Circle()
+                .stroke(Color.cyan, lineWidth: 1.5)
+                .frame(width: size + 4, height: size + 4)
+                .scaleEffect(1.0 + celebrateGlow * 1.5)
+                .opacity(celebrateGlow > 0 ? (1 - celebrateGlow) * 0.8 : 0)
+                .blur(radius: 0.6)
+
             Image(systemName: "chevron.left.forwardslash.chevron.right")
                 .font(.system(size: size * 0.95, weight: .heavy))
                 .foregroundStyle(Self.codeGradient)
 
-            if isWorking {
-                // 工作中：右侧叠一个闪烁的细竖线作为"光标"
+            if isWorking || celebrateBlinkBurst > 0 {
+                // 工作中（或庆祝时）：右侧叠一个闪烁的细竖线作为"光标"
                 Rectangle()
                     .fill(Color.cyan)
                     .frame(width: 1.2, height: size * 0.72)
@@ -784,6 +847,39 @@ struct CodexCursorSprite: View {
                         }
                     }
             }
+        }
+        .scaleEffect(celebrateScale)
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetTaskFinished"))) { note in
+            let success = (note.userInfo?["success"] as? Bool) ?? false
+            if success { startCelebrate() }
+        }
+        .onDisappear {
+            celebrateTask?.cancel()
+        }
+    }
+
+    /// 任务成功结束：scale 弹跳 + 光标超速闪烁 + 青色光圈扩散
+    private func startCelebrate() {
+        celebrateTask?.cancel()
+        celebrateTask = Task { @MainActor in
+            // 起势
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.55)) {
+                celebrateScale = 1.22
+            }
+            withAnimation(.easeOut(duration: 0.55)) {
+                celebrateGlow = 1.0
+            }
+            celebrateBlinkBurst = 1   // 让光标出现（即使非 working 状态）
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+            // 收势
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                celebrateScale = 1.0
+            }
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            if Task.isCancelled { return }
+            celebrateGlow = 0
+            celebrateBlinkBurst = 0
         }
     }
 }

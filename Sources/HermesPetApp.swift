@@ -73,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //   Cmd+Shift+J      → 截屏并附加
         //   Cmd+Shift+V      → 按住说话（push-to-talk），松开自动发送
         //   Cmd+Shift+Space  → Spotlight 风快问浮窗
+        //   Cmd+Shift+P      → Pin 当前对话最新 AI 回答到桌面
         GlobalHotkey.shared.register(
             toggle: { [weak self] in
                 Task { @MainActor [weak self] in
@@ -97,6 +98,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             quickAsk: {
                 Task { @MainActor in
                     QuickAskWindowController.shared.toggle()
+                }
+            },
+            pinLastAnswer: { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.pinLastAssistantAnswer()
                 }
             }
         )
@@ -298,6 +304,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         IntelligenceOverlayController.shared.hide()
         let text = VoiceInputController.shared.stopListening()
         viewModel?.submitVoiceInput(text)
+    }
+
+    /// Cmd+Shift+P 全局热键调用：把当前对话**最后一条 assistant 消息**钉到桌面。
+    /// 找不到（对话还没回复 / 仍在流式生成）→ 通过截图通知通道弹灵动岛提示
+    private func pinLastAssistantAnswer() {
+        guard let vm = viewModel else { return }
+        let active = vm.conversations.first(where: { $0.id == vm.activeConversationID })
+
+        // 找最后一条 assistant + 非流式 + content 不空的消息
+        let target = active?.messages
+            .reversed()
+            .first(where: { $0.role == .assistant && !$0.isStreaming && !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+
+        guard let msg = target, let conv = active else {
+            NotificationCenter.default.post(
+                name: .init("HermesPetScreenshotAdded"),
+                object: nil,
+                userInfo: ["text": "⚠️ 还没有可 Pin 的回答", "count": 0]
+            )
+            return
+        }
+
+        let result = PinCardController.pin(
+            content: msg.content,
+            mode: conv.mode,
+            conversationID: conv.id,
+            messageID: msg.id
+        )
+        let msgText: String
+        switch result {
+        case .added:     msgText = "📌 已 Pin 到桌面"
+        case .duplicate: msgText = "已经 Pin 过这条了"
+        case .full:      msgText = "⚠️ Pin 已达上限 8 张"
+        }
+        NotificationCenter.default.post(
+            name: .init("HermesPetScreenshotAdded"),
+            object: nil,
+            userInfo: ["text": msgText, "count": 0]
+        )
     }
 
     /// Cmd+Shift+J 全局热键调用：截当前屏幕并附加到聊天框。

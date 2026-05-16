@@ -186,6 +186,33 @@
 
 ---
 
+## [P1-灵动岛/桌宠/Pin 优化轮 2026-05-16]
+
+> 用户日常使用反馈梳理出的下一轮优化方向。本轮先做 A / F / J 三项。
+> 其余条目作为待做项目，按用户感知价值排序。
+
+### 本轮已落地
+- [x] **A：灵动岛工具卡迷你进度条 v3（Apple Music 风高级感）** —— `DynamicIslandController.toolStateCard` 底部 overlay 一条 3pt 高 capsule 进度条。**四层叠加**：① 底色用 mode 主色 ×0.18（同源暗变体，不引入白色避免三色撞）② 实色填充 mode leading→trailing 深→亮渐变 ③ 1.2pt 白色前导亮线 + blur 0.7（fillWidth 末端，类 Apple Music 进度光头）④ 顶部 0.5pt 白色 0.42→0.05 渐变描边（玻璃感）。**进度算法**用 TimelineView 30fps 连续刷新，`max(0.06, stepEnded/stepStarted, elapsed/expectedDuration)` 三信号合并永远只前进；时间软进度按"步数 × 4s"或无步数信息时 25s 估算，封顶 92% 留出 TaskFinished 时跳 100% 的仪式感
+- [x] **F：桌宠完成庆祝动画补全 Hermes / Codex** —— Clawd 已有 3 次 armsUp，本轮给另两个 sprite 加：① `HermesFeatherSprite` 监听 `HermesPetTaskFinished(success=true)` → 360° 旋转 + scale 1.0→1.25→1.0 弹跳 + 绿色光圈从中心扩散；② `CodexCursorSprite` → scale 1.0→1.22 弹跳 + 强制光标短暂出现闪烁 + 青色光圈扩散。三个 mode 都有任务成功的视觉反馈
+- [x] **J：全局热键 ⌘⇧P Pin 最新 AI 回答** —— `HotkeyAction.pinLastAnswer`(id=5, default ⌘⇧P) + `GlobalHotkey` 加 ref/handler 槽位；AppDelegate `pinLastAssistantAnswer()` 找当前对话最后一条非流式 assistant 消息调 `PinCardController.pin`，结果（added/duplicate/full/无回答）走截图通知通道弹灵动岛短提示；`SettingsView` 用 `HotkeyAction.allCases` 渲染快捷键，新 case 自动出现在设置里可改键
+
+### 待做（按价值排序）
+- [ ] **B：灵动岛工具卡可点击取消** —— 现在任务卡住只能去聊天窗按红色停止；灵动岛工具卡 hover 时右侧淡入小 × ，点一下 `vm.cancelStream()` 终止当前对话流（高价值）
+- [ ] **C：灵动岛 hover 卡片信息更丰富** —— 现在 hover 只显示 mode label；加：当前对话名 / 模型名 / 后台对话计数细节
+- [ ] **D：多任务并发可视化** —— `backgroundStreamingCount` 角标只是数字；hover 卡里列出每个后台对话的对话名 + mini progress
+- [ ] **G：Hermes / Codex / directAPI 也加情绪气泡** —— 现在只有 Clawd 有 30/90/180s 气泡；按 mode 调性写各自台词（羽毛 mode：'信使奔波中…' / Codex mode：'编译思考中…' 等）
+- [ ] **H：手动撸 sprite 互动彩蛋** —— 鼠标在刘海上停留点击 sprite 区，触发可爱动作（Clawd armsUp / Hermes 抖毛 / Codex 光标超速闪烁）
+- [ ] **I：mode 切换 sprite 过场** —— 现在 sprite 直接替换；加 0.3s scale + opacity 过场（matchedGeometryEffect 跨 NSWindow 不行，用 .transition 即可）
+- [ ] **L：Pin 上限调到 12 + 临时收起** —— max 8 → 12；菜单栏右键加"临时隐藏 Pin（再次点击恢复）"；屏幕被遮时一键收
+- [ ] **M：Pin 按 mode 分组折叠** —— 同 mode 的 pin 堆叠成一摞（Dock stack 风），点击展开横排
+- [ ] **N：任务 Pin 今日完成统计条** —— 桌面右上 pin 堆叠顶部加 "今日已完成 3/7" 小角标，每次 toggleDone 更新
+
+### 已明确不做
+- ~~E：外接屏切换自动重定位~~ —— 用户不需要
+- ~~K：Pin hover 展开预览~~ —— 用户不需要（v3 已彻底去掉 hover 展开逻辑）
+
+---
+
 ## [P1-结构] 灵动岛↔聊天窗一体形变（方向 A）
 
 > 目标：聊天窗顶部"长出"自灵动岛，不再是两个独立窗口的弹出关系。
@@ -381,4 +408,4 @@
 
 > **图例:** [x] 已完成 · [ ] 待实现
 > 优先级按用户体验影响排序
-> 最后更新：2026-05-14（① Pin 三个致命 bug 修齐 ② App 图标换成米白底猫咪线条风 ③ install.sh pkill 路径 bug 修复 ④ ActivityRecorder MVP v1 上线：本地采集 app/window/键鼠/对话 → SQLite + FTS5 ⑤ 每日早报 v1 上线：菜单栏可手动触发，启动时按 lastBriefingDate 自动跑，用户在隐私设置选早报后端）
+> 最后更新：2026-05-16（灵动岛/桌宠/Pin 优化轮：① 灵动岛工具卡底部加 mode 主色迷你进度条 v3（Apple Music 风四层叠加 + TimelineView 30fps 连续推进 + 玻璃感反光描边）② Hermes 羽毛 + Codex 光标补完成庆祝动画（360° 旋转 / scale 弹跳 / 光圈扩散），三模式视觉反馈对齐 ③ 全局热键 ⌘⇧P 把当前对话最新 AI 回答 Pin 到桌面，结果走灵动岛通知提示）

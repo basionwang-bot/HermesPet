@@ -35,33 +35,37 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
     case captureScreen
     case voiceInput
     case quickAsk
+    case pinLastAnswer
 
     var id: String { rawValue }
 
     var hotkeyID: UInt32 {
         switch self {
-        case .toggleChat:    return 1
-        case .captureScreen: return 2
-        case .voiceInput:    return 3
-        case .quickAsk:      return 4
+        case .toggleChat:     return 1
+        case .captureScreen:  return 2
+        case .voiceInput:     return 3
+        case .quickAsk:       return 4
+        case .pinLastAnswer:  return 5
         }
     }
 
     var title: String {
         switch self {
-        case .toggleChat:    return "呼出聊天"
-        case .captureScreen: return "截屏附加"
-        case .voiceInput:    return "按住说话"
-        case .quickAsk:      return "快问浮窗"
+        case .toggleChat:     return "呼出聊天"
+        case .captureScreen:  return "截屏附加"
+        case .voiceInput:     return "按住说话"
+        case .quickAsk:       return "快问浮窗"
+        case .pinLastAnswer:  return "Pin 最新回答"
         }
     }
 
     var icon: String {
         switch self {
-        case .toggleChat:    return "command"
-        case .captureScreen: return "camera.viewfinder"
-        case .voiceInput:    return "mic.fill"
-        case .quickAsk:      return "bolt.fill"
+        case .toggleChat:     return "command"
+        case .captureScreen:  return "camera.viewfinder"
+        case .voiceInput:     return "mic.fill"
+        case .quickAsk:       return "bolt.fill"
+        case .pinLastAnswer:  return "pin.fill"
         }
     }
 
@@ -79,6 +83,8 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
             return Hotkey(keyCode: UInt32(kVK_ANSI_V), modifiers: UInt32(cmdKey | shiftKey))
         case .quickAsk:
             return Hotkey(keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | shiftKey))
+        case .pinLastAnswer:
+            return Hotkey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey | shiftKey))
         }
     }
 
