@@ -202,6 +202,21 @@ final class ChatViewModel {
             )
         }
     }
+    /// 是否在 Dock 显示应用图标。
+    /// Info.plist 默认 LSUIElement=true（菜单栏 agent 风格不占 Dock），但用户可以 runtime
+    /// 通过 `NSApp.setActivationPolicy(.regular)` 切换显示。默认 OFF 保持极简定位。
+    /// 切换后立即生效，无需重启。
+    var showDockIcon: Bool {
+        didSet {
+            UserDefaults.standard.set(showDockIcon, forKey: "showDockIcon")
+            NSApp.setActivationPolicy(showDockIcon ? .regular : .accessory)
+            // 切到 .regular 时强制激活，避免 Dock 图标显示但 app 仍在后台不可见的诡异状态
+            if showDockIcon {
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
+
     /// 活动记录开关 —— 开启后持续记录用户在用什么 app/窗口/键盘节奏，让 AI 能"看见"用户做什么。
     /// 默认开启（首次启用会弹一次 Accessibility 权限框）
     var activityRecordingEnabled: Bool {
@@ -279,6 +294,8 @@ final class ChatViewModel {
         self.clawdFreeRoamEnabled = UserDefaults.standard.bool(forKey: "clawdFreeRoamEnabled")
         // clawdDesktopPatrolEnabled 默认 false —— 需要 Finder 自动化权限，默认 OFF 让用户主动开
         self.clawdDesktopPatrolEnabled = UserDefaults.standard.bool(forKey: "clawdDesktopPatrolEnabled")
+        // showDockIcon 默认 false —— 保持菜单栏 agent 极简风格，用户主动开才显示 Dock 图标
+        self.showDockIcon = UserDefaults.standard.bool(forKey: "showDockIcon")
         // activityRecordingEnabled 默认 true（首次会弹 Accessibility 权限框，用户可在设置里关）
         self.activityRecordingEnabled = (UserDefaults.standard.object(forKey: "activityRecordingEnabled") as? Bool) ?? true
         // 早报后端默认 Hermes（自托管/隐私零风险），用户可改

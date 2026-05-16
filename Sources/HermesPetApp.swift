@@ -58,6 +58,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 有新版 → 设置面板「关于」区 + 菜单栏出 🔵 提示，用户点击一键下载 + 引导挂载
         UpdateChecker.shared.start()
 
+        // Dock 图标显隐 —— Info.plist 默认 LSUIElement=true 不占 Dock。
+        // 用户在设置里开「显示 Dock 图标」时，runtime 切到 .regular policy 显示
+        if UserDefaults.standard.bool(forKey: "showDockIcon") {
+            NSApp.setActivationPolicy(.regular)
+        }
+
         let vm = ChatViewModel()
         viewModel = vm
 

@@ -1031,6 +1031,16 @@ struct SettingsView: View {
             Divider()
 
             captionToggle(
+                icon: "dock.rectangle",
+                iconColor: .indigo,
+                title: "在 Dock 显示图标",
+                caption: "默认菜单栏 agent 风格不占 Dock。打开后会显示应用图标，Cmd+Tab 也能切到 HermesPet。切换即时生效，无需重启。",
+                isOn: $viewModel.showDockIcon
+            )
+
+            Divider()
+
+            captionToggle(
                 icon: "hand.tap.fill",
                 iconColor: .purple,
                 title: "触觉反馈",
@@ -1110,7 +1120,94 @@ struct SettingsView: View {
 
             Divider()
 
+            feedbackSection
+
+            Divider()
+
             creditsSection
+        }
+        .onAppear {
+            CrashReporter.shared.scan()
+        }
+    }
+
+    /// 问题反馈区 —— 扫描 ~/Library/Logs/DiagnosticReports/ 找 HermesPet 崩溃日志，
+    /// 一键复制 + 跳转 GitHub issue 让用户提交（零后端 / 零隐私顾虑）
+    @ViewBuilder
+    private var feedbackSection: some View {
+        let reporter = CrashReporter.shared
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .foregroundStyle(.orange)
+                    .frame(width: 16)
+                Text("问题反馈")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+            }
+
+            if let crash = reporter.latestCrash {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("检测到最近一次崩溃")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
+                    Text("v\(crash.appVersion) · \(crash.exceptionType)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                    Text(relativeTime(from: crash.date))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        Button {
+                            reporter.reportToGitHub(crash)
+                        } label: {
+                            Label("一键上报到 GitHub", systemImage: "paperplane.fill")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button {
+                            reporter.revealInFinder(crash)
+                        } label: {
+                            Label("在访达中显示", systemImage: "folder")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    if reporter.allCrashes.count > 1 {
+                        Text("（共 \(reporter.allCrashes.count) 条历史崩溃，最早 \(relativeTime(from: reporter.allCrashes.last!.date))）")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(Color.orange.opacity(0.08))
+                .cornerRadius(8)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text("暂未检测到崩溃日志 ✨")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        reporter.openBlankIssue()
+                    } label: {
+                        Label("直接提 issue", systemImage: "arrow.up.right.square")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            Text("点「一键上报」会自动复制完整崩溃日志到剪贴板 + 打开 GitHub issue 页面，粘贴后描述一下崩溃前的操作就能发出。日志只发到你看到的 GitHub issue，不会上传任何第三方后端。")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.top, 2)
         }
     }
 
