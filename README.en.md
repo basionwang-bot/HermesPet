@@ -45,26 +45,35 @@ Each conversation **independently binds** to one AI backend and locks after the 
 - Conversation 2: have **Claude Code** modify a SwiftUI component
 - Conversation 3: get **Codex** to generate a poster
 
-Up to **8 conversations** can be active simultaneously (`⌘1` ~ `⌘8` jump directly), each independently bound to a mode without cross-contamination. When switching conversations, the header's mode color/icon and the Dynamic Island sprite sync in real time.
+Up to **3 conversations** can be active simultaneously (`⌘1` ~ `⌘3` jump directly), each independently bound to a mode without cross-contamination. When switching conversations, the header's mode color/icon and the Dynamic Island sprite sync in real time.
 
 ### 🏔 Dynamic Island = OS-level status display
 
 The capsule below the notch is not decoration:
 
-- **Left ear** shows the "sprite" for the current mode (Hermes bunny / Claude's Clawd / Codex magic wand) — 1.5:1 terminal-ratio pixel art
+- **Left ear** shows the "sprite" for the current mode (Hermes feather / Claude's Clawd / Codex magic wand / Online AI ☁️ cloud), pixel art
 - **Right ear** displays task status in real time: rotating pulse → step count → file change count → Face ID-style stroke checkmark ✓
+- **Hover → water-drop expansion**: the capsule flows down from the notch like a drop of water, showing the mode color + model name + recent reply preview. Hit zone strictly clipped to the hardware notch geometry — moving the cursor near the menu bar elsewhere on screen won't trigger it
 - **Error state** turns the whole capsule amber + click to retry
 - **Screenshot shutter** 0.18s white flash + scale bounce
 - **Background conversation glow**: when one of your conversations is running in the background, the corresponding spot on the capsule pulses softly
 
-### 🦞 Clawd desktop companion (Claude mode exclusive easter egg)
+### 🦞 Dual desktop pets · companions (Claude / Online AI mode)
 
-After 3 minutes of idle in Claude mode → a pixel critter jumps from the Dynamic Island onto your desktop:
+Switch to Claude after 3 min idle / switch to Online AI immediately → a pixel critter jumps from the Dynamic Island onto your desktop:
 
-- **Sniffs files on its own**: occasionally walks down to the desktop, picks an icon, and uses Hermes to generate a ≤10-character quip about the filename ("flip this~" / "long name"), shown in a speech bubble
-- **Can be dragged**: hold and drag Clawd onto any desktop icon → it stops there and sniffs + AI commentary
-- **Eats files**: drop a file onto Clawd → it chews and swallows → the file automatically attaches to the current conversation + sends
+| Mode | Pet | Trigger |
+|---|---|---|
+| Claude Code | **Clawd 🦞** orange pixel crab | After 3 min idle (or enable "Free roam" for immediate) |
+| Online AI | **Cloud ☁️** indigo pixel sprite | Appears immediately when you switch in |
+
+Both pets **share the same interactions**:
+
+- **Sniffs files on its own** (Clawd only): occasionally walks down to the desktop, picks an icon, and uses Hermes to generate a ≤10-character quip about the filename, shown in a speech bubble
+- **Can be dragged**: hold and drag onto any desktop icon → it stops there and sniffs + AI commentary
+- **Eats files** (Clawd only): drop a file onto it → chews and swallows → the file automatically attaches to the current conversation + sends
 - **Rubs against the cursor**: when your mouse gets close it trots over to say hi
+- **Single / double click**: both open the chat window without switching AI modes
 
 Filenames pass through a local blocklist before reaching the AI (salary / contract / password / .env etc. are skipped).
 
@@ -89,7 +98,7 @@ Saves context, saves tokens, runs faster, and the AI gets to decide which parts 
 ### 💬 Multimodal · Multi-conversation · Cross-AI shared context
 
 - Image paste / drag / screenshot / Codex generation — all supported
-- Up to 8 conversations at once, `⌘N` / `⌘[` / `⌘]` / `⌘1-8` for quick switching
+- Up to 3 conversations at once, `⌘N` / `⌘[` / `⌘]` / `⌘1-3` for quick switching
 - When you switch modes, the entire conversation history gets passed to the new model — **memory is shared across AIs** (Claude can see what Hermes said earlier, and vice versa)
 - Red dot on the capsule when a background conversation finishes
 
@@ -100,6 +109,12 @@ Saves context, saves tokens, runs faster, and the AI gets to decide which parts 
 - **Pin desktop cards**: pin any AI response to the top-right of the desktop, single-click to bring it back into chat
 - **Daily briefing**: AI reviews yesterday's activity and proactively gives you a markdown summary in the morning
 - **Input bar strictly follows Apple HIG** (Capsule + 28pt round button + iMessage-style placeholder)
+- **Optional Dock icon**: defaults to menubar-agent style (no Dock entry); flip a toggle to show the Dock icon and enter Cmd+Tab
+
+### 🔄 Auto-update · One-click feedback
+
+- **In-app auto-update**: 60s after launch + every 24h, checks GitHub Release for updates. New version found → 🔵 indicator in menubar. Click "Download & Install" → background DMG download → auto `hdiutil` mount → Finder window prompts you to drag into Applications (no Sparkle, no telemetry)
+- **One-click crash reporting**: Settings → About auto-scans `~/Library/Logs/DiagnosticReports/` for HermesPet crashes. Click "Report to GitHub" → full log copied to clipboard + jumps to issue new page, paste & submit. **Zero backend, zero privacy concerns** — logs only go to the issue you see
 
 ---
 
@@ -172,6 +187,8 @@ New users default to "Online AI" mode, with a guide card on the welcome page tha
 | `⌘⇧H` | Show / hide chat window |
 | `⌘⇧J` | Capture current screen and attach to chat |
 | `⌘⇧V` | Hold to talk, release to auto-send |
+| `⌘⇧P` | Pin the latest AI reply of the current conversation to the desktop |
+| `⌘⇧Space` | Spotlight-style quick-ask floating window |
 | `⌘N` | New conversation (inside chat window) |
 | `⌘[` / `⌘]` | Switch to previous / next conversation |
 | `⌘1` / `⌘2` / `⌘3` | Jump directly to that conversation |
