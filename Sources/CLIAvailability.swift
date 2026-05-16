@@ -88,9 +88,18 @@ actor CLIAvailability {
     private nonisolated static func detectPath(for command: String) -> (Bool, String?, String?) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        // -l = login shell（加载 ~/.zprofile）; -i = interactive（加载 ~/.zshrc）;
-        // -c = 跑后面这条命令。command -v 比 which 更标准也更快。
-        process.arguments = ["-lic", "printf '__HERMESPET_PATH__%s\\n' \"$PATH\"; command -v \(command)"]
+        // -l = login shell（加载 ~/.zprofile）; -i = interactive（加载 ~/.zshrc）; -c = 跑命令
+        //
+        // 输出两段：
+        //   1. `printf '__HERMESPET_PATH__%s\n' "$PATH"` —— 把 shell 真实 PATH 写出来，
+        //      后面 lines.first(where: hasPrefix("__HERMESPET_PATH__")) 抽出来缓存到
+        //      UserDefaults["cliLoginShellPATH"]，spawn 子进程时复用
+        //   2. **用 `whence -p` 而非 `command -v` 拿可执行路径**：用户 .zshrc 里可能把
+        //      claude 包成 shell function（例如注入 --dangerously-skip-permissions 的
+        //      wrapper），此时 `command -v claude` 返回函数名 "claude" 而非路径，下面
+        //      `hasPrefix("/")` 过滤会把结果丢掉 → 误判"未检测到"。
+        //      `whence -p` 是 zsh 内建，强制走 PATH 解析二进制，忽略 function/alias/builtin。
+        process.arguments = ["-lic", "printf '__HERMESPET_PATH__%s\\n' \"$PATH\"; whence -p \(command)"]
 
         let outPipe = Pipe()
         let errPipe = Pipe()

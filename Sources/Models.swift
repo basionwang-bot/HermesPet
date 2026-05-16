@@ -191,6 +191,37 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+// MARK: - Hover Expand 三态
+
+/// 鼠标悬停灵动岛 500ms 后的展开行为。三选一：
+/// - `off`：不动，hover 仅保留 hoverCard 预览（默认 —— 最保守、零侵入）
+/// - `embedded`：灵动岛胶囊本身扩展成"上平下圆"的迷你聊天框（融进刘海），
+///   含最近 1-2 条对话 + 输入框 + 发送。**不开第二个窗口**，视觉上从刘海长出来
+/// - `chatWindow`：自动展开主聊天窗（NSWindow，原 PR3 行为）。鼠标离开 / Esc / 失焦收回
+enum HoverExpandMode: String, Codable, CaseIterable, Identifiable {
+    case off
+    case embedded
+    case chatWindow = "chat_window"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .off:        return "不动"
+        case .embedded:   return "嵌入式聊天框"
+        case .chatWindow: return "展开主聊天窗"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .off:        return "仅显示预览"
+        case .embedded:   return "刘海长出迷你聊天卡，融进顶部"
+        case .chatWindow: return "弹出 420×580 完整对话窗口"
+        }
+    }
+}
+
 // MARK: - API Models (OpenAI-compatible, 支持 multimodal)
 struct ChatCompletionRequest: Codable {
     let model: String

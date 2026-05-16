@@ -449,27 +449,18 @@ struct ChatInputField: View {
         let cornerRadius: CGFloat = isExpanded ? 18 : 20
 
         return ZStack(alignment: .bottomTrailing) {
-            ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text(placeholderText)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 8)
-                        .padding(.top, 5)
-                        .allowsHitTesting(false)
-                }
-
-                SendOnEnterTextEditor(
-                    text: $text,
-                    isFocused: $isFocused,
-                    idealHeight: $textHeight,
-                    onSend: onSend,
-                    onPasteImage: onPasteImage
-                )
-                // 单行 28pt 起步，进入多行后跟随内容长高，最高 112pt 后内部滚动
-                .frame(height: editorHeight)
-                .opacity(isLoading ? 0.5 : 1)
-            }
+            // placeholder 现在由 NSTextView 内部绘制（PasteAwareTextView.placeholderString）——
+            // 跟 IME marked text 共用同一个 layer，永不重影。SwiftUI 这层不再放 Text(placeholder)
+            SendOnEnterTextEditor(
+                text: $text,
+                isFocused: $isFocused,
+                idealHeight: $textHeight,
+                placeholder: placeholderText,
+                onSend: onSend,
+                onPasteImage: onPasteImage
+            )
+            .frame(height: editorHeight)
+            .opacity(isLoading ? 0.5 : 1)
             .padding(.leading, 14)
             .padding(.trailing, 42)
             .padding(.vertical, 6)
@@ -580,6 +571,9 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
     @Binding var isFocused: Bool
     /// 内容变化时回传"理想高度"给上层，让输入框跟随内容长高（max 由 SwiftUI 端裁剪）
     @Binding var idealHeight: CGFloat
+    /// 输入框为空时显示的占位文本。**由 NSTextView 内部绘制**（不是 SwiftUI 那层），
+    /// 避免跟 IME marked text 视觉重叠
+    var placeholder: String = ""
     var onSend: () -> Void
     var onPasteImage: (Data) -> Void = { _ in }
 
@@ -596,6 +590,7 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
         }
         textView.delegate = context.coordinator
         textView.onPasteImage = onPasteImage  // 拦截图片粘贴
+        textView.placeholderString = placeholder
         textView.font = NSFont.systemFont(ofSize: 14)      // HIG 14pt subhead
         textView.isRichText = false
         textView.drawsBackground = false
@@ -605,6 +600,13 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
         // 28pt frame 内：top inset 5 + line height 18 = 23pt → 距底 5pt → 单行垂直居中
         textView.textContainerInset = NSSize(width: 8, height: 5)
         textView.textContainer?.lineFragmentPadding = 0
+        // 修 IME 拼音输入时 marked text 上下错位重影（macOS 26 上 SwiftUI + NSTextView 已知坑）：
+        //   - widthTracksTextView: 让 textContainer 宽度跟随 NSScrollView，避免 SwiftUI layout 跟
+        //     NSTextView 自带 layout 双向算导致 marked text baseline 偏移
+        //   - allowsNonContiguousLayout=false: 关掉非连续 layout 缓存，避免 IME 期间 layoutManager
+        //     用旧缓存渲染一遍 + 新内容渲染一遍叠加显示
+        textView.textContainer?.widthTracksTextView = true
+        textView.layoutManager?.allowsNonContiguousLayout = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -622,6 +624,11 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
             recomputeIdealHeight(textView)
         }
         textView.onPasteImage = onPasteImage
+        // placeholder 跟随 mode label 变化（虽然当前 placeholderText 是常量 "消息"，
+        // 但保留同步路径以便后续按 mode 个性化时不漏改）
+        if textView.placeholderString != placeholder {
+            textView.placeholderString = placeholder
+        }
     }
 
     /// 用 layoutManager 测真实文本高度，加上 inset 总和 → idealHeight。
@@ -683,9 +690,18 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
     }
 }
 
-/// 自定义 NSTextView：粘贴时检测剪贴板有没有图片，有就走 onPasteImage 回调，文字才正常粘贴
+/// 自定义 NSTextView：粘贴时检测剪贴板有没有图片，有就走 onPasteImage 回调，文字才正常粘贴。
+/// 同时内置 placeholder 绘制 —— 跟 NSTextView 自己的 marked text 共用同一个 layer，
+/// 永远不会跟 IME 输入的中间状态（拼音 marked text）重影。
 final class PasteAwareTextView: NSTextView {
     var onPasteImage: ((Data) -> Void)?
+
+    /// 输入框为空 + 没有 IME marked text 时显示的占位文本。
+    /// **必须**放在 NSTextView 内部而不是 SwiftUI 的 ZStack 之上 ——
+    /// 否则 IME 拼音输入时 marked text 跟外层 Text 视觉重叠（"消息" 字下方有 placeholder 残影）
+    var placeholderString: String = "" {
+        didSet { needsDisplay = true }
+    }
 
     override func paste(_ sender: Any?) {
         let pb = NSPasteboard.general
@@ -700,6 +716,38 @@ final class PasteAwareTextView: NSTextView {
         }
         // 否则按默认文字粘贴
         super.paste(sender)
+    }
+
+    /// 内容真正变化（含 IME commit / 删除）时刷新一遍，让 placeholder 状态及时跟随。
+    /// IME marked text 状态变化通过 setMarkedText 走，下面单独 override 触发刷新
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+    }
+
+    /// IME 开始/继续/取消 marked text 时调到这里 —— 触发重绘让 placeholder 隐藏 / 显示
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // 完全空（无 committed text 也无 IME marked text）才画 placeholder。
+        // hasMarkedText() 是 NSTextInputClient 协议方法，IME 输入拼音"xiaoxi"时返回 true，
+        // 此时 placeholder 隐藏，避免跟 marked text 视觉重叠
+        guard string.isEmpty, !hasMarkedText(), !placeholderString.isEmpty else { return }
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.tertiaryLabelColor
+        ]
+        // 起点跟 cursor 位置算法保持一致：textContainerInset + lineFragmentPadding
+        let origin = NSPoint(
+            x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0),
+            y: textContainerInset.height
+        )
+        (placeholderString as NSString).draw(at: origin, withAttributes: attrs)
     }
 }
 

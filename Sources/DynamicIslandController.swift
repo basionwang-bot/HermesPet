@@ -1,13 +1,62 @@
 import AppKit
 import SwiftUI
 
+/// 灵动岛专用 NSPanel —— `borderless + nonactivatingPanel` 的 NSWindow 默认
+/// `canBecomeKey = false`，导致 hover 进入「嵌入式聊天框」形态时 NSTextView 收不到键盘事件。
+///
+/// 解法：子类化 NSPanel + override `canBecomeKey` 返回 true。配合：
+/// - `isFloatingPanel = true` → 接收键盘输入但**不切换前台 app**（用户在 Safari，hover 灵动岛打字
+///   不应让 Safari 失去 active 状态）
+/// - `becomesKeyOnlyIfNeeded = true` → idle 态下点击胶囊不会"自动 makeKey 抢焦点"，
+///   只有内部子视图（NSTextView）主动请求 firstResponder 时才 becomeKey
+///
+/// 已踩过的相关坑（CLAUDE.md 决策 #4 #5 #7）：
+/// - @MainActor 类的 closure 被后台线程回调 → SIGTRAP，但 NSPanel 子类本身不涉及（系统调用都在 main）
+/// - 跨窗口 setFrame 嵌套 layout → embedded 切换时 setFrame **只**在 controller 主动调用，
+///   SwiftUI 内用 `.frame(maxWidth: .infinity, maxHeight: .infinity)` 不反推
+final class EmbeddableIslandPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    // borderless panel 默认 canBecomeMain = false 即可，不要让它抢主窗口语义
+    override var canBecomeMain: Bool { false }
+
+    /// 🔑 不让系统调整 panel frame —— macOS 26 默认 `constrainFrameRect` 会把 panel 约束到
+    /// `screen.visibleFrame`（避开 menu bar），即使 `level = .statusBar` 也被约束。
+    /// 我们要 panel 顶贴**物理屏顶**（盖住刘海两侧 + idle/embedded 都靠这个），所以原样返回。
+    /// 经验：早期 NSHostingView 时这个约束被某种内部机制绕过；换 NSHostingController 后失效暴露
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+}
+
 /// 与刘海融合的桌宠胶囊。
 /// 默认（idle）：刘海两侧探出来一段，像 iPhone 灵动岛常驻态显示信息。
 /// 悬停（hover）：横向收紧到刘海宽度、纵向也变短，像一个紧凑的可点击按钮。
+/// 嵌入式聊天（embedded）：刘海"长出"一个 420×280pt 的迷你聊天卡（仅当 vm.hoverExpandMode == .embedded）
 @MainActor
 final class DynamicIslandController {
-    private(set) var pillWindow: NSWindow
-    private let hostingView: NSHostingView<DynamicIslandPillView>
+    private(set) var pillWindow: EmbeddableIslandPanel
+    /// 用 NSHostingController 而非 NSHostingView —— 两者的 `sizingOptions` 语义不同：
+    /// - NSHostingView.sizingOptions = [] 在 macOS 26 仍**不能**完全阻止 windowDidLayout 期间
+    ///   `updateAnimatedWindowSize` 反推 NSWindow.setFrame（实测 SIGABRT，嵌套 layout cycle）
+    /// - NSHostingController.sizingOptions = [] **能**真正禁用反推（ChatWindowController 用同样套路从未崩过）
+    private let hostingController: NSHostingController<DynamicIslandPillView>
+
+    /// 由 HermesPetApp 调 `attach(viewModel:)` 注入，用于嵌入式聊天框访问消息/发送
+    private(set) weak var viewModel: ChatViewModel?
+
+    /// 当前是不是嵌入式聊天形态（pillWindow 已扩大到 420×280）
+    private(set) var isEmbeddedExpanded: Bool = false
+
+    /// embedded 模式打开主聊天窗的回调（由 AppDelegate 注入）
+    var onRequestFullChatWindow: (() -> Void)?
+
+    /// pillWindow 在 idle 态的"最大尺寸" frame（含 hover 展开余量），用于从 embedded 收回
+    private var idleMaxFrame: NSRect = .zero
+    /// 嵌入式聊天框的目标 frame（每次进入 embedded 重算，确保位置跟着刘海中心）
+    private var embeddedTargetFrame: NSRect = .zero
+    /// embedded → idle 收回时延迟 ~320ms 的 setFrame 任务（让 SwiftUI fade out 先完成）。
+    /// 用户在 fade out 期间又 hover 回来时，下一次 setEmbeddedExpanded(true) 会 cancel 它
+    private var collapseFrameTask: Task<Void, Never>?
 
     private weak var statusItem: NSStatusItem?
     /// 点击灵动岛胶囊时回调（由 AppDelegate 注册）
@@ -26,35 +75,214 @@ final class DynamicIslandController {
     private let hoverExtraWidth: CGFloat = 80
 
     init() {
-        // window 始终是 idle 尺寸（也就是最大尺寸），命中区域 = 整个 window
+        // panel 始终是 idle 尺寸（也就是最大尺寸），命中区域 = 整个 panel
         // 这样 hover 后形状收缩，鼠标若仍在 idle 范围内，hover 状态依然保持，不抖
-        let window = NSWindow(
+        // 🔑 styleMask **初始化时**就含 `.nonactivatingPanel` —— 后改是私有 API，会留下"视觉 key 但事件失效"的状态
+        let panel = EmbeddableIslandPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 70),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
-        window.level = HermesWindowLevel.dynamicIsland   // 最高层，见 WindowLevels.swift
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = false
-        window.acceptsMouseMovedEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        window.isReleasedWhenClosed = false
-        self.pillWindow = window
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = false
+        panel.acceptsMouseMovedEvents = true
+        // 浮动 panel + 输入型 panel 双开关：让 NSTextView 能接收键盘，但不抢前台 app
+        panel.isFloatingPanel = true
+        // 🔑 = true（按需 becomeKey）—— idle 态点击灵动岛**不能**让 panel 抢前台 app 焦点。
+        // - idle 态：用户点灵动岛只触发 click gesture → toggleChat()，不能让 Safari/Xcode 丢 firstResponder
+        // - embedded 态：controller 主动 `pillWindow.makeKey()` 覆盖 onlyIfNeeded（主动 makeKey 永远生效）
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.hidesOnDeactivate = false
+        panel.isMovableByWindowBackground = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isReleasedWhenClosed = false
+        // 🔑 level 必须设在 `isFloatingPanel = true` **之后** —— 后者副作用会把 level 强制改回 .floating(3)，
+        // 导致 panel 在 menu bar (layer 24) 之下，menu bar 区域的鼠标 hover/click 事件被系统截走，
+        // 用户在贴顶的灵动岛区域 hover 没反应。statusBar=25 高于 menu bar 才能正常接收事件
+        panel.level = HermesWindowLevel.dynamicIsland
+        self.pillWindow = panel
 
-        let hosting = NSHostingView(rootView: DynamicIslandPillView())
-        hosting.frame = NSRect(x: 0, y: 0, width: 280, height: 70)
-        hosting.autoresizingMask = [.width, .height]
-        window.contentView = hosting
-        self.hostingView = hosting
+        // 🔑 用 NSHostingController：它的 `sizingOptions = []` 能真正禁用 SwiftUI 反推 window setFrame
+        let hosting = NSHostingController(rootView: DynamicIslandPillView())
+        hosting.sizingOptions = []
+        panel.contentViewController = hosting
+        self.hostingController = hosting
 
+        // hostingController.view 是 NSHostingView 实例（私有类型），但 NSView 接口足够挂 gesture
+        let hostingNSView = hosting.view
+        hostingNSView.autoresizingMask = [.width, .height]
         let click = NSClickGestureRecognizer(target: self, action: #selector(toggleChat))
-        hosting.addGestureRecognizer(click)
-        hosting.wantsLayer = true
+        hostingNSView.addGestureRecognizer(click)
+        hostingNSView.wantsLayer = true
 
         positionWindow()
+    }
+
+    // MARK: - 嵌入式聊天框形态
+
+    /// 让 SwiftUI PillView 拿到 ChatViewModel 引用（嵌入式聊天框需要访问 messages / sendMessage）。
+    /// HermesPetApp.applicationDidFinishLaunching 创建 vm 后立刻调一次。
+    /// 替换 hostingController.rootView 重建 SwiftUI 树 —— PillView 接受 vm 作为 init 参数后状态保留通过 @State
+    func attach(viewModel: ChatViewModel) {
+        self.viewModel = viewModel
+        // 用 closure 把"切换嵌入式聊天形态"的指令从 SwiftUI view 回传给 controller。
+        // weak self 避免循环（hostingController 持有 rootView，rootView 持有 closure，closure 不能再持有 self）
+        let setEmbeddedFromView: @MainActor (Bool) -> Void = { [weak self] expanded in
+            self?.setEmbeddedExpanded(expanded)
+        }
+        let expandToFullWindow: @MainActor () -> Void = { [weak self] in
+            self?.onRequestFullChatWindow?()
+        }
+        let hasPendingInputQuery: @MainActor () -> Bool = { [weak self] in
+            self?.hasPendingInput() ?? false
+        }
+        let newRoot = DynamicIslandPillView(
+            viewModel: viewModel,
+            setEmbeddedExpanded: setEmbeddedFromView,
+            expandToFullChatWindow: expandToFullWindow,
+            hasPendingInput: hasPendingInputQuery
+        )
+        hostingController.rootView = newRoot
+
+        // 监听 panel 失去 key → 用户切去别的 app 时自动收回 embedded（兜底，防止 panel 留在屏幕上无法输入）
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didResignKeyNotification,
+            object: pillWindow,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor [weak self] in
+                guard let self = self, self.isEmbeddedExpanded else { return }
+                self.setEmbeddedExpanded(false)
+                // 同步告诉 SwiftUI view 切回 idle 渲染分支
+                NotificationCenter.default.post(
+                    name: .init("HermesPetEmbeddedDismissed"),
+                    object: nil
+                )
+            }
+        }
+    }
+
+    /// PillView 通过 setEmbeddedExpanded closure 通知这里要切到嵌入式聊天形态。
+    /// true → 扩大 panel frame 到 420×280 并 makeKey 让 NSTextView 能输入；
+    /// false → 等 SwiftUI 内容 fade out 完后再缩 panel（避免内容挤爆抖动）
+    ///
+    /// **不对称的展开/缩回时序**（关键 fix）：
+    /// - 展开：立即 setFrame(420×280) → SwiftUI NotchShape `.frame` bouncy spring 从 (260,64) 长到
+    ///   (420,280)，同时 EmbeddedChatPanelView .transition(.opacity) fade in
+    /// - 缩回：先 resignKey → SwiftUI NotchShape 立即开始 bouncy spring 缩回 (260,64) → 等 ~420ms
+    ///   动画完 → 再 setFrame(idleMax)。此时 NotchShape 已 collapse 到 idle 尺寸 + panel 同步到
+    ///   idle 尺寸，视觉上无任何跳变
+    ///
+    /// 关键解耦：NotchShape 用显式 `.frame(width:height:)` + `notchVisualSize` 计算属性，
+    /// 跟 panel.contentView 完全解耦。SwiftUI bouncy spring 接管所有尺寸过渡，
+    /// panel.setFrame 的瞬时跳藏在 NotchShape spring 动画背后用户不可见。
+    func setEmbeddedExpanded(_ expanded: Bool) {
+        guard expanded != isEmbeddedExpanded else { return }
+        isEmbeddedExpanded = expanded
+
+        // ⚠️ **绝对不能**用 `pillWindow.animator().setFrame` 或 `setFrame(_:display:animate:true)`。
+        // 即使换了 NSHostingController + sizingOptions=[] 也不行 —— **实测 2026-05-16 仍崩**：
+        // NSHostingView.updateAnimatedWindowSize 在 CA Transaction commit 期间反推 setFrame
+        // → 嵌套 layout cycle → NSException SIGABRT（CLAUDE.md 决策 #5 #7 第三次踩坑）。
+        // sizingOptions=[] 不能断这条路径，因为 updateAnimatedWindowSize 是 NSHostingView 跟
+        // CA Transaction 在 animator 上下文里的死结，跟 sizingOptions 无关。
+        // **结论：panel.setFrame 永远只用瞬时同步**，视觉平滑靠 SwiftUI 内 NotchShape.cornerRadius
+        // 动画 + 内容元素位置预对齐 + 缩回延迟 setFrame 三层合力达成
+        if expanded {
+            let targetFrame = computeEmbeddedFrame()
+            embeddedTargetFrame = targetFrame
+            // 取消任何 pending 的「延迟缩回」—— 用户 fade out 期间又 hover 回来的边界
+            collapseFrameTask?.cancel()
+            collapseFrameTask = nil
+            pillWindow.setFrame(targetFrame, display: true)
+
+            // 跟灵动岛同区竞争的辅助 overlay 让位 —— 避免视觉叠加
+            ChoiceMenuOverlayController.shared.hide()
+            MiniReplyCardController.shared.hideIfVisible()
+
+            // 主动 makeKey 覆盖 becomesKeyOnlyIfNeeded=true 的限制 —— floatingPanel + nonactivatingPanel
+            // 保证前台 app 不被切换，但 panel 自己拿到 keyboard / IME。
+            // 隔一帧 dispatch 避免跟 setFrame 在同一 layout pass（CLAUDE.md 决策 #5）。
+            // 然后再隔一帧把 firstResponder 设到 NSTextView —— 让用户 hover 进入立刻能打字，
+            // 不必先点输入框。两步分开是因为 SwiftUI mount NSTextView 需要至少 1 runloop tick
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.pillWindow.makeKey()
+                DispatchQueue.main.async { [weak self] in
+                    self?.focusEmbeddedInputField()
+                }
+            }
+        } else {
+            // 立即 resignKey 让 NSTextView 失焦（光标消失），但 panel 几何**先不动**
+            pillWindow.resignKey()
+
+            // 延迟 ~420ms 后再缩 panel —— AnimTok.bouncy(spring 0.42/0.78) 是 NotchShape 收缩用的
+            // spring，response=0.42s 约 380-420ms 接近收敛。等 NotchShape 在 SwiftUI 内 spring
+            // 缩回 idle 尺寸 (260×64) 后，再让 panel.setFrame(idleMax) 跟上 —— 此时两者尺寸一致,
+            // panel 瞬时跳完全无视觉。
+            // 防边界：若用户在 fade out 期间又 hover 回来，isEmbeddedExpanded 会被设回 true,
+            // pending 任务里 `!isEmbeddedExpanded` 检查会跳过缩 panel；下次展开调用还会主动 cancel
+            collapseFrameTask?.cancel()
+            let pendingTargetFrame = idleMaxFrame
+            collapseFrameTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 420_000_000)
+                if Task.isCancelled { return }
+                guard let self = self, !self.isEmbeddedExpanded else { return }
+                self.pillWindow.setFrame(pendingTargetFrame, display: true)
+            }
+        }
+    }
+
+    /// 当前是不是有"未发送的输入内容"。
+    /// hover leave 防抖时用这个判定 —— 用户在写半成品 → 不收；已经 send / 没写过 → 允许收回。
+    ///
+    /// 不再用 "NSTextView 是 firstResponder" 当信号，因为 send 之后 textView 仍 focused 但用户已经发完，
+    /// 用 focus 当锁会让 panel **永不收回**（用户实际反馈的 bug）。inputText 非空才是真正的"用户活跃"信号
+    func hasPendingInput() -> Bool {
+        guard let vm = viewModel else { return false }
+        return !vm.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 计算嵌入式聊天框的目标 frame：宽 420 / 高 280 / **顶部跟 idle 灵动岛同一行**（贴屏顶）。
+    /// 关键：y 用 `idleMaxFrame.maxY - embeddedHeight`，跟 idle 共享顶部锚点 —— 避免独立算 maxY 时
+    /// 系统可能对高 panel 做的 visibleFrame constraint，保证 embedded 跟 idle 顶部齐平。
+    private func computeEmbeddedFrame() -> NSRect {
+        let embeddedWidth: CGFloat = 420
+        let embeddedHeight: CGFloat = 280
+        let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+
+        guard let screen = screen else {
+            // 极端兜底（外接屏全拔了 / NSScreen 全空）
+            return NSRect(x: 0, y: 0, width: embeddedWidth, height: embeddedHeight)
+        }
+
+        let screenFrame = screen.frame
+
+        // 横向：刘海真实中心（auxiliaryTop* 反推），否则 screen midX
+        let centerX: CGFloat
+        if let l = screen.auxiliaryTopLeftArea, let r = screen.auxiliaryTopRightArea {
+            centerX = (l.maxX + r.minX) / 2
+        } else {
+            centerX = screenFrame.midX
+        }
+
+        // 🔑 横向用 idleMaxFrame.origin.x（positionWindow 算好的 idle panel 左边缘），
+        // 保证 idle ↔ embedded 切换时 panel.origin.x 完全不变，避免 setFrame 时 panel 向左跳。
+        // 兜底：idleMaxFrame 还没初始化时，用 centerX - embeddedWidth/2 算（跟 positionWindow 一致）
+        let x = idleMaxFrame.origin.x > 0
+            ? idleMaxFrame.origin.x
+            : centerX - embeddedWidth / 2
+        // 用 idleMaxFrame.maxY 作 panel 顶基准 —— idle 形态是贴顶的（positionWindow 已对齐刘海），
+        // embedded 用同一顶部 → 跟 idle 视觉连续
+        let topY = idleMaxFrame.maxY > 0 ? idleMaxFrame.maxY : screenFrame.maxY
+        let y = topY - embeddedHeight
+        return NSRect(x: x, y: y, width: embeddedWidth, height: embeddedHeight)
     }
 
     // MARK: - Public
@@ -109,8 +337,14 @@ final class DynamicIslandController {
         }()
         let actualNotchHeight: CGFloat = hasNotch ? safeArea.top : 28
 
-        // window 用 hover 最大尺寸，避免 hover 膨胀超出窗口边界产生残影
-        let windowWidth  = actualNotchWidth  + idleExtraWidth
+        // 🔑 panel 始终用 embedded 等宽 (420)，**不让 panel.origin.x 在 embedded 切换时跳变**。
+        // 之前 idle panel 260 宽 / embedded panel 420 宽 → setFrame 时 panel.origin.x 向左跳 80pt,
+        // panel.contentView size 同帧变化但 SwiftUI layout pass 滞后一帧 → NotchShape 在新 panel 内
+        // 旧位置导致屏幕坐标向左偏 80pt（"卡一下"）。
+        // 现在 panel 永远 420 宽，origin.x 固定，只 height 跟 origin.y 变 → 水平方向零跳变。
+        // idle 时 panel 视觉两侧 80pt 是透明区域；用 SwiftUI .contentShape(NotchShape) 把 hit-test
+        // 限制到 NotchShape 视觉路径内，透明区域不响应 hover/click（视觉边界 = 交互边界）。
+        let windowWidth  = max(actualNotchWidth + idleExtraWidth, 420)
         let windowHeight = actualNotchHeight + hoverDrop
 
         // 水平：用「刘海真实中心」对齐
@@ -123,10 +357,12 @@ final class DynamicIslandController {
         let x = notchCenterX - windowWidth / 2
         let y = screenFrame.maxY - windowHeight
 
-        pillWindow.setFrame(
-            NSRect(x: x, y: y, width: windowWidth, height: windowHeight),
-            display: true
-        )
+        let idleFrame = NSRect(x: x, y: y, width: windowWidth, height: windowHeight)
+        self.idleMaxFrame = idleFrame   // 保存供 embedded 退出时 setFrame 回去
+        // 处于 embedded 形态时不要被 positionWindow 拉回 idle —— 让它保持 embedded frame
+        if !isEmbeddedExpanded {
+            pillWindow.setFrame(idleFrame, display: true)
+        }
 
         NotificationCenter.default.post(
             name: .init("HermesPetGeometry"),
@@ -145,13 +381,49 @@ final class DynamicIslandController {
     // MARK: - Actions
 
     @objc private func toggleChat() {
+        if isEmbeddedExpanded {
+            // embedded 形态下点击 panel 空白处 → 收回 embedded + 展开主聊天窗（跟右上角"展开"图标语义一致）。
+            // SwiftUI 子视图（输入框 / SendButton / 右上角展开图标）会优先消费 click，所以这里
+            // 只在用户点击非交互区域（NotchShape 头部贴刘海段、消息气泡留白处等）时触发。
+            // 通知 SwiftUI 切回 idle 渲染分支 + 同步 cancel hoverLeaveTask（避免双重 setEmbeddedExpanded(false)）
+            setEmbeddedExpanded(false)
+            NotificationCenter.default.post(name: .init("HermesPetEmbeddedDismissed"), object: nil)
+            onRequestFullChatWindow?()
+            return
+        }
         onTapped?()
+    }
+
+    /// 递归查 panel 内第一个 NSTextView 并 makeFirstResponder —— 进入 embedded 时让用户直接打字
+    @discardableResult
+    private func focusEmbeddedInputField() -> Bool {
+        guard let root = pillWindow.contentView,
+              let tv = Self.findFirstTextView(in: root) else { return false }
+        return pillWindow.makeFirstResponder(tv)
+    }
+
+    private static func findFirstTextView(in view: NSView) -> NSTextView? {
+        if let tv = view as? NSTextView { return tv }
+        for sub in view.subviews {
+            if let found = findFirstTextView(in: sub) { return found }
+        }
+        return nil
     }
 }
 
 // MARK: - SwiftUI Pill View
 
 struct DynamicIslandPillView: View {
+    /// 由 controller.attach(viewModel:) 注入。`nil` 时嵌入式聊天形态不可用（保护性兜底）
+    var viewModel: ChatViewModel? = nil
+    /// 让 controller 切换 panel frame + makeKey 的回调（hover 500ms 后调 true，离开后调 false）
+    var setEmbeddedExpanded: @MainActor (Bool) -> Void = { _ in }
+    /// embedded 形态右上角图标 → 打开主聊天窗的回调
+    var expandToFullChatWindow: @MainActor () -> Void = {}
+    /// 返回是否有"未发送的输入内容"——hover leave 防抖时跳过收回的信号。
+    /// 比"NSTextView 是 firstResponder"准：send 之后 textView 仍 focused 但 inputText 已清空 → 允许收回
+    var hasPendingInput: @MainActor () -> Bool = { false }
+
     @State private var status: ConnectionStatusDisplay = .unknown
     @State private var isHovering = false
 
@@ -237,6 +509,32 @@ struct DynamicIslandPillView: View {
     // MARK: - o) 5 段音量条实时电平
     @State private var voiceLevel: Float = 0
 
+    // MARK: - hoverCard 增强：最近 AI 回复预览 + 未读后台对话数
+    /// 由 ChatViewModel.broadcastHoverContext 通过 HermesPetHoverContextChanged 推送
+    @State private var latestAssistantPreview: String = ""
+    @State private var unreadConversationCount: Int = 0
+
+    // MARK: - hover 展开三态（off / embedded / chatWindow）
+    /// 从 ChatViewModel.hoverExpandMode 同步。默认 .off（跟 ViewModel.init fallback 一致）。
+    /// 老用户从旧 `hoverExpandChatEnabled: Bool` 迁移：true → .chatWindow，false / 未设置 → .off
+    @State private var hoverExpandMode: HoverExpandMode = {
+        if let raw = UserDefaults.standard.string(forKey: "hoverExpandMode"),
+           let mode = HoverExpandMode(rawValue: raw) {
+            return mode
+        }
+        if let legacy = UserDefaults.standard.object(forKey: "hoverExpandChatEnabled") as? Bool,
+           legacy == true {
+            return .chatWindow
+        }
+        return .off
+    }()
+    /// 500ms 防误触 task —— hover 进入立刻启动；hover 离开 + 未到 500ms → cancel
+    @State private var hoverExpandTask: Task<Void, Never>? = nil
+    /// embedded 形态切换：true = 当前展开为迷你聊天框形态
+    @State private var embeddedActive: Bool = false
+    /// 离开 embedded 形态的 500ms 防抖 task —— 鼠标离开 + 没立刻回来才真收回
+    @State private var hoverLeaveTask: Task<Void, Never>? = nil
+
     /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态都让胶囊"展开"
     private var isExpanded: Bool {
         isHovering || isShowingNotification
@@ -281,13 +579,38 @@ struct DynamicIslandPillView: View {
         isExpanded ? 22 : 14
     }
 
+    /// NotchShape 的视觉尺寸 —— **跟 panel.contentView 解耦**，让 SwiftUI 能独立 spring 动画。
+    ///
+    /// 之前 NotchShape 没有显式 .frame，铺满 panel.contentView → panel.setFrame 瞬时跳那一帧
+    /// NotchShape 视觉尺寸跟着瞬时跳 → 用户看到的不是「岛长出来」而是「panel 突变」。
+    ///
+    /// 现在 NotchShape 用 `.frame(width: notchVisualSize.width, height: notchVisualSize.height)`，
+    /// embeddedActive 切换时这个 CGSize 变化 → SwiftUI bouncy spring 插值 → 视觉是岛"弹性长大/缩回"。
+    /// panel.setFrame 的瞬时跳藏在 NotchShape spring 背后 —— panel 透明区域用户看不到。
+    ///
+    /// - idle / hover: (currentWidth, currentHeight) = (260, 64)
+    /// - embedded: (420, 280)
+    private var notchVisualSize: CGSize {
+        if embeddedActive {
+            return CGSize(width: 420, height: 280)
+        } else {
+            return CGSize(width: currentWidth, height: currentHeight)
+        }
+    }
+
     var body: some View {
         pillBodyWithStateObservers
+            // 用 bouncy(spring 0.42/0.78) 而非 smooth —— bouncy 略弹性 + 持续略长，让
+            // NotchShape 从 idle 长出 embedded 时有"岛在生长"的物理感（iOS 灵动岛设计语义）。
+            // 这条 .animation 同时驱动：NotchShape.size（embeddedActive 切换时 frame 变化）+
+            // NotchShape.cornerRadius（14/22 → 28）+ shadow opacity，三者用同一 spring 同步插值。
+            .animation(AnimTok.bouncy, value: embeddedActive)
             .onHover { hovering in
             // 用 spring 做"流畅过渡"：response 越小越快，dampingFraction 越大越稳重
             withAnimation(.spring(response: 0.38, dampingFraction: 0.82)) {
                 isHovering = hovering
             }
+            handleHoverForExpand(hovering: hovering)
         }
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetScreenshotAdded"))) { note in
             // 取消上次未结束的通知 task，重新计时
@@ -504,9 +827,95 @@ struct DynamicIslandPillView: View {
                 voiceLevel = lvl
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetHoverContextChanged"))) { note in
+            if let p = note.userInfo?["preview"] as? String { latestAssistantPreview = p }
+            if let c = note.userInfo?["unreadCount"] as? Int { unreadConversationCount = c }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetEmbeddedDismissed"))) { _ in
+            // controller 兜底收回（panel didResignKey / toggleChatWindow 等外部路径）：同步切回 idle 渲染
+            embeddedActive = false
+            hoverLeaveTask?.cancel()
+            hoverLeaveTask = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetHoverExpandSettingChanged"))) { note in
+            // 新 payload：userInfo["mode"] = String (HoverExpandMode.rawValue)
+            // 老 payload：userInfo["enabled"] = Bool（向后兼容，迁移期不会触发但留着不影响）
+            if let raw = note.userInfo?["mode"] as? String,
+               let mode = HoverExpandMode(rawValue: raw) {
+                hoverExpandMode = mode
+            } else if let enabled = note.userInfo?["enabled"] as? Bool {
+                hoverExpandMode = enabled ? .chatWindow : .off
+            }
+            if hoverExpandMode == .off {
+                // 关到"不动"时清掉 pending task + 收回 embedded（如果当前展开着）
+                hoverExpandTask?.cancel()
+                hoverExpandTask = nil
+                if embeddedActive {
+                    embeddedActive = false
+                    setEmbeddedExpanded(false)
+                }
+            }
+        }
         .onAppear {
             let hasKey = !(UserDefaults.standard.string(forKey: "apiKey") ?? "").isEmpty
             status = hasKey ? .connected : .unknown
+        }
+    }
+
+    /// hover 500ms 防误触后按 mode 分发：
+    /// - `.off`：什么都不做（保留 hoverCard 预览原有行为）
+    /// - `.embedded`：调 setEmbeddedExpanded(true) 让 controller 把 panel 扩大成迷你聊天框形态
+    /// - `.chatWindow`：post HermesPetHoverExpandRequested，AppDelegate 接住开主聊天窗（原 PR3）
+    private func handleHoverForExpand(hovering: Bool) {
+        guard hoverExpandMode != .off else {
+            hoverExpandTask?.cancel()
+            hoverExpandTask = nil
+            return
+        }
+        if hovering {
+            // 鼠标回到 hover 区 → 取消 pending 的"离开收回"
+            hoverLeaveTask?.cancel()
+            hoverLeaveTask = nil
+
+            hoverExpandTask?.cancel()
+            hoverExpandTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                if Task.isCancelled { return }
+                // 拖放保护：鼠标左键按下 = 用户在拖东西（Finder 文件 / 桌面图标 / 任意 OS 拖放对象），
+                // 此时展开会让 NSDraggingSession 找不到 drop target，
+                // 导致 Finder 拖放状态机卡死（桌面文件后续无法拖动，需 killall Finder 才能恢复）
+                if NSEvent.pressedMouseButtons & 1 != 0 { return }
+
+                switch hoverExpandMode {
+                case .embedded:
+                    guard viewModel != nil else { return }   // 没注入 vm 时降级，啥都不做
+                    embeddedActive = true
+                    setEmbeddedExpanded(true)
+                case .chatWindow:
+                    NotificationCenter.default.post(
+                        name: .init("HermesPetHoverExpandRequested"),
+                        object: nil
+                    )
+                case .off:
+                    break
+                }
+            }
+        } else {
+            hoverExpandTask?.cancel()
+            hoverExpandTask = nil
+            // embedded 形态下：鼠标离开 500ms 后真收回（防抖，让用户能短暂离开胶囊回来）。
+            // 关键：若 viewModel.inputText 仍非空（hasPendingInput），即使鼠标飘走也**不收回**
+            // —— 否则打字到一半窗口消失，体验崩。由 NSWindow.didResignKey 兜底（用户切去别的 app 自动收回）
+            if embeddedActive {
+                hoverLeaveTask?.cancel()
+                hoverLeaveTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    if Task.isCancelled { return }
+                    if hasPendingInput() { return }   // 有未发送的输入 → 跳过收回
+                    embeddedActive = false
+                    setEmbeddedExpanded(false)
+                }
+            }
         }
     }
 
@@ -522,17 +931,98 @@ struct DynamicIslandPillView: View {
 
     // MARK: - 各形态卡片（拆出来让 SwiftUI 编译器能 type-check 大 body）
 
-    /// 胶囊本体 + 截屏闪光叠加 —— 抽出来让 SwiftUI 编译器在 body 里只面对 modifier 链
+    /// 胶囊本体。**关键架构**：NotchShape 用**显式 .frame(width:, height:)**，size 由
+    /// `notchVisualSize` 控制 —— SwiftUI 在 embeddedActive 切换时 bouncy spring 插值这个 size，
+    /// **让"刘海长出聊天框"成为真正的尺寸动画，跟 panel.setFrame 瞬时跳变完全解耦**。
+    ///
+    /// 视觉路径（展开）：
+    ///   1. controller 调 `pillWindow.setFrame(420×280)` 瞬时同步 → panel 跳大但透明区域无视觉
+    ///   2. embeddedActive=true 触发 SwiftUI animation → NotchShape `.frame` 从 (260,64) bouncy
+    ///      spring 长到 (420,280)，cornerRadius 同步 14→28
+    ///   3. 用户看到「岛弹性长大」，panel 几何跳完全藏在动画背后
+    ///
+    /// 视觉路径（收回）：
+    ///   1. embeddedActive=false → NotchShape `.frame` bouncy spring 缩回 (260,64)
+    ///   2. ~420ms 后 controller 调 `pillWindow.setFrame(idleMax)` —— 此时 NotchShape 已收回，
+    ///      panel 跟 NotchShape 大小一致，无视觉跳
+    ///
+    /// 内容层（idleAndHoverContent / EmbeddedChatPanelView）跟 NotchShape 用同样 .frame，
+    /// 配 `.clipShape(NotchShape)` 让内容被裁到形状内。Group 内 if-else 用 .transition(.opacity)
+    /// 做内容切换的 fade。
+    @ViewBuilder
     private var pillBody: some View {
+        // 用 `HStack + Spacer ... NotchShape ... Spacer` + `VStack + ... + Spacer` 标准 layout
+        // 让 NotchShape 水平居中 + 顶对齐。**关键**：Spacer 的宽度是 SwiftUI **layout-time 计算**
+        // 的结果（panel.width - notchSize.width 后均分给两个 Spacer），**不被 .animation 拦截**。
+        //
+        // 之前用 `.position(x: geo.width/2, y: ...)` 或 ZStack(alignment: .top) 都失败：
+        // SwiftUI 的 `.animation(_:value: embeddedActive)` 把 `.position.x` 跟 alignment 计算结果
+        // 当作 animatable CGFloat，一起 spring 插值 → NotchShape size 跳变到 (260,64) 起点的同时
+        // .position.x 还在 spring 中（130→210 半路），结果 NotchShape 中心在 panel 内不是水平居中,
+        // 而是介于两个对齐位置之间 → 用户看到「向左跳一下」。
+        //
+        // Spacer 方案下，layout pass 每帧根据当前 NotchShape size 重新均分剩余宽度，
+        // Spacer 宽度 = (panel.width - notchSize.width) / 2，由 layout 系统瞬时计算 → 严格对称扩张。
+        let activeRadius: CGFloat = embeddedActive ? 28 : currentRadius
+
         VStack(spacing: 0) {
-            ZStack {
-                NotchShape(cornerRadius: currentRadius)
-                    .fill(isInErrorState ? Color(red: 0.55, green: 0.32, blue: 0.05) : Color.black)
-                pillContent
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+
+                ZStack {
+                    // ① NotchShape 背景：size 由 ZStack 的 .frame 决定，spring 插值
+                    NotchShape(cornerRadius: activeRadius)
+                        .fill(isInErrorState ? Color(red: 0.55, green: 0.32, blue: 0.05) : Color.black)
+                        .shadow(color: embeddedActive ? .black.opacity(0.35) : .clear, radius: 18, y: 6)
+
+                    // ② 内容层：跟 NotchShape 同 size + 同 clip
+                    Group {
+                        if embeddedActive, let vm = viewModel {
+                            EmbeddedChatPanelView(
+                                viewModel: vm,
+                                notchHeight: notchHeight,
+                                onExpandToFullWindow: {
+                                    // 用户主动点"展开主聊天窗"图标：先收回 embedded，再让 AppDelegate 开 ChatWindow
+                                    embeddedActive = false
+                                    hoverLeaveTask?.cancel()
+                                    setEmbeddedExpanded(false)
+                                    expandToFullChatWindow()
+                                }
+                            )
+                            .transition(.opacity)
+                        } else {
+                            idleAndHoverContent
+                                .transition(.opacity)
+                        }
+                    }
+                    .clipShape(NotchShape(cornerRadius: activeRadius))
+                }
+                .frame(width: notchVisualSize.width, height: notchVisualSize.height)
+                // 🔑 .contentShape(NotchShape) 限制 hit-test 到视觉路径内 —— panel 现在永远 420 宽,
+                // idle 时两侧 80pt 是透明区域，这里让透明区域不响应 hover/click（视觉=交互边界）。
+                // 同时影响 NSHostingView.hitTest 返回值 → NSClickGestureRecognizer 也只在 NotchShape 区域触发
+                .contentShape(NotchShape(cornerRadius: activeRadius))
+
+                Spacer(minLength: 0)
             }
-            .frame(width: currentWidth, height: currentHeight)
-            .scaleEffect(shutterScale)
-            .overlay { shutterOverlay }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// idle / hover / 工具进度 / 通知 / 错误 等各种形态的胶囊**内容**（不含 NotchShape 背景，由父 pillBody 统一画）。
+    /// 关键：不再用 `ZStack.frame(width: 280, height: 68)` 限制布局 —— 那会让 idle 圆点在 panel.w=280 时
+    /// 在 X=18，panel.w=420（embedded 时 idle 内容 fade out 中）时跳到 X=88（ZStack 居中 70 + leading 18），
+    /// 用户看到圆点"往左跳 70pt"。改成撑满后 idle 内容 leading 18 跟 embedded mode icon leading 14
+    /// 只差 4pt → fade 切换几乎原地完成
+    private var idleAndHoverContent: some View {
+        VStack(spacing: 0) {
+            pillContent
+                .frame(maxWidth: .infinity)
+                .frame(height: currentHeight)
+                .scaleEffect(shutterScale)
+                .overlay { shutterOverlay }
 
             Spacer(minLength: 0)
         }
@@ -675,7 +1165,10 @@ struct DynamicIslandPillView: View {
         .transition(.opacity.combined(with: .scale(scale: 0.94)))
     }
 
-    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名）
+    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名 + 上次 AI 回复预览 + 未读徽章）。
+    /// 关键约束：currentHeight 必须保持 idle vs hover 两档（不能因为 preview 多让出空间），
+    /// 否则 SwiftUI 反推 NSHostingView.updateAnimatedWindowSize → 嵌套 layout 必崩
+    /// （CLAUDE.md 决策 #5 / #7 / issue #3 反复踩过）。preview 用 overlay 不参与 layout
     private var hoverCard: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: notchHeight)
@@ -690,8 +1183,42 @@ struct DynamicIslandPillView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .tracking(0.3)
+                if unreadConversationCount > 0 {
+                    Text("·\(unreadConversationCount) 未读")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.orange.opacity(0.20)))
+                }
             }
             .frame(maxHeight: .infinity)
+        }
+        .overlay(alignment: .bottom) {
+            // preview overlay —— 不参与 SwiftUI layout（关键！防嵌套 layout 崩），
+            // 自带黑底胶囊作为视觉容器，offset 推到 hoverCard 下方约 24pt 位置
+            if !latestAssistantPreview.isEmpty {
+                Text(latestAssistantPreview)
+                    .font(.system(size: 10, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 3)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.85))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+                    )
+                    .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: currentWidth - 20)
+                    .offset(y: 22)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
         .transition(.opacity.combined(with: .scale(scale: 0.94)))
     }

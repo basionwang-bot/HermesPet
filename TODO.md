@@ -1,5 +1,14 @@
 # HermesPet 优化路线图
 
+## [Review] 2026-05-16 hover trinity 10 人评审 + 修复 ✅
+- [x] 10 个并行 reviewer 审查本分支 (feat/mini-reply-card) 全部新增/改动
+- [x] R1 MiniReplyCardController（新文件 333 行）/ R2 hover 进出判定 / R3 ChatViewModel / R4 AppDelegate / R5 Swift 6 并发 / R6 ChatComponents IME / R7 ChoiceMenuOverlay / R8 CLIAvailability+Settings / R9 内存泄漏 / R10 编译验证
+- [x] 真实修复 2 处：
+  - ChatWindowController Esc handler 去掉冗余 `Task { @MainActor in }` 包装（类已 @MainActor，省 1 runloop hop）
+  - MiniReplyCardController.show() 的 16ms insertion task 现在存到 `insertionTask` 字段，快速重复 show / hideNow 时先 cancel，避免两个 task 都翻 isVisible
+- [x] 误报排查：R2 三个 Critical（hoverExitHideTask race / gap geometry / NSApp.windows）均基于"@MainActor 非串行"错误前提；R9 两个 HIGH（singleton observer 永不 remove）agent 自承认"singleton 永驻无害"
+- [x] 编译 + install.sh 全绿，PID 15514 启动验证
+
 ## [P0] 界面体验 ✅
 - [x] Markdown 渲染：标题、粗体、斜体、行内代码、链接
 - [x] **Markdown GFM 表格渲染** —— `MarkdownRenderer` 加 `Block.table` + `TableBlockView`（SwiftUI Grid 列宽自动对齐）。解析支持 `:--/--/-:/:-:` 列对齐符；表头加底色+加粗+底部 hairline、隔行底色、行间细线、单元格内复用 InlineMarkdownView（bold/italic/code/link 全部生效）、长内容自动换行不横滚。流式期间至少 header+separator 两行齐了才进入表格识别，避免半截被错位渲染。空 cell 用 `Text(" ")` 占位防列塌缩
@@ -59,6 +68,7 @@
 ---
 
 ## [P0-Bug] 🔥 优先修的 Bug
+- [x] **CPU 100% 卡死全面修复**（2026-05-16）—— 10 人审查团队 R1+R2 + lead 实证 sample 文件，根因锁定 ClawdWalk 30Hz Timer→setFrameOrigin→跨进程 XPC fence + AppDelegate 启动 16 服务对称率 31%。一次性修 6 处：(1) ClawdWalkOverlay 加 `setWindowOriginIfNeeded` helper，5 处 setFrameOrigin 改用 deltaPos<0.5pt 跳帧（保 30Hz 视觉、消 ~60% 跨进程 XPC fence）；(2) ClawdWalk Timer closure `Task { @MainActor in self?.tick() }` 改 `MainActor.assumeIsolated { self?.tick() }`（省 30 Task/秒 spawn）；(3) AppDelegate.applicationWillTerminate 补 iconTimer.invalidate / MouseTracking.stop / IdleStateTracker.stop / 2 个 removeObserver；(4) ChatViewModel.checkConnection 4 case 合并成单个 connectionCheckTask 句柄 + [weak self]，每次调用前 cancel 上次（消 5s 轮询堆积）；(5) MarkdownTextView parseBlocks 加 NSCache by content（countLimit=100），消流式 30fps 全文 re-parse；(6) APIClient.watchdog sleep 后立即 `if Task.isCancelled { return }`，避免 sleep 期间被 cancel 还继续 await。Sample 实证 `_setFrameCommon` 主线程帧从 26→10（-62%）+ WMClient XPC 3→1（-33%）。R1 同时证伪 5 个 false alarm（A#2 layout cycle 回归、A#6 ForEach diff、C#2 errorMessage dead state、D#3 Key 隔离、A#1 MouseTracking idle 主因）
 - [x] **errorMessage 没显示到 UI** —— 加了顶部 ErrorToast，3.5s 自动消失，可手动 ×
 - [x] **截图前隐藏窗口的 250ms 硬编码** —— sleep 缩到 50ms（alphaValue=0 是即时变化，CALayer 一帧 commit + 余量足够），慢电脑也更稳
 - [x] **GlobalHotkey 注册失败检测** —— RegisterEventHotKey 返回值检查，被占用时灵动岛弹通知告知具体哪个热键失败
@@ -94,6 +104,10 @@
 
 ## [P1-体验] 体验型升级
 
+- [x] **Hover 体验三件套**（2026-05-16）—— 用户提议"hover 灵动岛自动展开聊天框"。调研后判断完整 hover 自动展聊天窗有崩溃风险（CLAUDE.md 决策 #5 跨窗口 setFrame 嵌套 layout，过去半年的 [P0-Bug] 里约 1/3 跟这个相关）+ HIG 反模式（hover 触发主交互）+ macOS 顶部高鼠标流量误展开。跟用户对齐后分三层落地：
+  - **默认始终生效（PR1：hoverCard 增强）** —— `DynamicIslandController.hoverCard` 在原 mode 图标 + 状态点 + 模型名基础上，加最近一条 AI 回复预览（60 字截断，markdown 已 strip 通过 `ChatViewModel.stripMarkdownForPreview`）+ 未读后台对话数胶囊。`ChatViewModel.broadcastHoverContext()` 在 TaskFinished / switchConversation / newConversation / init 末尾 post `HermesPetHoverContextChanged` 携带 `preview` + `unreadCount`。View 端 @State 缓存。**hotfix（2026-05-16）**：第一版让 `currentHeight` 在 hover+preview 时多让 22pt → SwiftUI 反推 NSHostingView.updateAnimatedWindowSize → 嵌套 layout SIGABRT（CLAUDE.md 决策 #5/#7 同一类坑）。改成 preview 用 **`.overlay(alignment: .bottom)` 不参与 SwiftUI layout** + offset y=22 推到 hoverCard 下方 + 自带黑底胶囊作视觉容器，`currentHeight` 完全恢复原状
+  - **任务完成迷你卡片（PR2：MiniReplyCardController）** —— 新建 `Sources/MiniReplyCardController.swift`（照搬 ClawdBubbleOverlayController 模式：独立 NSWindow + canBecomeKey=false + level=auxiliary）。订阅 `HermesPetTaskFinished`（新增 `conversationID` / `isActive` / `preview` / `mode` userInfo），仅 `success && isActive && !preview.isEmpty && !chatWindow.isVisible` 四个门禁同时满足才弹。320×150pt 卡片在灵动岛正下方，3.5s 自动淡出（hover 暂停淡出 → 离开 1.5s 后继续）。"展开聊天"按钮 = 打开聊天窗 + 立即收卡片；"复制"按钮 = 复制 preview + "已复制"反馈
+  - **Hover 展开聊天窗（PR3：opt-in 开关）** —— ChatViewModel 加 `hoverExpandChatEnabled` UserDefaults 持久化字段（默认 false）；SettingsView 桌宠 section 加 toggle。`DynamicIslandPillView.handleHoverForExpand` 500ms 防误触 task：hover 进入启动，hover 离开 cancel，500ms 到 post `HermesPetHoverExpandRequested`。`ChatWindowController.show(near:hoverMode:)` 加 `hoverMode` 参数，hoverMode=true 时装 `NSEvent.addLocalMonitorForEvents` 监听 Esc → hide；`windowDidResignKey` 仅在 hoverMode 时通过 `DispatchQueue.main.async` 异步 hide（CLAUDE.md 决策 #5 跨窗口 setFrame 安全）；hide() 总是重置 isInHoverMode=false + 卸载 key monitor。⌘⇧H / 单击灵动岛走原 toggle 通道，hoverMode=false，不受 focus 锁定影响
 - [x] **按住语音时实时显示识别字幕** —— 新建 VoiceTranscriptOverlayController（独立 NSWindow），订阅 HermesPetVoiceStarted/Partial/Finished/Cancelled；灵动岛下方约 18pt 浮一个 ultraThinMaterial Capsule 显示"🎙 正在听… / 实时识别文字"，宽度按字数自适应（220~700pt）。让用户按住时就能确认说没说对，不必等松手
 - [x] **键盘快捷键**：`⌘N` 新对话 / `⌘[` 上一对话 / `⌘]` 下一对话 / `⌘1/2/3` 直达序号 / `⌘⌫` 关闭对话（⌘W 留给关窗口）
 - [ ] 跨对话搜索历史消息

@@ -43,6 +43,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 灵动岛胶囊
         let island = DynamicIslandController()
+        // 注入 vm **先于** show()：替换 hostingView.rootView 会让 SwiftUI @State 全部重置（status/工具进度/shutter/...）
+        // 要是先 show 再 attach，用户会看到 ~一帧的"初始 idle 状态"闪现 → 视觉抖动
+        island.attach(viewModel: vm)
         island.show()
         island.onTapped = { [weak self] in
             // 错误态（连接断开）下点击灵动岛 → 顺便重新检测一次连接，再打开聊天
@@ -52,7 +55,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             self?.toggleChatWindow()
         }
+        // 嵌入式聊天框右上角"展开主聊天窗"按钮 + embedded panel 空白处点击 → 开 ChatWindow（hover 模式）。
+        // 走 hoverMode: true → 主聊天窗失焦 / 鼠标离开后自动收回，跟"hover 灵动岛 500ms 触发主窗"
+        // 用同一套生命周期：用户从灵动岛/embedded 流来的窗口都是"暂时性的"，鼠标离开就该消失，
+        // 跟 ⌘⇧H 主动呼出的"持久窗口"区分开（后者只有用户再次 ⌘⇧H / 点关闭才消失）
+        island.onRequestFullChatWindow = { [weak self] in
+            self?.toggleChatWindow(hoverMode: true)
+        }
         self.islandController = island
+
+        // 给聊天窗注入"灵动岛 frame 提供器" —— hover 模式下判断鼠标在 island + chat 连通区
+        // 用 closure 而非直接持有 island 引用，避免 retain cycle
+        chatWindow?.islandFrameProvider = { [weak island] in
+            island?.pillWindow.frame
+        }
 
         // 菜单栏图标：左键切换窗口，右键弹菜单（含"退出"）
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -116,6 +132,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 灵动岛下方选项菜单 —— AI 输出编号列表时弹出，让用户从灵动岛位置直接选
         _ = ChoiceMenuOverlayController.shared
 
+        // 任务完成后灵动岛下方弹出的「迷你回复预览卡片」
+        // 仅 active 对话完成 + 聊天窗未显示 时才弹，避免跟后台 ConversationPill 呼吸光线重复透出
+        MiniReplyCardController.shared.chatWindowIsVisible = { [weak self] in
+            self?.chatWindow?.isVisible ?? false
+        }
+        MiniReplyCardController.shared.onOpenChat = { [weak self] in
+            guard let self = self else { return }
+            if self.chatWindow?.isVisible == true { return }
+            self.toggleChatWindow()
+        }
+
         // 桌面 Pin 卡片 —— 启动时恢复已持久化的 pin 到屏幕右上角
         // 双击 pin → 转新对话（注入 ChatViewModel 入口）
         PinCardController.shared.onOpenInChat = { [weak vm] pin in
@@ -158,6 +185,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: .init("HermesPetOpenChatRequested"),
             object: nil
         )
+
+        // hover 灵动岛 500ms 后请求"主开 ChatWindow"（仅 hoverExpandMode == .chatWindow 时触发）。
+        // mode 路由在 DynamicIslandPillView.handleHoverForExpand 完成；embedded mode 完全由 island 内部处理，
+        // 不走这条通知（island 直接 setEmbeddedExpanded 改 panel frame，AppDelegate 不参与）
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleHoverExpandRequested(_:)),
+            name: .init("HermesPetHoverExpandRequested"),
+            object: nil
+        )
     }
 
     /// App 退出前：杀掉所有还在跑的 Claude/Codex 子进程，避免僵尸进程
@@ -180,6 +217,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 已显示则不重复打开（toggle 会反向收起），只在隐藏时才呼出
         if chatWindow?.isVisible == true { return }
         toggleChatWindow()
+    }
+
+    /// hover 灵动岛 500ms 后展开聊天窗（hoverMode=true）。
+    /// 仅当 hoverExpandMode == .chatWindow 时此通知会被 PillView post —— 这里加 guard 防御未来误触
+    @objc private func handleHoverExpandRequested(_ note: Notification) {
+        // 防御：mode 不是 chatWindow 不应处理（PillView 内已分支，这里是双保险）
+        guard viewModel?.hoverExpandMode == .chatWindow else { return }
+        guard chatWindow?.isVisible != true else { return }
+        if let vm = viewModel, case .disconnected = vm.connectionStatus {
+            vm.checkConnection()
+        }
+        // 若 mini card 正悬浮，hover 展开聊天窗时立刻收掉 —— 避免双显示
+        MiniReplyCardController.shared.hideIfVisible()
+        let anchor: NSView? = islandController?.pillWindow.contentView ?? statusItem?.button
+        chatWindow?.show(near: anchor, hoverMode: true)
     }
 
     /// AI 回复完成时的音效反馈（跟按住语音的 "duang" 区分）
@@ -263,10 +315,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func toggleChatWindow() {
+    /// 切换主聊天窗显示状态。
+    /// - Parameter hoverMode: true → 主聊天窗失焦 / 鼠标离开自动收回（embedded / hover 灵动岛流的入口用）；
+    ///   false（默认）→ 持久窗口，只有用户主动 ⌘⇧H / 点关闭才消失（⌘⇧H / 菜单栏 / Clawd 点击用）
+    private func toggleChatWindow(hoverMode: Bool = false) {
         // 锚点优先用灵动岛胶囊（首次显示时定位用），其次菜单栏按钮
         let anchor: NSView? = islandController?.pillWindow.contentView ?? statusItem?.button
-        chatWindow?.toggle(near: anchor)
+        // 若 mini card 正悬浮（任务完成后弹的预览），打开聊天窗时立刻收掉 —— 避免双显示
+        if chatWindow?.isVisible == false {
+            MiniReplyCardController.shared.hideIfVisible()
+        }
+        // 若灵动岛正处于嵌入式聊天形态，也收回 —— 主聊天窗弹出时不允许两个聊天界面并存
+        islandController?.setEmbeddedExpanded(false)
+        NotificationCenter.default.post(name: .init("HermesPetEmbeddedDismissed"), object: nil)
+        // hoverMode 只在"开窗"时有意义；如果已显示走 hide()（不区分 mode）
+        if chatWindow?.isVisible == true {
+            chatWindow?.hide()
+        } else {
+            chatWindow?.show(near: anchor, hoverMode: hoverMode)
+        }
     }
 
     // MARK: - 语音输入（push-to-talk）

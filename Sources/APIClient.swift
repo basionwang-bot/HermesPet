@@ -224,6 +224,7 @@ final class APIClient: @unchecked Sendable {
             let watchdog = Task { [task] in
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if Task.isCancelled { return }  // sleep 期间被 cancel 立即退出，避免再 await idleSeconds
                     let idle = await clock.idleSeconds()
                     if idle > Self.streamIdleTimeoutSeconds {
                         await clock.markTimedOut()

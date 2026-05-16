@@ -674,6 +674,43 @@ struct SettingsView: View {
 
             Divider()
 
+            // 鼠标悬停灵动岛 500ms 的行为 —— 三选一 Picker（off / embedded / chatWindow）
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: "cursorarrow.rays")
+                        .foregroundStyle(.indigo)
+                        .frame(width: 18)
+                    Text("鼠标悬停灵动岛")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Picker("", selection: $viewModel.hoverExpandMode) {
+                        ForEach(HoverExpandMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+                Text(viewModel.hoverExpandMode.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 26)
+                    .fixedSize(horizontal: false, vertical: true)
+                if viewModel.hoverExpandMode == .embedded {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("• 焦点临时给到灵动岛，不会切走当前 app")
+                        Text("• 鼠标离开 500ms 后自动收回（打字途中不收）")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary.opacity(0.75))
+                    .padding(.leading, 26)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Divider()
+
             VStack(alignment: .leading, spacing: 8) {
                 Label("交互", systemImage: "hand.tap")
                     .font(.system(size: 12, weight: .medium))

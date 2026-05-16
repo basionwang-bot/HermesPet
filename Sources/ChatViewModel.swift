@@ -209,6 +209,21 @@ final class ChatViewModel {
             ActivityRecorder.shared.setRunning(activityRecordingEnabled)
         }
     }
+    /// Hover 灵动岛 500ms 后的展开行为，三选一（HoverExpandMode）：
+    /// - `.off`：不动（默认）
+    /// - `.embedded`：胶囊本身扩展成迷你聊天框（融进刘海）
+    /// - `.chatWindow`：自动展开主聊天窗（NSWindow，原 PR3 行为，鼠标离开 / Esc / 失焦收回）
+    /// 老用户从旧 `hoverExpandChatEnabled: Bool` 迁移：true → .chatWindow（保留行为），false/未设置 → .off
+    var hoverExpandMode: HoverExpandMode {
+        didSet {
+            UserDefaults.standard.set(hoverExpandMode.rawValue, forKey: "hoverExpandMode")
+            NotificationCenter.default.post(
+                name: .init("HermesPetHoverExpandSettingChanged"),
+                object: nil,
+                userInfo: ["mode": hoverExpandMode.rawValue]
+            )
+        }
+    }
     /// 每天早报由哪个 AI 后端生成 —— 用户在设置里固定选一个，不跟随当前对话 mode
     /// （早报涉及隐私汇总，让用户对哪家服务商看到这些数据有明确控制）
     var morningBriefingBackend: AgentMode {
@@ -279,6 +294,18 @@ final class ChatViewModel {
         self.clawdDesktopPatrolEnabled = UserDefaults.standard.bool(forKey: "clawdDesktopPatrolEnabled")
         // activityRecordingEnabled 默认 true（首次会弹 Accessibility 权限框，用户可在设置里关）
         self.activityRecordingEnabled = (UserDefaults.standard.object(forKey: "activityRecordingEnabled") as? Bool) ?? true
+        // hoverExpandMode 默认 **.off** —— 自动展开是可选范式，默认关闭以保留传统点击交互。
+        // 迁移规则：新 key "hoverExpandMode" 存在则直接用；否则看老 key "hoverExpandChatEnabled"：
+        // - 老 true  → .chatWindow（保留原 PR3 行为，老用户毫无察觉地继续用）
+        // - 老 false / 不存在 → .off（新用户首次见到 = 不动）
+        if let raw = UserDefaults.standard.string(forKey: "hoverExpandMode"),
+           let mode = HoverExpandMode(rawValue: raw) {
+            self.hoverExpandMode = mode
+        } else if let legacy = UserDefaults.standard.object(forKey: "hoverExpandChatEnabled") as? Bool {
+            self.hoverExpandMode = legacy ? .chatWindow : .off
+        } else {
+            self.hoverExpandMode = .off
+        }
         // 早报后端默认 Hermes（自托管/隐私零风险），用户可改
         let savedBriefing = UserDefaults.standard.string(forKey: "morningBriefingBackend")
         self.morningBriefingBackend = AgentMode(rawValue: savedBriefing ?? "") ?? .hermes
@@ -312,6 +339,9 @@ final class ChatViewModel {
 
         // Start status polling
         startStatusPolling()
+
+        // 初次广播 hoverContext，让灵动岛 hoverCard 启动后立刻有"上次 AI 回复预览"
+        broadcastHoverContext()
 
         // 监听灵动岛选项下拉菜单的选中事件 → 把选项作为新消息发送
         NotificationCenter.default.addObserver(
@@ -784,17 +814,45 @@ final class ChatViewModel {
             self.tasksByConversation[targetConversationID] = nil
 
             self.storage.saveConversations(self.conversations)
-            // 通知灵动岛右耳：成功 → 播放对勾动画；失败/取消 → 静默回 idle
+            // 通知灵动岛右耳：成功 → 播放对勾动画；失败/取消 → 静默回 idle。
+            // 额外携带 conversationID / isActive / preview / mode 给 MiniReplyCardController：
+            // 它仅在 (success && isActive && !preview.isEmpty && !chatWindow.isVisible) 时弹卡片
+            let assistantPreview: String = {
+                if let idx = self.conversations.firstIndex(where: { $0.id == targetConversationID }),
+                   let msg = self.conversations[idx].messages.first(where: { $0.id == assistantMessageID }) {
+                    // mini card 是多行卡片（lineLimit(3)），保留 \n 让 markdown 列表分行显示，
+                    // 否则"1. xxx\n2. yyy"会被挤成"1. xxx 2. yyy"挤一坨。
+                    // 把连续空行压成单个 \n 避免 AI 回复里的双换行浪费 mini card 行数
+                    let cleaned = Self.stripMarkdownForPreview(msg.content)
+                        .replacingOccurrences(of: #"\n{2,}"#, with: "\n", options: .regularExpression)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return String(cleaned.prefix(220))
+                }
+                return ""
+            }()
+            let convMode: String = {
+                if let idx = self.conversations.firstIndex(where: { $0.id == targetConversationID }) {
+                    return self.conversations[idx].mode.rawValue
+                }
+                return self.lastUsedMode.rawValue
+            }()
             NotificationCenter.default.post(
                 name: .init("HermesPetTaskFinished"),
                 object: nil,
-                userInfo: ["success": didSucceed]
+                userInfo: [
+                    "success": didSucceed,
+                    "conversationID": targetConversationID,
+                    "isActive": targetConversationID == self.activeConversationID,
+                    "preview": assistantPreview,
+                    "mode": convMode
+                ]
             )
             // 任务成功完成 → 给个轻触觉提示（不打扰，只是"做完了"的回执感）
             if didSucceed {
                 Haptic.tap(.alignment)
             }
             self.broadcastBackgroundStreamingCount()
+            self.broadcastHoverContext()
             // 当前 task 结束 → 检查排队队列，dequeue 下一个
             self.dequeueNextStreamIfAny()
         }
@@ -1059,6 +1117,7 @@ final class ChatViewModel {
             userInfo: ["mode": resolved.rawValue]
         )
         checkConnection()
+        broadcastHoverContext()
         return true
     }
 
@@ -1133,6 +1192,7 @@ final class ChatViewModel {
         checkConnection()
         // 活跃对话变化 → 后台流式数会跟着变
         broadcastBackgroundStreamingCount()
+        broadcastHoverContext()
     }
 
     /// 后台（即不是当前激活）流式中的对话数量。灵动岛右耳显示这个角标
@@ -1145,6 +1205,48 @@ final class ChatViewModel {
             object: nil,
             userInfo: ["count": count]
         )
+    }
+
+    /// 灵动岛 hoverCard 的上下文：当前激活对话最近一条 AI 回复预览 + 未读后台对话数。
+    /// 在 TaskFinished / switchConversation / newConversation 等时机调用，让 hover 展开时
+    /// 能直接看到"上一条 AI 说了啥"+"还有几个对话等着看"，不必打开聊天窗
+    func broadcastHoverContext() {
+        let preview: String = {
+            guard let active = conversations.first(where: { $0.id == activeConversationID }) else { return "" }
+            for msg in active.messages.reversed() where msg.role == .assistant {
+                let cleaned = Self.stripMarkdownForPreview(msg.content)
+                    .replacingOccurrences(of: "\n", with: " ")
+                    .trimmingCharacters(in: .whitespaces)
+                if !cleaned.isEmpty {
+                    return String(cleaned.prefix(60))
+                }
+            }
+            return ""
+        }()
+        let unreadCount = conversations
+            .filter { $0.hasUnread && $0.id != activeConversationID }
+            .count
+        NotificationCenter.default.post(
+            name: .init("HermesPetHoverContextChanged"),
+            object: nil,
+            userInfo: ["preview": preview, "unreadCount": unreadCount]
+        )
+    }
+
+    /// 把 markdown 简化为纯文本，给灵动岛 hoverCard 和 MiniReplyCard 当预览用 ——
+    /// 不去做完整 markdown 解析（那是 MarkdownRenderer 的活），只剥掉常见标记符号：
+    /// `**bold**` / `*italic*` / `` `code` `` / `[text](url)` / `# heading` / 代码栅栏 ```
+    static func stripMarkdownForPreview(_ s: String) -> String {
+        var out = s
+        out = out.replacingOccurrences(of: "```", with: "")
+        out = out.replacingOccurrences(of: #"\*\*([^\*]+)\*\*"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"__([^_]+)__"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"(?<!\*)\*([^\*\n]+)\*(?!\*)"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"(?<!_)_([^_\n]+)_(?!_)"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"`([^`\n]+)`"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"!?\[([^\]]+)\]\([^\)]+\)"#, with: "$1", options: .regularExpression)
+        out = out.replacingOccurrences(of: #"^#+\s+"#, with: "", options: [.regularExpression, .anchored])
+        return out
     }
 
     /// 手动重命名对话（右键胶囊 → 重命名）

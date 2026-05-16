@@ -16,6 +16,11 @@ final class ChoiceMenuOverlayController {
     private let viewState = ChoiceMenuState()
     private var autoHideTask: Task<Void, Never>?
 
+    /// 给 MiniReplyCardController 判断"当前是否有选项菜单在显示"。
+    /// 有的话 mini card 应该让位 —— 因为选项菜单是更直接的交互（点了就发送），
+    /// 而 mini card 只是预览 + "展开聊天"，重叠没意义
+    var isShowing: Bool { viewState.isVisible }
+
     private init() {
         registerNotifications()
     }
