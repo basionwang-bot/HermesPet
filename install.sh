@@ -39,6 +39,16 @@ if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
     done
 fi
 
+# v1.2.0+：HermesPet 退出后，bundled opencode server 子进程可能仍在跑
+# （SIGTERM 主进程时 applicationWillTerminate 不一定被 OS 派发够时间完成 cleanup）。
+# 显式清理一下，避免旧 server + 新 server 同时跑导致端口和 SQLite 写冲突。
+# 注意：只清理跑在 HermesPet bundled 路径下的 opencode，不杀用户手动装的 ~/.opencode/
+if pgrep -af "Application Support/HermesPet/bin/opencode" >/dev/null 2>&1; then
+    echo "🧹 清理旧 opencode server 子进程..."
+    pkill -f "Application Support/HermesPet/bin/opencode" || true
+    sleep 0.4
+fi
+
 # 3. 覆盖安装到 /Applications
 echo "📦 安装到 $TARGET..."
 rm -rf "$TARGET"

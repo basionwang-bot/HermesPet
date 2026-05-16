@@ -12,6 +12,14 @@ struct ChatView: View {
     private static let messagesScrollSpace = "HermesPetMessagesScroll"
     private static let messagesBottomAnchorID = "HermesPetMessagesBottomAnchor"
 
+    /// 新建画布的 Sheet 控制（点 + 菜单"新建画布"时打开）
+    @State private var showCanvasCreator = false
+
+    /// 当前激活对话是否是画布类型 —— 决定主区域渲染 CanvasView 还是 messagesView
+    private var isActiveCanvas: Bool {
+        viewModel.conversations.first(where: { $0.id == viewModel.activeConversationID })?.kind == .canvas
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -19,8 +27,12 @@ struct ChatView: View {
 
             Divider()
 
-            // Messages
-            messagesView
+            // 主区域：画布 OR 消息列表
+            if isActiveCanvas {
+                CanvasView(viewModel: viewModel, conversationID: viewModel.activeConversationID)
+            } else {
+                messagesView
+            }
 
             // Input —— 自带 hairline 分割 + 渐变背景，不再需要 Divider
             ChatInputField(
@@ -52,6 +64,15 @@ struct ChatView: View {
         .animation(AnimTok.smooth, value: viewModel.errorMessage)
         // 隐藏按钮组：承载键盘快捷键，不参与视觉
         .background { keyboardShortcutsLayer }
+        // 新建画布的 Sheet —— 让用户选模板 + 填主题 + 上传产品参考图
+        .sheet(isPresented: $showCanvasCreator) {
+            CanvasCreatorSheet { template, topic, refImages in
+                viewModel.createCanvasConversation(template: template, topic: topic, referenceImageURLs: refImages)
+                showCanvasCreator = false
+            } onCancel: {
+                showCanvasCreator = false
+            }
+        }
         // 全窗口拖拽接收 —— 图片走 pendingImages，文档只附加路径（Claude/Codex 自己 Read）
         .onDrop(of: DragDropUtil.acceptedUTTypes, isTargeted: $isDropTargeted) { providers in
             DragDropUtil.handleProviders(
@@ -136,19 +157,21 @@ struct ChatView: View {
 
     private var headerView: some View {
         HStack(spacing: 4) {
-            // mode 切换：仅当当前对话还没发过 user 消息时可点；
-            // 已发过 → 锁死显示当前 mode，提示用户新建对话切换
-            ModeSwitcherButton(
-                mode: viewModel.agentMode,
-                tint: headerTint,
-                isLocked: currentConversationLocked,
-                onTap: viewModel.toggleAgentMode,
-                onLockedTap: {
-                    // 已锁定时点一下 → 用 errorMessage toast 提示用户新建对话；
-                    // 比 disabled 状态的"什么也没发生"友好
-                    viewModel.errorMessage = "这个对话已锁定为 \(viewModel.agentMode.label)；想换模型请新建对话。"
-                }
-            )
+            // 画布对话：显示混合模式标签（规划走在线 AI，生图走 Codex），不可切换
+            // 普通对话：显示 ModeSwitcherButton 可切 hermes / directAPI / claudeCode / codex
+            if isActiveCanvas {
+                CanvasModeBadge(tint: headerTint)
+            } else {
+                ModeSwitcherButton(
+                    mode: viewModel.agentMode,
+                    tint: headerTint,
+                    isLocked: currentConversationLocked,
+                    onTap: viewModel.toggleAgentMode,
+                    onLockedTap: {
+                        viewModel.errorMessage = "这个对话已锁定为 \(viewModel.agentMode.label)；想换模型请新建对话。"
+                    }
+                )
+            }
 
             // 对话胶囊：最多 3 个，可切换 / 新建 / 关闭 / 右键重命名
             ConversationPills(
@@ -159,6 +182,7 @@ struct ChatView: View {
                 onSelect: { viewModel.switchConversation(to: $0) },
                 onClose: { viewModel.closeConversation(id: $0) },
                 onAdd: { viewModel.newConversation() },
+                onAddCanvas: { showCanvasCreator = true },
                 onRename: { id, newTitle in viewModel.renameConversation(id: id, to: newTitle) }
             )
             .padding(.leading, 2)
@@ -651,6 +675,7 @@ struct ConversationPills: View {
     let onSelect: (String) -> Void
     let onClose: (String) -> Void
     let onAdd: () -> Void
+    let onAddCanvas: () -> Void
     let onRename: (String, String) -> Void
 
     var body: some View {
@@ -674,7 +699,7 @@ struct ConversationPills: View {
                         .id(conv.id)
                     }
                     if canAddMore {
-                        AddPillButton(onAdd: onAdd)
+                        AddPillButton(onAdd: onAdd, onAddCanvas: onAddCanvas)
                     }
                 }
                 .padding(.vertical, 2)   // 留点空间给底部发光线和未读红点不被裁
@@ -822,30 +847,92 @@ struct ConversationPill: View {
 }
 
 struct AddPillButton: View {
+    /// 单击：新建普通对话；画布模式开启时弹菜单可选画布
     let onAdd: () -> Void
+    let onAddCanvas: () -> Void
     @State private var isHovering = false
+    /// 画布模式是实验性功能，默认隐藏；用户在设置→系统→实验性功能里打开后才显示"新建画布"
+    @AppStorage("canvasModeEnabled") private var canvasModeEnabled: Bool = false
     private let pillDiameter: CGFloat = 18
 
     var body: some View {
-        Button(action: onAdd) {
-            Image(systemName: "plus")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: pillDiameter, height: pillDiameter)
-                .background(
-                    Capsule()
-                        .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
-                )
-                .overlay(
-                    Capsule()
-                        .stroke(Color.primary.opacity(0.18), lineWidth: 0.5)
-                )
+        Group {
+            if canvasModeEnabled {
+                Menu {
+                    Button {
+                        onAdd()
+                    } label: { Label("新建对话", systemImage: "message") }
+                    Button {
+                        onAddCanvas()
+                    } label: { Label("新建画布", systemImage: "rectangle.3.group") }
+                } label: { plusIcon }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("新建（对话 / 画布）")
+            } else {
+                // 画布关闭时退化成简单按钮：点一下直接新建对话，不弹菜单
+                Button(action: onAdd) { plusIcon }
+                    .buttonStyle(.plain)
+                    .help("新建对话")
+            }
         }
-        .buttonStyle(.plain)
-        .help("新建对话（最多 3 个）")
         .onHover { hovering in
             withAnimation(AnimTok.snappy) { isHovering = hovering }
         }
+    }
+
+    private var plusIcon: some View {
+        Image(systemName: "plus")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: pillDiameter, height: pillDiameter)
+            .background(
+                Capsule()
+                    .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.primary.opacity(0.18), lineWidth: 0.5)
+            )
+    }
+}
+
+// MARK: - 画布模式 Badge（混合：规划用在线 AI，生图用 Codex）
+//
+// 画布对话本质是"混合 mode"，单一 mode 字段表达不准。这个 badge 明确告诉用户：
+// - 这是画布工作区（不是普通聊天）
+// - 文字规划用在线 AI（速度 + 中文好）
+// - 图片生成用 Codex（GPT Image 2 中文渲染好）
+
+struct CanvasModeBadge: View {
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "rectangle.3.group.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.indigo)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("画布")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text("在线 AI · Codex")
+                    .font(.system(size: 8, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            Capsule()
+                .fill(Color.indigo.opacity(0.10))
+        )
+        .overlay(
+            Capsule()
+                .stroke(Color.indigo.opacity(0.25), lineWidth: 0.5)
+        )
+        .help("画布工作区 · 规划用在线 AI，图片生成走 Codex（GPT Image 2）")
     }
 }
 

@@ -64,7 +64,11 @@ struct ProviderPreset: Identifiable, Hashable {
     }
 
     /// 预设列表 —— 顺序就是 UI 上 Picker 显示的顺序。
-    /// 模型字符串以 2026-05 各家官方文档为准。
+    /// 模型字符串以 2026-05 各家官方 GET /models 实测为准（不是文档，文档可能落后）。
+    /// **重要**：默认 / 平衡 / 深度 全部避开 reasoning_content 字段类型的推理模型
+    /// （DeepSeek V4 / Kimi K2.x / OpenAI o1+ 都属此类），因为 opencode v1.15.1
+    /// 还没适配 reasoning_content 字段（PR #25110/#24443/#24218 在修但未合并）。
+    /// DeepSeek 例外：API 只暴露 V4 系列，没非推理可选，所以仍用 V4 但用户要知道风险
     static let all: [ProviderPreset] = [
         ProviderPreset(
             id: "deepseek",
@@ -92,6 +96,9 @@ struct ProviderPreset: Identifiable, Hashable {
             id: "moonshot",
             displayName: "Moonshot Kimi",
             baseURL: "https://api.moonshot.cn/v1",
+            // K2.x 是 reasoning 系列（用 delta.reasoning_content）—— opencode 之前因
+            // 缺 reasoning_content 适配会偶尔无响应。HermesPet 内置 ReasoningProxy 后
+            // 已经把 reasoning chunks 过滤掉了，K2.x 可以正常用 + 享受推理能力。
             defaultModel: "kimi-k2.6",
             altModels: ["kimi-k2.5", "kimi-k2"],
             signupURL: "https://platform.moonshot.cn/console/api-keys",
@@ -103,6 +110,7 @@ struct ProviderPreset: Identifiable, Hashable {
             id: "openai",
             displayName: "OpenAI",
             baseURL: "https://api.openai.com/v1",
+            // **避开 o1/o3/o4 reasoning 系列**，默认走 GPT-5 普通对话模型
             defaultModel: "gpt-5.4",
             altModels: ["gpt-5.5", "gpt-5.4-mini"],
             signupURL: "https://platform.openai.com/api-keys",

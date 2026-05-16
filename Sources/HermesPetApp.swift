@@ -35,6 +35,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // 在线 AI 模式的引擎：启动 bundled opencode 的 headless server。
+        // App 启动就拉起（用户决策，TODO.md「P0-在线 AI 内核换代」Phase 1）。
+        // 失败不阻塞 App 启动 —— 设置面板会展示 lastError 让用户诊断，
+        // 后续 OpenCodeClient 请求时如果发现 isReady=false 会尝试重启
+        Task.detached(priority: .utility) {
+            do {
+                try await OpenCodeServerManager.shared.start()
+                NSLog("[OpenCode] server ready at %@",
+                      OpenCodeServerManager.shared.serverURL?.absoluteString ?? "?")
+            } catch {
+                NSLog("[OpenCode] server start failed: %@", "\(error)")
+            }
+        }
+
+        // ReasoningProxy：本地 SSE 过滤代理，修 opencode 对 reasoning_content 字段不兼容。
+        // 让 DeepSeek V4 / Kimi K2.x / OpenAI o1+ 等推理模型也能在 opencode 下稳定工作。
+        // 监听随机端口，OpenCodeConfigGenerator 启动后把所有 provider baseURL 改写到 proxy
+        ReasoningProxy.shared.start()
+
         let vm = ChatViewModel()
         viewModel = vm
 
@@ -168,6 +187,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// App 退出前：杀掉所有还在跑的 Claude/Codex 子进程，避免僵尸进程
     func applicationWillTerminate(_ notification: Notification) {
+        // 先关 ReasoningProxy（OpenCodeServerManager 之前关，让正在 forward 的请求有机会收尾）
+        ReasoningProxy.shared.stop()
+        // 优雅 terminate opencode server（让它有机会 flush SQLite）
+        OpenCodeServerManager.shared.terminate()
         let count = SubprocessRegistry.shared.runningCount
         if count > 0 {
             print("[Lifecycle] 退出时清理 \(count) 个未结束的子进程")

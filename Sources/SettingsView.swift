@@ -13,6 +13,8 @@ struct SettingsView: View {
     @State private var testing = false
     @State private var testResult: (success: Bool, message: String)?
     @State private var hotkeyRefreshID = UUID()
+    /// 画布模式开关（实验性功能）—— ChatView 的 + 菜单根据这个 flag 决定是否显示"新建画布"
+    @AppStorage("canvasModeEnabled") private var canvasModeEnabled: Bool = false
     /// 当前正在"查看 / 编辑配置"的 mode。
     /// **不绑定 viewModel.agentMode** —— 设置里调这个 Picker 不会切换正在进行的对话的 mode，
     /// 仅决定下面 hermesConfig / claudeCard / codexCard 显示哪一个。
@@ -249,6 +251,10 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            // v1.2.0+：底层引擎换成 bundled opencode agent runtime
+            // 让用户知道现在 directAPI 模式不只是 chat completion，还能读写文件 / 跑命令 / 联网
+            opencodeEngineCard
+
             // 服务商预设 Picker
             settingRow("服务商") {
                 Picker(selection: $selectedProvider) {
@@ -428,6 +434,77 @@ struct SettingsView: View {
             }
             Spacer()
         }
+    }
+
+    /// v1.2.0+：在线 AI 模式底层用 bundled opencode agent runtime（MIT，anomalyco/opencode）。
+    /// 卡片告诉用户：① 不只是 chat completion，能读写文件 / 跑命令 / 联网 ② 当前 server 状态
+    /// ③ 没配 key 也能用免费模型
+    private var opencodeEngineCard: some View {
+        let isReady = OpenCodeServerManager.shared.isReady
+        let portText: String = {
+            if let url = OpenCodeServerManager.shared.serverURL,
+               let port = url.port {
+                return ":\(port)"
+            }
+            return ""
+        }()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "cube.transparent.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.indigo)
+                Text("opencode 引擎 v1.15.1")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Circle()
+                    .fill(isReady ? .green : .orange)
+                    .frame(width: 7, height: 7)
+                Text(isReady ? "运行中\(portText)" : "启动中…")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Text("在线 AI 模式现已升级为 agent runtime —— 能读写本地文件 / 跑命令 / 联网搜索，跟 Claude Code / Codex 同档。装上 HermesPet 即可使用，不依赖任何外部 CLI。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !OpenCodeConfigGenerator.hasConfiguredKey {
+                HStack(spacing: 4) {
+                    Image(systemName: "gift.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                    Text("还没配 Key？现在用 opencode 内置免费模型 deepseek-v4-flash-free")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if OpenCodeConfigGenerator.isReasoningModelKnownUnstable {
+                // 推理模型（DeepSeek V4 / Kimi K2.x / OpenAI o1+ 等）的 reasoning_content
+                // 字段 opencode v1.15.1 还没完全适配，可能"偶尔无响应"。明确告知 + 给出 fallback
+                HStack(alignment: .top, spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("当前模型有 reasoning_content 字段，可能偶尔无响应")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                        Text("opencode v1.15.1 跟 DeepSeek V4 / Kimi K2.x / OpenAI o1+ 等推理模型的 reasoning_content 字段适配中（PR #25110）。建议先用「moonshot-v1-32k」/「gpt-5.4」这类非推理模型，agent 能力完整稳定。后续 HermesPet 会内置 ReasoningProxy 彻底修。")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.indigo.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.indigo.opacity(0.2), lineWidth: 0.5)
+        )
     }
 
     /// 共用的"测试连接"按钮行 —— Hermes / 在线 AI 都用它，按 configViewingMode 决定测哪一组配置
@@ -949,6 +1026,27 @@ struct SettingsView: View {
                 title: "触觉反馈",
                 caption: "切 mode / 截屏 / 按住语音 / 任务完成时给 trackpad 一次轻微震动",
                 isOn: $viewModel.hapticEnabled
+            )
+
+            Divider()
+                .padding(.vertical, 4)
+
+            // 实验性功能区
+            HStack(spacing: 6) {
+                Image(systemName: "flask.fill").font(.caption2).foregroundStyle(.orange)
+                Text("实验性功能")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+            }
+            .padding(.bottom, 2)
+
+            captionToggle(
+                icon: "rectangle.3.group",
+                iconColor: .pink,
+                title: "画布模式",
+                caption: "用 Codex 自动批量生成产品图集（电商主图风格）。生成需 5~10 分钟，依赖 codex CLI。功能仍在打磨，不需要可保持关闭。",
+                isOn: $canvasModeEnabled
             )
         }
     }

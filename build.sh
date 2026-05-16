@@ -45,11 +45,42 @@ if [ -f "$SCRIPT_DIR/AppIcon.icns" ]; then
     echo "🎨 已复制 AppIcon.icns"
 fi
 
+# === Bundle opencode binary（在线 AI 引擎）===
+# opencode (MIT, anomalyco/opencode) 是开源 AI coding agent CLI。
+# bundle 进 .app 让在线 AI 模式无需任何外部 CLI 依赖。
+# 本机首次构建会下载 ~33MB zip 到 .opencode-cache/<VERSION>/，
+# 之后反复 build 不重下。OPENCODE_VERSION 锁版本，避免 release 不兼容时炸链路。
+OPENCODE_VERSION="${OPENCODE_VERSION:-v1.15.1}"
+OPENCODE_ARCH="darwin-arm64"   # Phase 1 仅 arm64；universal 见 TODO Phase 2
+OPENCODE_CACHE_DIR="$SCRIPT_DIR/.opencode-cache/$OPENCODE_VERSION"
+OPENCODE_BINARY="$OPENCODE_CACHE_DIR/opencode"
+
+if [ ! -f "$OPENCODE_BINARY" ]; then
+    echo "📥 下载 opencode $OPENCODE_VERSION ($OPENCODE_ARCH)..."
+    mkdir -p "$OPENCODE_CACHE_DIR"
+    OPENCODE_URL="https://github.com/anomalyco/opencode/releases/download/$OPENCODE_VERSION/opencode-$OPENCODE_ARCH.zip"
+    curl -fL --progress-bar -o "$OPENCODE_CACHE_DIR/opencode.zip" "$OPENCODE_URL"
+    unzip -q -o "$OPENCODE_CACHE_DIR/opencode.zip" -d "$OPENCODE_CACHE_DIR"
+    chmod +x "$OPENCODE_BINARY"
+    rm "$OPENCODE_CACHE_DIR/opencode.zip"
+fi
+
+OPENCODE_SIZE="$(du -h "$OPENCODE_BINARY" | cut -f1)"
+echo "📦 嵌入 opencode $OPENCODE_VERSION ($OPENCODE_SIZE)"
+cp "$OPENCODE_BINARY" "$APP_BUNDLE/Contents/Resources/opencode"
+chmod +x "$APP_BUNDLE/Contents/Resources/opencode"
+
 # Create PkgInfo
 echo "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
 
 # 清理扩展属性（防止 codesign 报 "resource fork / Finder information not allowed"）
-xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+# 注意：Desktop 在 iCloud Drive 同步范围内时，.app 根目录会被自动加上
+# com.apple.FinderInfo + com.apple.fileprovider.fpfs#P 这些 system 属性，
+# 普通 `xattr -cr` 递归不会处理根 dir 的 system 属性。要显式 `find -exec xattr -c`
+# 把每个文件单独清，再补 -d 删根目录的 system 属性。
+find "$APP_BUNDLE" -exec xattr -c {} + 2>/dev/null || true
+xattr -d com.apple.FinderInfo "$APP_BUNDLE" 2>/dev/null || true
+xattr -d "com.apple.fileprovider.fpfs#P" "$APP_BUNDLE" 2>/dev/null || true
 
 # 用本地 Apple Development 证书签名 —— 让 TCC 权限稳定，
 # 不会因为重新构建（CDHash 变化）就丢失屏幕录制等授权。
@@ -58,7 +89,24 @@ SIGN_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
     | awk -F\" '/Apple Development|Developer ID Application/{print $2; exit}')"
 if [ -n "$SIGN_IDENTITY" ]; then
     echo "🔐 使用证书签名: $SIGN_IDENTITY"
-    codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+    # iCloud Drive 同步的目录下，com.apple.FinderInfo + com.apple.fileprovider.fpfs#P
+    # 会在清理后被 fileproviderd 守护进程几百毫秒内重新写回。最多重试 3 次，
+    # 每次清完立刻 sign，赌 daemon 还没追上。
+    sign_ok=0
+    for attempt in 1 2 3; do
+        find "$APP_BUNDLE" -exec xattr -c {} + 2>/dev/null || true
+        xattr -d com.apple.FinderInfo "$APP_BUNDLE" 2>/dev/null || true
+        xattr -d "com.apple.fileprovider.fpfs#P" "$APP_BUNDLE" 2>/dev/null || true
+        if codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_BUNDLE" 2>/dev/null; then
+            sign_ok=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [ $sign_ok -eq 0 ]; then
+        echo "❌ codesign 失败（iCloud daemon 反复写回 xattr？）"
+        exit 1
+    fi
 else
     echo "🔐 未找到可用证书，退回到 ad-hoc 签名（每次构建后可能需重新授权）"
     codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || true

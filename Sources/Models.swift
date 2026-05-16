@@ -92,12 +92,24 @@ enum MessageRole: String, Codable {
 /// 用户最多同时开 3 个，可在头部胶囊里切换。
 /// **mode 绑定语义**：对话创建时锁定一个 mode（默认继承上一次用的 mode），
 /// 一旦该对话发出过 user 消息，就再也不能改 mode —— 保证不同对话能用不同 CLI 并行不互相污染。
+/// 对话类型 —— `.chat` 是普通聊天对话，`.canvas` 是画布工作区。
+/// 同样存在 conversations 数组里、共享顶部胶囊条 / ⌘1-8 直达 / 多通道并发，
+/// 但主区域 UI 由 ConversationKind 决定（CanvasView vs MessagesView）
+enum ConversationKind: String, Codable {
+    case chat
+    case canvas
+}
+
 struct Conversation: Identifiable, Codable, Equatable {
     let id: String
     var title: String           // 默认 "对话 N"，发完第一条用户消息后自动取前 8 个字
     var messages: [ChatMessage]
     /// 该对话锁定的 AI 后端。创建时设置，发了第一条 user 消息后就锁死不可改
     var mode: AgentMode
+    /// 对话类型（普通聊天 / 画布工作区）。canvas 时 `canvas` 字段有值
+    var kind: ConversationKind
+    /// 画布工作区数据 —— 仅 kind=.canvas 时有值。每个画布独立绑定一个 board
+    var canvas: CanvasBoard?
     let createdAt: Date
     var updatedAt: Date
     /// 后台对话完成时设为 true，切到该对话时清除 —— 胶囊上显示红点
@@ -115,6 +127,8 @@ struct Conversation: Identifiable, Codable, Equatable {
          title: String,
          messages: [ChatMessage] = [],
          mode: AgentMode = .hermes,
+         kind: ConversationKind = .chat,
+         canvas: CanvasBoard? = nil,
          hasUnread: Bool = false,
          isStreaming: Bool = false,
          createdAt: Date = Date(),
@@ -123,15 +137,17 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.title = title
         self.messages = messages
         self.mode = mode
+        self.kind = kind
+        self.canvas = canvas
         self.hasUnread = hasUnread
         self.isStreaming = isStreaming
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
 
-    // hasUnread / mode 参与序列化；isStreaming 是内存态，重启后归 false
+    // hasUnread / mode / kind / canvas 参与序列化；isStreaming 是内存态，重启后归 false
     private enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, updatedAt, hasUnread, mode
+        case id, title, messages, createdAt, updatedAt, hasUnread, mode, kind, canvas
     }
 
     init(from decoder: Decoder) throws {
@@ -143,7 +159,6 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
         self.hasUnread = (try? c.decode(Bool.self, forKey: .hasUnread)) ?? false
         // 旧版 JSON 没有 mode 字段 —— 沿用全局 UserDefaults["agentMode"] 作为兜底
-        // 这样老用户升级后，已有对话还是按他原本在用的那个 mode 继续
         if let raw = try? c.decode(String.self, forKey: .mode),
            let m = AgentMode(rawValue: raw) {
             self.mode = m
@@ -151,8 +166,137 @@ struct Conversation: Identifiable, Codable, Equatable {
             let legacy = UserDefaults.standard.string(forKey: "agentMode") ?? ""
             self.mode = AgentMode(rawValue: legacy) ?? .hermes
         }
+        // 旧版 JSON 没有 kind 字段 —— 默认 .chat 保持兼容
+        if let rawKind = try? c.decode(String.self, forKey: .kind),
+           let k = ConversationKind(rawValue: rawKind) {
+            self.kind = k
+        } else {
+            self.kind = .chat
+        }
+        self.canvas = try? c.decode(CanvasBoard.self, forKey: .canvas)
         self.isStreaming = false   // 内存态，启动恢复 false
     }
+}
+
+// MARK: - Canvas 数据模型
+
+/// 一个画布工作区 —— 用户给一个主题（如"可口可乐"），AI 按模板批量生成
+/// 一组带小标题的卡片（图 / 文混合），全部展示在一张画布上。
+///
+/// 画布作为 Conversation.canvas 字段持久化，跟普通聊天一起存在
+/// `~/.hermespet/conversations.json`，图片复用现有 `~/.hermespet/images/` 机制
+struct CanvasBoard: Codable, Equatable {
+    /// 画布唯一 id
+    let id: String
+    /// 用户输入的主题（如"可口可乐"）
+    var topic: String
+    /// 用了哪个模板（"ecommerce" / "courseware" / ...）。"custom" 表示 AI 自由规划
+    var templateID: String
+    /// 用户上传的"真实产品参考图"绝对路径数组 —— Codex 生图时作为 vision 输入，
+    /// 让 AI 看清产品真实细节再生成场景图，彻底解决"AI 凭想象瞎画"的还原度问题。
+    /// 没传则 fall back 到从零生成（用 LLM 拼的英文 prompt）
+    var referenceImagePaths: [String]
+    /// AI 调研出的产品事实摘要 —— 在 plan 阶段把 topic 喂给 LLM 让它输出客观参数
+    /// （容量 / 成分 / 价格档 / 规格 / 知名度），后续每张卡片的 prompt 都带上这些事实
+    /// 让卖点是"0 糖 0 卡 容量 330ml"而不是"令人惊叹的口感"
+    var researchSummary: String
+    /// 卡片列表 —— UI 按 slot 顺序渲染
+    var elements: [CanvasElement]
+    let createdAt: Date
+    var updatedAt: Date
+
+    init(id: String = UUID().uuidString,
+         topic: String,
+         templateID: String,
+         referenceImagePaths: [String] = [],
+         researchSummary: String = "",
+         elements: [CanvasElement] = [],
+         createdAt: Date = Date(),
+         updatedAt: Date = Date()) {
+        self.id = id
+        self.topic = topic
+        self.templateID = templateID
+        self.referenceImagePaths = referenceImagePaths
+        self.researchSummary = researchSummary
+        self.elements = elements
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    /// 旧版（没有这两个字段）的 JSON 反序列化兼容
+    enum CodingKeys: String, CodingKey {
+        case id, topic, templateID, referenceImagePaths, researchSummary, elements, createdAt, updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.topic = try c.decode(String.self, forKey: .topic)
+        self.templateID = try c.decode(String.self, forKey: .templateID)
+        self.referenceImagePaths = (try? c.decode([String].self, forKey: .referenceImagePaths)) ?? []
+        self.researchSummary = (try? c.decode(String.self, forKey: .researchSummary)) ?? ""
+        self.elements = try c.decode([CanvasElement].self, forKey: .elements)
+        self.createdAt = try c.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+    }
+}
+
+/// 画布里的单个卡片 —— 可能是图（heroImage / sceneImage）或文（title / sellingPoint / cta / text）
+struct CanvasElement: Identifiable, Codable, Equatable {
+    let id: String
+    /// 卡片类型 —— 决定渲染方式 + 走哪个 client 生成
+    var kind: CanvasElementKind
+    /// 显示在卡片左上角的小标题（"产品主图" / "卖点 ①" / "使用场景：朋友聚会"）
+    var caption: String
+    /// 给 AI 的 prompt —— 由模板 + 用户主题拼成
+    var prompt: String
+    /// 文本类卡片的内容（kind 为 title/sellingPoint/cta/text 时用）
+    var content: String
+    /// 图片类卡片的图片磁盘路径（kind 为 *Image 时用）
+    var imagePath: String?
+    /// 渲染顺序（小的在前）
+    var slot: Int
+    /// 当前状态：pending / generating / done / failed
+    var status: CanvasElementStatus
+    /// 失败时的错误信息，给用户看
+    var errorMessage: String?
+
+    init(kind: CanvasElementKind,
+         caption: String,
+         prompt: String,
+         slot: Int,
+         content: String = "",
+         imagePath: String? = nil,
+         status: CanvasElementStatus = .pending,
+         errorMessage: String? = nil) {
+        self.id = UUID().uuidString
+        self.kind = kind
+        self.caption = caption
+        self.prompt = prompt
+        self.slot = slot
+        self.content = content
+        self.imagePath = imagePath
+        self.status = status
+        self.errorMessage = errorMessage
+    }
+}
+
+/// 画布卡片的类型 —— 决定走哪个 client 生成、UI 长什么样
+enum CanvasElementKind: String, Codable, Hashable {
+    case heroImage      // 产品主图（大图）
+    case sceneImage     // 使用场景图（中图）
+    case title          // 标题文案（粗体大字）
+    case sellingPoint   // 卖点（icon + 标题 + 一行描述）
+    case cta            // 行动号召（按钮风样式）
+    case text           // 普通文本段落
+}
+
+/// 画布卡片的生成状态
+enum CanvasElementStatus: String, Codable {
+    case pending      // 还没开始（刚规划完，等排队）
+    case generating   // 正在生成（UI 显示 skeleton 闪烁）
+    case done         // 完成
+    case failed       // 失败（点重试按钮）
 }
 
 /// 同时存在的对话数上限 —— 顶部胶囊条改成横向 ScrollView 后可以放更多。

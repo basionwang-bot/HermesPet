@@ -239,6 +239,8 @@ final class ChatViewModel {
     private let claudeClient = ClaudeCodeClient()
     private let codexClient = CodexClient()
     private let storage = StorageManager.shared
+    /// 画布调度服务 —— init 末尾构造（@Observable class 不让用 lazy var）
+    private var canvasService: CanvasService!
     private var statusTimer: Timer?
 
     static func directAPIKeyStorageKey(providerID: String) -> String {
@@ -313,6 +315,13 @@ final class ChatViewModel {
         // Start status polling
         startStatusPolling()
 
+        // 画布调度服务初始化（依赖 directClient / codexClient / storage 已构造）
+        self.canvasService = CanvasService(
+            textClient: directClient,
+            codexClient: codexClient,
+            storage: storage
+        )
+
         // 监听灵动岛选项下拉菜单的选中事件 → 把选项作为新消息发送
         NotificationCenter.default.addObserver(
             forName: .init("HermesPetChoiceSelected"),
@@ -371,20 +380,32 @@ final class ChatViewModel {
                 }
             }
         case .directAPI:
-            guard !directAPIKey.isEmpty else {
-                connectionStatus = .disconnected("未配置 API Key")
-                return
-            }
-            guard !directAPIBaseURL.isEmpty else {
-                connectionStatus = .disconnected("未选择服务商")
-                return
-            }
-            Task {
-                do {
-                    let ok = try await directClient.checkHealth()
-                    connectionStatus = ok ? .connected : .disconnected("服务商未响应")
-                } catch {
-                    connectionStatus = .disconnected(error.localizedDescription)
+            // v1.2.0+：所有在线 AI 都走 opencode（含 DeepSeek，agent 能力优先于稳定性）
+            // - 没装 API key 也能用（默认 opencode/deepseek-v4-flash-free 免费模型）
+            // - opencode server 由 OpenCodeServerManager 在 App 启动时拉起
+            // 连接状态 = server 是否 ready。Server 启动需要 1-2s，App 刚启动时可能还没 ready
+            if OpenCodeServerManager.shared.isReady {
+                connectionStatus = .connected
+            } else if let err = OpenCodeServerManager.shared.lastError {
+                connectionStatus = .disconnected(err)
+            } else {
+                // 还在启动中 —— 后台 watch 1-2s 后再检
+                connectionStatus = .unknown
+                Task { [weak self] in
+                    for _ in 0..<15 {
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        if OpenCodeServerManager.shared.isReady {
+                            await MainActor.run { self?.connectionStatus = .connected }
+                            return
+                        }
+                    }
+                    await MainActor.run {
+                        if let err = OpenCodeServerManager.shared.lastError {
+                            self?.connectionStatus = .disconnected(err)
+                        } else {
+                            self?.connectionStatus = .disconnected("opencode 引擎启动超时")
+                        }
+                    }
                 }
             }
         case .claudeCode:
@@ -406,6 +427,22 @@ final class ChatViewModel {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         // 允许「只发图片 / 只拖文档不带文字」—— 文字、图片、文档任一非空就能发
         guard !text.isEmpty || !pendingImages.isEmpty || !pendingDocuments.isEmpty else { return }
+
+        // 画布对话：用户输入走"意图识别 + 应用到画布"，不走普通聊天流
+        if let active = conversations.first(where: { $0.id == activeConversationID }),
+           active.kind == .canvas {
+            dispatchCanvasInput(canvasID: active.id, userInput: text)
+            inputText = ""
+            return
+        }
+
+        // 关键词触发新画布：用户输入 "画布：xxx" / "/canvas xxx" / "canvas xxx"
+        // 自动开一个新画布对话（用电商模板兜底，用户可在 popover 改）
+        if let topic = matchCanvasKeyword(text) {
+            inputText = ""
+            createCanvasConversation(template: CanvasTemplates.ecommerce, topic: topic)
+            return
+        }
 
         // Hermes 模式：必须有 apiKey
         if agentMode == .hermes && apiKey.isEmpty {
@@ -549,7 +586,14 @@ final class ChatViewModel {
         let messages = [oneShot]
         switch mode {
         case .hermes:     return apiClient.streamCompletion(messages: messages)
-        case .directAPI:  return directClient.streamCompletion(messages: messages)
+        case .directAPI:
+            // 在线 AI 走 bundled opencode agent runtime（v1.2.0+）。
+            // quick-ask 没有真实 conversationID，用固定 "quick-ask" 让 opencode 端
+            // 复用同一个 session 不重复创建（多次 quick-ask 也有上下文延续）
+            return OpenCodeClient.shared.streamCompletion(
+                messages: messages,
+                conversationID: "quick-ask"
+            )
         case .claudeCode: return claudeClient.streamCompletion(messages: messages)
         case .codex:      return codexClient.streamCompletion(messages: messages)
         }
@@ -695,9 +739,19 @@ final class ChatViewModel {
                 case .hermes:
                     stream = apiClient.streamCompletion(messages: apiMessages)
                 case .directAPI:
-                    // 直连第三方 OpenAI 兼容服务商，跟 Hermes 走同一份 client 代码，
-                    // 只是配置（baseURL/key/model）来自 direct 那一套 UserDefaults
-                    stream = directClient.streamCompletion(messages: apiMessages)
+                    // 在线 AI 走 bundled opencode agent runtime（v1.2.0+）：能读写文件、跑命令、联网。
+                    // 每个对话独立 directory + sessionID，由 OpenCodeClient 内部管理。
+                    // 用户没配 API key 时默认用 opencode 内置 free 模型（deepseek-v4-flash-free）。
+                    //
+                    // **DeepSeek reasoning_content 已知不稳定**：opencode v1.15.1 偶尔识别不到
+                    // DeepSeek V4 stream 末尾的 content 字段（前置 reasoning chain 长，opencode
+                    // 在 reasoning 阶段就 disconnect）。上游 PR #25110 修复中，HermesPet 暂不在
+                    // 路由层 fallback —— 保留 agent 能力（读文件/跑命令）优先，少数对话偶尔
+                    // 空响应让用户重试或换 prompt 解决
+                    stream = OpenCodeClient.shared.streamCompletion(
+                        messages: apiMessages,
+                        conversationID: targetConversationID
+                    )
                 case .claudeCode:
                     // 把完整对话历史（含跟其他 AI 的对话）传给 Claude，
                     // 实现跨 AI 共享记忆
@@ -1338,13 +1392,293 @@ final class ChatViewModel {
         }
     }
 
+    // MARK: - 画布（Canvas）
+
+    /// 识别用户输入是否在请求新建画布。匹配三种触发词：
+    /// `画布：xxx` / `/canvas xxx` / `canvas: xxx`。返回主题字符串（去前缀 + trim）
+    private func matchCanvasKeyword(_ text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let triggers = ["画布:", "画布:", "画布:", "/canvas ", "canvas:", "Canvas:"]
+        // 中文冒号 / 英文冒号都接受
+        let normalized = trimmed.replacingOccurrences(of: "：", with: ":")
+        for prefix in ["画布:", "/canvas ", "canvas:", "Canvas:"] {
+            if normalized.hasPrefix(prefix) {
+                let topic = String(normalized.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !topic.isEmpty { return topic }
+            }
+        }
+        _ = triggers   // 保留变量避免编译警告（实际匹配用 normalized prefix）
+        return nil
+    }
+
+    /// 创建一个新画布对话 —— 类似 newConversation，但 kind=.canvas 并立刻启动规划。
+    /// - referenceImageURLs：用户上传的产品参考图（彻底解决品牌还原问题）
+    @discardableResult
+    func createCanvasConversation(template: CanvasTemplate,
+                                  topic: String,
+                                  referenceImageURLs: [URL] = []) -> Bool {
+        guard conversations.count < kMaxConversations else {
+            errorMessage = "对话已达 \(kMaxConversations) 个上限，请先关一个再开新画布"
+            return false
+        }
+        // 在线 AI 没配置 → 画布生成会失败，先提示
+        if directAPIKey.isEmpty || directAPIBaseURL.isEmpty {
+            errorMessage = "画布需要在线 AI 来规划内容，请先在设置中配置 API Key"
+            showSettings = true
+            return false
+        }
+        // 把用户传的参考图复制一份到 ~/.hermespet/images/ 永久保存
+        // 避免用户原文件移动 / 删除导致后续重生引用失败
+        let canvasID = UUID().uuidString
+        var savedRefPaths: [String] = []
+        for (idx, url) in referenceImageURLs.enumerated() {
+            if let data = try? Data(contentsOf: url) {
+                let paths = storage.persistImages([data], forMessage: "\(canvasID)-ref\(idx)")
+                if let p = paths.first { savedRefPaths.append(p) }
+            }
+        }
+        let board = CanvasBoard(
+            id: canvasID,
+            topic: topic,
+            templateID: template.id,
+            referenceImagePaths: savedRefPaths,
+            elements: []
+        )
+        let conv = Conversation(
+            title: "📐 " + (topic.count > 12 ? String(topic.prefix(12)) + "…" : topic),
+            messages: [],
+            mode: .directAPI,         // 画布固定走在线 AI 做规划
+            kind: .canvas,
+            canvas: board,
+            isStreaming: true
+        )
+        conversations.append(conv)
+        activeConversationID = conv.id
+        UserDefaults.standard.set(activeConversationID, forKey: "activeConversationID")
+        storage.saveConversations(conversations)
+
+        NotificationCenter.default.post(
+            name: .init("HermesPetModeChanged"),
+            object: nil,
+            userInfo: ["mode": AgentMode.directAPI.rawValue]
+        )
+
+        // 异步启动规划 + 图片生成
+        Task { @MainActor [weak self] in
+            await self?.runCanvasGeneration(canvasID: conv.id, template: template)
+        }
+        return true
+    }
+
+    /// 完整跑一遍画布生成流程：
+    /// Stage 0 事实调研（让 LLM 用知识库查产品参数）→ Stage 1 规划 → Stage 2 并行填图
+    private func runCanvasGeneration(canvasID: String, template: CanvasTemplate) async {
+        guard let board = canvasBoard(canvasID: canvasID) else { return }
+        let topic = board.topic
+
+        // Stage 0：事实调研（让 LLM 查 topic 的客观参数）
+        let researchSummary = await canvasService.researchTopic(topic)
+        if !researchSummary.isEmpty {
+            updateCanvas(canvasID: canvasID) { $0.researchSummary = researchSummary }
+        }
+
+        // Stage 1：让 AI 规划 elements（带事实摘要进 prompt，让卖点有具体数据）
+        do {
+            let elements = try await canvasService.plan(
+                template: template,
+                topic: topic,
+                researchSummary: researchSummary
+            )
+            updateCanvas(canvasID: canvasID) { $0.elements = elements }
+        } catch {
+            errorMessage = "画布规划失败：\(error.localizedDescription)"
+            setCanvasStreaming(canvasID: canvasID, value: false)
+            return
+        }
+
+        // Stage 2：并行填图
+        await canvasService.fillImages(
+            board: canvasBoard(canvasID: canvasID) ?? board,
+            canvasID: canvasID,
+            update: { [weak self] elementID, mutate in
+                self?.updateCanvasElement(canvasID: canvasID, elementID: elementID, mutate)
+            }
+        )
+
+        setCanvasStreaming(canvasID: canvasID, value: false)
+        storage.saveConversations(conversations)
+    }
+
+    // MARK: - 画布：单卡操作
+
+    /// 单卡重新生成 —— 点卡片右上角"重新生成"时调
+    func regenerateCanvasElement(canvasID: String, elementID: String) {
+        guard let board = canvasBoard(canvasID: canvasID),
+              let element = board.elements.first(where: { $0.id == elementID }) else { return }
+        Task { @MainActor [weak self] in
+            await self?.canvasService.regenerateOne(
+                element: element,
+                canvasID: canvasID,
+                referenceImagePaths: self?.canvasBoard(canvasID: canvasID)?.referenceImagePaths ?? [],
+                update: { id, mutate in
+                    self?.updateCanvasElement(canvasID: canvasID, elementID: id, mutate)
+                }
+            )
+            self?.storage.saveConversations(self?.conversations ?? [])
+        }
+    }
+
+    /// 重生所有失败的卡片（toolbar 菜单调用）
+    func regenerateFailedCanvasElements(canvasID: String) {
+        guard let board = canvasBoard(canvasID: canvasID) else { return }
+        let failed = board.elements.filter { $0.status == .failed }
+        for element in failed {
+            regenerateCanvasElement(canvasID: canvasID, elementID: element.id)
+        }
+    }
+
+    /// 重生所有图片卡片（toolbar 菜单调用）
+    func regenerateAllCanvasImages(canvasID: String) {
+        guard let board = canvasBoard(canvasID: canvasID) else { return }
+        let images = board.elements.filter { $0.kind == .heroImage || $0.kind == .sceneImage }
+        for element in images {
+            // 先把状态设回 pending，然后重生
+            updateCanvasElement(canvasID: canvasID, elementID: element.id) { $0.status = .pending }
+            regenerateCanvasElement(canvasID: canvasID, elementID: element.id)
+        }
+    }
+
+    /// 删除某张卡片
+    func deleteCanvasElement(canvasID: String, elementID: String) {
+        updateCanvas(canvasID: canvasID) { board in
+            // 删图片文件
+            if let idx = board.elements.firstIndex(where: { $0.id == elementID }),
+               let path = board.elements[idx].imagePath {
+                StorageManager.shared.deleteImageFiles([path])
+            }
+            board.elements.removeAll { $0.id == elementID }
+        }
+        storage.saveConversations(conversations)
+    }
+
+    // MARK: - 画布：意图识别（底部对话微调）
+
+    /// 用户在画布底部输入 → 走 CanvasService.interpret → 应用 action
+    private func dispatchCanvasInput(canvasID: String, userInput: String) {
+        guard let board = canvasBoard(canvasID: canvasID) else { return }
+        setCanvasStreaming(canvasID: canvasID, value: true)
+
+        Task { @MainActor [weak self] in
+            guard let self = self else { return }
+            do {
+                let action = try await self.canvasService.interpret(userInput: userInput, board: board)
+                self.applyCanvasAction(canvasID: canvasID, action: action)
+            } catch {
+                self.errorMessage = "未能识别意图：\(error.localizedDescription)"
+                self.setCanvasStreaming(canvasID: canvasID, value: false)
+            }
+        }
+    }
+
+    /// 应用一个 CanvasAction —— 替换 / 新增 / 编辑文字 / 全部重生 / no-op
+    private func applyCanvasAction(canvasID: String, action: CanvasService.CanvasAction) {
+        switch action {
+        case .replaceElement(let elementID, let newPrompt):
+            updateCanvasElement(canvasID: canvasID, elementID: elementID) {
+                $0.prompt = newPrompt
+                $0.status = .pending
+            }
+            regenerateCanvasElement(canvasID: canvasID, elementID: elementID)
+            setCanvasStreaming(canvasID: canvasID, value: false)
+
+        case .addElement(let kind, let caption, let prompt):
+            updateCanvas(canvasID: canvasID) { board in
+                let nextSlot = (board.elements.map { $0.slot }.max() ?? -1) + 1
+                let isImage = kind == .heroImage || kind == .sceneImage
+                let element = CanvasElement(
+                    kind: kind, caption: caption, prompt: prompt, slot: nextSlot,
+                    content: isImage ? "" : prompt,
+                    status: isImage ? .pending : .done
+                )
+                board.elements.append(element)
+                if isImage {
+                    // 后台跑一次图片生成
+                    let elementID = element.id
+                    Task { @MainActor [weak self] in
+                        await self?.canvasService.regenerateOne(
+                            element: element,
+                            canvasID: canvasID,
+                            update: { id, mutate in
+                                self?.updateCanvasElement(canvasID: canvasID, elementID: id, mutate)
+                            }
+                        )
+                        self?.storage.saveConversations(self?.conversations ?? [])
+                    }
+                    _ = elementID   // silence unused warning
+                }
+            }
+            setCanvasStreaming(canvasID: canvasID, value: false)
+
+        case .editText(let elementID, let newContent):
+            updateCanvasElement(canvasID: canvasID, elementID: elementID) {
+                $0.content = newContent
+                $0.status = .done
+            }
+            setCanvasStreaming(canvasID: canvasID, value: false)
+
+        case .regenerateAll:
+            regenerateAllCanvasImages(canvasID: canvasID)
+            setCanvasStreaming(canvasID: canvasID, value: false)
+
+        case .noop(let reason):
+            errorMessage = "我没听明白：\(reason)。试试「换掉场景图 2 要海边风格」这种说法。"
+            setCanvasStreaming(canvasID: canvasID, value: false)
+        }
+        storage.saveConversations(conversations)
+    }
+
+    // MARK: - 画布：辅助 mutate
+
+    /// 拿到指定画布的当前 CanvasBoard（找不到返回 nil）
+    private func canvasBoard(canvasID: String) -> CanvasBoard? {
+        conversations.first(where: { $0.id == canvasID })?.canvas
+    }
+
+    /// 给整个 CanvasBoard 做 in-place 修改（用于添加 / 删除元素 / 改主题等）
+    private func updateCanvas(canvasID: String, _ mutate: (inout CanvasBoard) -> Void) {
+        guard let idx = conversations.firstIndex(where: { $0.id == canvasID }),
+              var board = conversations[idx].canvas else { return }
+        mutate(&board)
+        board.updatedAt = Date()
+        conversations[idx].canvas = board
+        conversations[idx].updatedAt = Date()
+    }
+
+    /// 改某张卡片
+    private func updateCanvasElement(canvasID: String,
+                                     elementID: String,
+                                     _ mutate: (inout CanvasElement) -> Void) {
+        updateCanvas(canvasID: canvasID) { board in
+            guard let eIdx = board.elements.firstIndex(where: { $0.id == elementID }) else { return }
+            mutate(&board.elements[eIdx])
+        }
+    }
+
+    /// 切换画布的 isStreaming 状态（影响输入框 loading 显示）
+    private func setCanvasStreaming(canvasID: String, value: Bool) {
+        guard let idx = conversations.firstIndex(where: { $0.id == canvasID }) else { return }
+        conversations[idx].isStreaming = value
+        broadcastBackgroundStreamingCount()
+    }
+
     // MARK: - 附件（图片 + 文档）
 
     /// 拖入文档时调用 —— 不读内容，只保存路径，发送时让 AI 用 Read 工具自己访问。
-    /// Hermes / 在线 AI 都走 OpenAI 兼容 HTTP API，访问不了本地文件，直接弹错误拒绝。
+    /// **v1.2.0+ 在线 AI 走 opencode agent runtime 有 Read 工具，可以读本地文件**，
+    /// 跟 Claude Code / Codex 一样开放。只有 Hermes 模式还是纯 HTTP chat completion，拒绝。
     func attachDocumentPath(_ url: URL) {
-        if agentMode == .hermes || agentMode == .directAPI {
-            errorMessage = "在线 / Hermes 模式无法读取本地文件，请切到 Claude Code 或 Codex 再拖入"
+        if agentMode == .hermes {
+            errorMessage = "Hermes 模式无法读取本地文件，请切到 Claude Code / Codex / 在线 AI 再拖入"
             return
         }
         // 去重：同一文件已在队列里就不重复加

@@ -186,6 +186,73 @@
 
 ---
 
+## [P0-在线 AI 内核换代] opencode 集成（v1.2.0 主线）2026-05-16
+
+> **核心决定**：把在线 AI 从"接 API 的 chat completion 框"升级成"内置完整 agent runtime"。
+> 内嵌 [anomalyco/opencode](https://github.com/anomalyco/opencode)（前 sst/opencode，MIT，2026-05 仍活跃，16 万 star）二进制进 .app，
+> App 启动就拉起 `opencode serve` headless server，directAPI 模式所有请求都走 opencode。
+>
+> 关键决策：
+> - **DMG 体积**：3.3MB → ~110MB（仅 arm64，universal 后期补）—— 接受，零依赖体验值得
+> - **零 API key 也能用**：opencode 自带 `opencode/deepseek-v4-flash-free` 等 5 个免费模型，**实测能调工具**
+> - **server 启动时机**：App 启动就拉起（用户决定）
+> - **agent 权限**：默认 `build` 完整权限（用户决定）
+> - **multi-tenancy**：每个对话独立 `directory=~/Library/Application Support/HermesPet/conversations/<id>/`，一个 server 进程支持 8 对话并行
+> - **自升级**：后台 24h 跑 `opencode upgrade --method curl`
+
+### Phase 1（首轮 MVP，目标 v1.2.0）
+- [ ] **1.1 build.sh 集成 opencode 二进制** —— 下载 opencode-darwin-arm64 (~102MB) 到 `.app/Contents/Resources/opencode`；chmod +x；`codesign --deep` 让内嵌二进制也被签
+- [ ] **1.2 `OpenCodeServerManager.swift`** —— 单例 actor 管理 server 进程生命周期：① 启动时 copy bundled binary 到 `~/Library/Application Support/HermesPet/bin/opencode`（可写副本支持自升级）② random 32 字节 password 存 keychain ③ spawn `opencode serve --port 0 --hostname 127.0.0.1` ④ 从 stdout grep `listening on http://127.0.0.1:XXXX` 抓真实端口 ⑤ 健康检查 `/global/health` ⑥ `applicationWillTerminate` 时 SIGTERM 子进程
+- [ ] **1.3 `OpenCodeClient.swift`** —— URLSession + SSE 解析。核心方法：`streamCompletion(messages, conversationID)` 让 directAPI 路由分流到此 client。多对话 directory 隔离（每个 conversationID 一个独立 `~/Library/.../conversations/<id>/`）
+- [ ] **1.4 `opencode.json` 配置生成器** —— 启动时把 `ProviderPreset` 翻译成 opencode 格式写到 `~/.hermespet/opencode/opencode.json`：DeepSeek / GLM / Kimi / OpenAI 四家用 `@ai-sdk/openai-compatible` 套；用户 API Key 从 `directAPIKey.<providerID>` 取
+- [ ] **1.5 `ChatViewModel` directAPI 路由切换** —— 让 directAPI mode 调 OpenCodeClient 而非 APIClient；保留 APIClient 作为离线 fallback 占位（Phase 2 启用）
+- [ ] **1.6 工具事件 → 灵动岛 mapping** —— SSE event `tool_use[status=running]` post `HermesPetToolStarted`、`status=completed` post `HermesPetToolEnded`，灵动岛工具卡片 + 桌宠精灵无缝接通
+- [ ] **1.7 设置面板适配** —— "在线 AI" tab 加 ① opencode 引擎版本显示 ② 服务商配置（沿用 ProviderPreset）③ 手动"立即升级 opencode"按钮
+- [ ] **1.8 自升级机制** —— App 启动 24h 后台跑 `opencode upgrade --method curl` 静默升级
+
+### Phase 2（v1.2.x 跟进）
+- [x] **ReasoningProxy（本地 SSE 过滤代理）** ⚡ 已落地 2026-05-16 —— 修 opencode v1.15.1 跟 reasoning_content 推理模型（DeepSeek V4 / Kimi K2.x / OpenAI o1+ / GLM Thinking）不兼容的根本问题。`Sources/ReasoningProxy.swift` 约 300 行 Swift。架构：① App 启动 NWListener on 127.0.0.1:<random_port>（无需 entitlement，HermesPet 不开 sandbox）② `OpenCodeConfigGenerator.buildConfig` 把每个 provider baseURL 改写成 `http://127.0.0.1:<proxy_port>/<provider_id>`，opencode 调 `.../<provider_id>/chat/completions` 会被路由到 proxy ③ proxy 用 `URLSession.bytes(for:)` 转发到真实 provider，逐行 SSE filter：`delta.content==nil && delta.reasoning_content` 的 chunk 整条丢弃，其他 chunk 剥离 reasoning_content 字段后 forward + HTTP chunked encoding 回 client ④ opencode 看到的是纯净 OpenAI 标准 stream，reasoning model 100% 稳定。**实测**：curl 通过 proxy 调 Kimi K2.6 完美返回 content chunks，reasoning chunks 全部过滤掉。文件诊断日志 `~/.hermespet/reasoning-proxy.log`
+- [ ] **离线 fallback** —— opencode 二进制丢了 / server 起不来 / 健康检查失败 → 自动退回原裸 HTTP chat completion 路径（保留 `APIClient` 当 fallback）；灵动岛弹通知告诉用户"在线 AI 引擎暂时不可用，已切回简易模式"；后台重试拉起 server
+- [ ] **universal binary** —— bundle 加 x86_64，给 Intel Mac 用；DMG 体积 ~210MB
+- [ ] **Agent 权限三档可选** —— 设置加 plan(只读) / build(全权，当前默认) / build + skip-permissions(完全自动) Picker；接 `permission.asked` SSE event 弹许可 UI
+- [ ] **opencode session export 一键导出** —— `opencode export <sessionID>` 把完整对话 + tool trace 导出为 JSON，调试用
+- [ ] **session 跨重启恢复** —— opencode 内置 SQLite (`~/.local/share/opencode/opencode.db`) 已经持久化，让 HermesPet 重启后能 attach 回原 session 而不是新建
+
+### 🐛 已知 bug 跟踪：opencode + reasoning model 兼容（2026-05-16 诊断）
+- **现象**：用户配付费 API Key（DeepSeek V4 / Kimi K2.x），偶尔回复 "(没有响应)"。子进程 spawn 成功（stdout_bytes=250 即只有 step_start 一行），但没 text event。
+- **根因**（实测确认）：opencode v1.15.1 用 `@ai-sdk/openai-compatible` Vercel SDK，**不支持 OpenAI 标准之外的 `reasoning_content` 字段**。DeepSeek/Kimi/o1 等推理模型 stream 前 ~170 chunks 是 `{delta:{content:null,reasoning_content:"..."}}`（推理过程），末尾 ~10 chunks 才有 `{delta:{content:"实际回答"}}`。opencode 看 content=null 就跳过 chunk，直到全部跳完没收集到任何文本 → text event 不发出 → ChatViewModel 拿到空 → UI 显示 "(没有响应)"。
+- **API 端无法关闭 reasoning**：实测 `reasoning_effort=null` / `reasoning=false` / `enable_thinking=false` 三个参数都不能让 DeepSeek 关掉 reasoning chain。
+- **上游修复**：opencode PR #25110 / #24443 / #24218 / #23335 都在修，但都 open 没合并。
+- **当前缓解**（不彻底）：
+  - ① ProviderPreset 默认避开 reasoning 模型：Kimi 默认 `moonshot-v1-32k` 非推理（`delta.content` 直接给文本，opencode 兼容），OpenAI 默认 `gpt-5.4` 非 reasoning
+  - ② DeepSeek 没有非推理 V4 模型可选 → 仍用 `deepseek-v4-flash`（reasoning chain 比 pro 短，偶尔无响应概率小一些）
+  - ③ SettingsView 在选了 reasoning 模型时显眼橙色警告 + 推荐切到非推理
+- **❌ 已撤销的错误方向**：曾尝试"DeepSeek 配 key 时强走 opencode/deepseek-v4-flash-free"——违反用户"强制用付费 key"的要求，已撤销。
+- **🎯 终极方案**：Phase 2 实现 ReasoningProxy（见上）。
+- **用户行为建议**：选非推理模型立刻享受 agent 能力 + 付费 Key；用推理模型接受偶尔无响应（重试一下）等 ReasoningProxy。
+
+### Phase 3（v1.3+ 探索）
+- [ ] **opencode ACP（Agent Client Protocol）替代 HTTP** —— Zed 等 IDE 用的标准化 agent 协议，比 HTTP SSE 更高级
+- [ ] **跑 opencode MCP 子命令** —— 接 Model Context Protocol 让用户加自定义工具
+- [ ] **plugin 系统接入** —— 让用户在 HermesPet 设置里管理 opencode plugin
+
+### 已确认的关键信息（实测验证）
+- ✅ JSON event 流格式：每行一个 JSON object，含 `type` / `sessionID` / `part`，tool_use 事件完整含 input/output/state/time
+- ✅ Multi-tenancy 通过 `?directory=<path>` query param，server 自动 lazy-create instance + 独立 event bus / file watcher / agent 配置
+- ✅ Basic Auth：username "opencode" + `OPENCODE_SERVER_PASSWORD` 环境变量
+- ✅ `opencode upgrade --method curl|brew|npm|...` 自带升级，支持热替换二进制
+- ✅ 内置 5 个免费模型（deepseek-v4-flash-free / minimax-m2.5-free / nemotron-3-super-free / ring-2.6-1t-free / big-pickle）—— 实测 deepseek-v4-flash 能调 read 工具
+- ✅ 内置 SQLite DB 自动迁移（`service=db count=20 mode=bundled applying migrations`），跨版本兼容
+- ✅ License MIT，可商业内嵌分发
+
+### 已知风险
+- **DMG 体积 ×30 倍**：3.3MB → ~110MB；用户感知最强的变化
+- **首次启动慢 1-2 秒**：spawn server + 健康检查需要时间，要做 launch progress 提示
+- **opencode 自升级换不兼容 schema**：要做 client 端 event schema 版本兼容；Phase 1 先紧跟 v1.15.x
+- **free 模型生成质量**：能跑工具 ≠ 中文回答质量好；用户配自己的 DeepSeek/GLM key 后才有"高级"体验
+
+---
+
 ## [P1-灵动岛/桌宠/Pin 优化轮 2026-05-16]
 
 > 用户日常使用反馈梳理出的下一轮优化方向。本轮先做 A / F / J 三项。

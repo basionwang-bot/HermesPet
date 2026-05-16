@@ -58,8 +58,14 @@ final class CodexClient: @unchecked Sendable {
     /// `codex exec resume <thread_id>` 会快很多。HermesPet 的每个 Conversation 绑定一个
     /// Codex thread_id：第一次把完整历史发给 Codex，拿到 `thread.started.thread_id` 后持久化；
     /// 后续只把最新用户输入发给 `resume`，不再每轮冷启动 + 重传全量历史。
+    /// streamCompletion 主入口。
+    /// - parameter suppressIslandUpdates: 画布串行生成图片时传 true，
+    ///   内部 post `HermesPetToolStarted/Ended` 通知会被跳过，
+    ///   避免画布任务跟主对话共用灵动岛进度状态机互相污染（曾导致并发画布卡住灵动岛）。
+    ///   画布进度由 CanvasView toolbar 独立展示。
     func streamCompletion(messages: [ChatMessage],
-                          conversationID: String? = nil) -> AsyncThrowingStream<String, Error> {
+                          conversationID: String? = nil,
+                          suppressIslandUpdates: Bool = false) -> AsyncThrowingStream<String, Error> {
         let existingSessionID = sessionID(for: conversationID)
         let prompt = buildPrompt(messages: messages, isResume: existingSessionID != nil)
         let inputImages = collectInputImagePaths(from: messages)
@@ -67,7 +73,8 @@ final class CodexClient: @unchecked Sendable {
             prompt: prompt,
             imageFiles: inputImages,
             conversationID: conversationID,
-            sessionID: existingSessionID
+            sessionID: existingSessionID,
+            suppressIslandUpdates: suppressIslandUpdates
         )
     }
 
@@ -182,7 +189,8 @@ final class CodexClient: @unchecked Sendable {
     private func streamRaw(prompt: String,
                            imageFiles: [String] = [],
                            conversationID: String?,
-                           sessionID: String?) -> AsyncThrowingStream<String, Error> {
+                           sessionID: String?,
+                           suppressIslandUpdates: Bool = false) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             // spawn 前快照 codex 的默认图片目录
             let codexImageDir = (NSHomeDirectory() as NSString)
@@ -300,17 +308,19 @@ final class CodexClient: @unchecked Sendable {
                         )
                         if !state.startedToolIds.contains(toolId) {
                             state.startedToolIds.insert(toolId)
-                            DispatchQueue.main.async {
-                                NotificationCenter.default.post(
-                                    name: .init("HermesPetToolStarted"),
-                                    object: nil,
-                                    userInfo: [
-                                        "id": toolId,
-                                        "name": itemType,
-                                        "arg": arg,
-                                        "file_path": filePath
-                                    ]
-                                )
+                            if !suppressIslandUpdates {
+                                DispatchQueue.main.async {
+                                    NotificationCenter.default.post(
+                                        name: .init("HermesPetToolStarted"),
+                                        object: nil,
+                                        userInfo: [
+                                            "id": toolId,
+                                            "name": itemType,
+                                            "arg": arg,
+                                            "file_path": filePath
+                                        ]
+                                    )
+                                }
                             }
                         }
                     } else if type == "item.completed",
@@ -324,12 +334,14 @@ final class CodexClient: @unchecked Sendable {
                            state.startedToolIds.contains(toolId),
                            !state.endedToolIds.contains(toolId) {
                             state.endedToolIds.insert(toolId)
-                            DispatchQueue.main.async {
-                                NotificationCenter.default.post(
-                                    name: .init("HermesPetToolEnded"),
-                                    object: nil,
-                                    userInfo: ["id": toolId]
-                                )
+                            if !suppressIslandUpdates {
+                                DispatchQueue.main.async {
+                                    NotificationCenter.default.post(
+                                        name: .init("HermesPetToolEnded"),
+                                        object: nil,
+                                        userInfo: ["id": toolId]
+                                    )
+                                }
                             }
                         }
                     }
