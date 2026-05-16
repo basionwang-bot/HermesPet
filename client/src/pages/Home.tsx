@@ -132,7 +132,10 @@ export default function Home() {
           <div className="hero-media" aria-hidden="true"></div>
           <div className="hero-vignette" aria-hidden="true"></div>
           <div className="hero-content">
-            <p className="eyebrow">Swift 6 / SwiftUI / macOS 14+</p>
+            <div style={{ display: 'flex', gap: '16px', alignItems: 'center', marginBottom: '12px' }}>
+              <p className="eyebrow" style={{ margin: 0 }}>Swift 6 / SwiftUI / macOS 14+</p>
+              <span style={{ fontSize: '12px', fontWeight: 900, color: '#2e8cff', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Windows 版即将上线</span>
+            </div>
             <h1 id="hero-title">HermesPet</h1>
             <p className="hero-lede">
               让 AI 住进 MacBook 刘海里。点一下就聊，按住就说，拖进文件让它自己读。
@@ -482,6 +485,102 @@ export default function Home() {
             >
               查看源码
             </a>
+          </div>
+        </section>
+
+        {/* Windows Coming Soon */}
+        <section
+          className="section"
+          style={{
+            background: 'linear-gradient(135deg, rgba(46, 140, 255, 0.15), rgba(255, 255, 255, 0.05)), rgba(255, 255, 255, 0.04)',
+            borderTop: '1px solid rgba(255, 255, 255, 0.12)',
+          }}
+        >
+          <div style={{ maxWidth: '900px', margin: '0 auto' }}>
+            <div className="section-heading">
+              <p className="eyebrow" style={{ color: '#2e8cff' }}>Windows 版本</p>
+              <h2 style={{ color: 'white', marginBottom: '24px' }}>
+                HermesPet for Windows 马上上线
+              </h2>
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                gap: '24px',
+                marginBottom: '32px',
+              }}
+            >
+              {[
+                {
+                  title: '系统托盘集成',
+                  desc: '常驻 Windows 系统托盘，快速访问 AI 助手，无需打开额外窗口。',
+                },
+                {
+                  title: '全局快捷键',
+                  desc: '自定义全局快捷键，在任何应用中快速唤起 HermesPet，提升工作效率。',
+                },
+                {
+                  title: '多引擎支持',
+                  desc: '支持在线 AI、Hermes Gateway、Claude Code 等多个后端，满足不同需求。',
+                },
+                {
+                  title: '文件拖拽',
+                  desc: '直接拖拽文件或截图到 HermesPet，让 AI 快速理解和处理。',
+                },
+              ].map((item, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: '20px',
+                    borderRadius: '12px',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    background: 'rgba(255, 255, 255, 0.04)',
+                  }}
+                >
+                  <h3 style={{ color: 'white', fontSize: '18px', marginBottom: '8px' }}>
+                    {item.title}
+                  </h3>
+                  <p style={{ color: 'rgba(255, 255, 255, 0.68)', lineHeight: '1.6', margin: 0 }}>
+                    {item.desc}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                padding: '24px',
+                borderRadius: '14px',
+                background: 'rgba(46, 140, 255, 0.1)',
+                border: '1px solid rgba(46, 140, 255, 0.3)',
+                textAlign: 'center',
+              }}
+            >
+              <p style={{ color: 'rgba(255, 255, 255, 0.82)', fontSize: '16px', margin: '0 0 12px 0' }}>
+                Windows 版本正在紧张开发中，敬请期待！
+              </p>
+              <a
+                href="https://github.com/basionwang-bot/HermesPet"
+                target="_blank"
+                rel="noreferrer"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minHeight: '42px',
+                  padding: '0 16px',
+                  borderRadius: '999px',
+                  color: 'white',
+                  border: '1px solid rgba(46, 140, 255, 0.5)',
+                  background: 'rgba(46, 140, 255, 0.15)',
+                  fontWeight: 800,
+                  textDecoration: 'none',
+                  cursor: 'pointer',
+                }}
+              >
+                关注项目进展
+              </a>
+            </div>
           </div>
         </section>
       </main>
