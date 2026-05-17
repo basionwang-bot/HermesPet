@@ -20,8 +20,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var chatWindow: ChatWindowController?
     private var viewModel: ChatViewModel?
     private var islandController: DynamicIslandController?
+    /// Permission UI 独立窗口控制器（v1.3+，监听 NotificationCenter 自驱）
+    private var permissionWindowController: PermissionWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 配置迁移：把老版本的 UserDefaults 字段升级到当前 schema。
+        // 必须在任何读 UserDefaults 的代码（ChatViewModel / OpenCodeConfigGenerator 等）之前跑，
+        // 否则它们会读到旧 key 拿不到值。同步执行（UserDefaults 操作极快，不阻塞启动）。
+        SchemaMigrator.runMigrations()
+
         // 启动后立即异步预热 CLI 探测 —— 用 zsh -lic 走用户真实 PATH 找 claude / codex，
         // 找到的路径写入 UserDefaults，让后续 ClaudeCodeClient / CodexClient 的 spawn 用对路径。
         // 这一步对"对方装好了 CLI 但 App 还以为没装"的场景至关重要：之前用硬编码
@@ -85,6 +92,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.toggleChatWindow()
         }
         self.islandController = island
+
+        // Permission UI 独立窗口 —— 监听 NotificationCenter 自驱，独立于灵动岛 NSWindow
+        self.permissionWindowController = PermissionWindowController()
+
+        // Permission hook server + Claude / Codex CLI hook 安装。
+        // 不论 permissionUIEnabled 开关如何，server 都启动（端口固定后才能写 hook 配置）
+        // 由 ChatViewModel.permissionUIEnabled didSet 控制是否真注入 hook 到 ~/.claude/settings.json
+        do {
+            try PermissionHookServer.shared.start()
+            // 如果用户上次启用着，立即注入 hook（用户开关同步在 ChatViewModel didSet）
+            if UserDefaults.standard.bool(forKey: "permissionUIEnabled") {
+                let port = PermissionHookServer.shared.port
+                if port > 0 {
+                    PermissionHookInstaller.installClaudeHook(port: port)
+                    PermissionHookInstaller.installCodexHook(port: port)
+                } else {
+                    // server start 异步绑定端口，延迟到下一个 runloop 再写
+                    DispatchQueue.main.async {
+                        let p = PermissionHookServer.shared.port
+                        if p > 0 {
+                            PermissionHookInstaller.installClaudeHook(port: p)
+                            PermissionHookInstaller.installCodexHook(port: p)
+                        }
+                    }
+                }
+            }
+        } catch {
+            NSLog("[PermissionHookServer] start failed: %@", "\(error)")
+        }
 
         // 菜单栏图标：左键切换窗口，右键弹菜单（含"退出"）
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -442,14 +478,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let chatWindow = self.chatWindow
         let wasVisible = chatWindow?.isVisible ?? false
 
-        vm.captureScreenAndAttach { [weak chatWindow] hide in
+        vm.captureScreenAndAttach { [weak chatWindow] hide, done in
             // 只在原本就开着的情况下才隐藏/恢复，否则全程不打扰
-            guard wasVisible else { return }
+            guard wasVisible else { done(); return }
             if hide {
-                chatWindow?.hide()
+                // hide 是 0.22s 退出动画，必须等动画 completion 才能截图
+                chatWindow?.hide { done() }
             } else {
                 let anchor: NSView? = self.islandController?.pillWindow.contentView ?? self.statusItem?.button
                 chatWindow?.show(near: anchor)
+                done()   // 恢复不需要等
             }
         }
     }

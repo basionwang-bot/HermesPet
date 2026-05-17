@@ -215,7 +215,7 @@ final class CanvasService {
                                   canvasID: String,
                                   referenceImagePaths: [String] = [],
                                   update: @MainActor @escaping (_ elementID: String, _ mutate: (inout CanvasElement) -> Void) -> Void) async {
-        await update(element.id) { $0.status = .generating }
+        update(element.id) { $0.status = .generating }
 
         do {
             // 根据是否有参考图，prompt 措辞不同：
@@ -268,7 +268,7 @@ final class CanvasService {
             // 取出 codex 这一轮生成的图（CodexClient 内部缓存的 _pendingImages）
             let generated = codexClient.takeGeneratedImages()
             guard let first = generated.first else {
-                await update(element.id) {
+                update(element.id) {
                     $0.status = .failed
                     $0.errorMessage = "Codex 没有返回图片"
                 }
@@ -276,12 +276,12 @@ final class CanvasService {
             }
             // 落盘到 ~/.hermespet/images/<canvasID>-<elementID>.png
             let paths = storage.persistImages([first], forMessage: canvasID + "-" + element.id)
-            await update(element.id) {
+            update(element.id) {
                 $0.imagePath = paths.first
                 $0.status = .done
             }
         } catch {
-            await update(element.id) {
+            update(element.id) {
                 $0.status = .failed
                 $0.errorMessage = error.localizedDescription
             }
@@ -306,16 +306,16 @@ final class CanvasService {
             )
         } else {
             // 文字卡：重新跑一次 prompt 拿新文案
-            await update(element.id) { $0.status = .generating }
+            update(element.id) { $0.status = .generating }
             do {
                 let messages = [ChatMessage(role: .user, content: element.prompt)]
                 let content = try await streamAndCollect(messages: messages)
-                await update(element.id) {
+                update(element.id) {
                     $0.content = content.trimmingCharacters(in: .whitespacesAndNewlines)
                     $0.status = .done
                 }
             } catch {
-                await update(element.id) {
+                update(element.id) {
                     $0.status = .failed
                     $0.errorMessage = error.localizedDescription
                 }

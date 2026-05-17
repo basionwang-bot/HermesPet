@@ -51,6 +51,15 @@ final class DynamicIslandController {
         let hosting = NSHostingView(rootView: DynamicIslandPillView())
         hosting.frame = NSRect(x: 0, y: 0, width: 280, height: 70)
         hosting.autoresizingMask = [.width, .height]
+        // **关键**：禁止 NSHostingView 根据 SwiftUI intrinsic size 反向请求 NSWindow 改 frame。
+        // 默认 sizingOptions 是 `.preferredContentSize`，当我们加新 overlay（permission 卡片）时
+        // SwiftUI 会通知 NSHostingView「我需要更大空间」→ NSHostingView 反向调 window.setFrame →
+        // 跟我们自己的 setFrame 嵌套在 CA transaction commit 期间撞车 → NSException 崩溃。
+        // 设成空集合后 hosting view 只渲染不改 window，window 尺寸由 controller 独占控制。
+        // 参考 CLAUDE.md 决策 #5 + #7
+        if #available(macOS 13.0, *) {
+            hosting.sizingOptions = []
+        }
         window.contentView = hosting
         self.hostingView = hosting
 
@@ -93,7 +102,7 @@ final class DynamicIslandController {
 
     // MARK: - Positioning
 
-    private func positionWindow() {
+    private func positionWindow(animated: Bool = false) {
         // 优先选「带刘海」的屏（外接显示器场景下 NSScreen.main 不一定是 MacBook 自带屏）
         let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
             ?? NSScreen.main
@@ -122,9 +131,11 @@ final class DynamicIslandController {
         }()
         let actualNotchHeight: CGFloat = hasNotch ? safeArea.top : 28
 
-        // window 用 hover 最大尺寸，避免 hover 膨胀超出窗口边界产生残影
-        let windowWidth  = actualNotchWidth  + idleExtraWidth
-        let windowHeight = actualNotchHeight + hoverDrop
+        // 灵动岛 NSWindow 永远保持常规尺寸 —— **绝对不能改 frame**。
+        // 任何 frame 变化（即便瞬切）都会触发 NSHostingView.invalidateSafeAreaInsets →
+        // 嵌套 setNeedsUpdate → NSException 必崩。Permission UI 大卡片用独立 PermissionWindow 显示
+        let windowWidth: CGFloat = actualNotchWidth  + idleExtraWidth
+        let windowHeight: CGFloat = actualNotchHeight + hoverDrop
 
         // 水平：用「刘海真实中心」对齐
         let notchCenterX: CGFloat = {
@@ -150,7 +161,9 @@ final class DynamicIslandController {
                 "idleDrop": idleDrop,
                 "idleExtraWidth": idleExtraWidth,
                 "hoverDrop": hoverDrop,
-                "hoverExtraWidth": hoverExtraWidth
+                "hoverExtraWidth": hoverExtraWidth,
+                "notchCenterX": notchCenterX,
+                "windowBottomY": y
             ]
         )
     }
@@ -163,6 +176,21 @@ final class DynamicIslandController {
 }
 
 // MARK: - SwiftUI Pill View
+
+/// permission 卡片 transition 用的 modifier —— 同时驱动 scale + opacity + blur 三轴变化。
+/// 让卡片像液体从灵动岛"凝聚长出"，配合 spring withAnimation 形成 FaceID 级动画
+struct PermissionTransitionModifier: ViewModifier {
+    let scale: CGFloat
+    let opacity: Double
+    let blur: CGFloat
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(scale, anchor: UnitPoint(x: 0.5, y: 0.05))
+            .opacity(opacity)
+            .blur(radius: blur)
+    }
+}
 
 struct DynamicIslandPillView: View {
     @State private var status: ConnectionStatusDisplay = .unknown
@@ -238,6 +266,7 @@ struct DynamicIslandPillView: View {
     // MARK: - d) 后台对话发光（右耳计数）
     @State private var backgroundStreamingCount: Int = 0
 
+
     // MARK: - e) 错误态（持续显示，点灵动岛触发重试）
     /// 连接断开时为 true —— 由 HermesPetStatusChanged 直接判定
     private var isInErrorState: Bool { status == .disconnected }
@@ -250,7 +279,13 @@ struct DynamicIslandPillView: View {
     // MARK: - o) 5 段音量条实时电平
     @State private var voiceLevel: Float = 0
 
-    /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态都让胶囊"展开"
+    /// permission 卡片显示中 —— 灵动岛要冻结在 **idle 形态**（带耳朵的横条，width=280），
+    /// 跟下方 PermissionWindow（280pt 宽）左右对齐，看起来是一体的 UI
+    @State private var permissionActive: Bool = false
+
+    /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态让胶囊"展开"成 hover 水滴形态。
+    /// **注意 permissionActive 不进 isExpanded**：permission 卡片宽 280pt 跟 idle 形态等宽，
+    /// 进 hover 反而收窄到 204pt 导致跟卡片错位
     private var isExpanded: Bool {
         isHovering || isShowingNotification
             || currentToolKind != nil
@@ -291,12 +326,17 @@ struct DynamicIslandPillView: View {
         notchHeight + (isExpanded ? hoverDrop : idleDrop)
     }
     private var currentRadius: CGFloat {
-        isExpanded ? 22 : 14
+        // permission 卡片显示中 → 底部直角，跟卡片顶部无缝衔接形成"灵动岛变形成大形态"
+        if permissionActive { return 0 }
+        return isExpanded ? 22 : 14
     }
 
     var body: some View {
         pillBodyWithStateObservers
             .onHover { hovering in
+            // permission 卡片显示中：灵动岛冻结不响应 hover（permissionActive 已经把 isExpanded
+            // 强制为 true，这里直接 ignore 鼠标进出，避免一离开卡片就 hover false 缩回）
+            if permissionActive { return }
             // **水滴动画**：width 80→4 + height 32→64 + radius 14→22 三轴同步驱动。
             // 用 interpolatingSpring（mass=1.0, stiffness=180, damping=22）让水流感更连贯：
             //  · stiffness 180 比标准 spring 软，水滴下流不"砸"
@@ -526,6 +566,22 @@ struct DynamicIslandPillView: View {
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetVoiceLevel"))) { note in
             if let lvl = note.userInfo?["level"] as? Float {
                 voiceLevel = lvl
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetPermissionAsked"))) { _ in
+            // 灵动岛底部从圆角变直角 → 跟 PermissionWindow 卡片衔接。柔和 spring 跟卡片同步
+            withAnimation(.spring(response: 0.7, dampingFraction: 0.86, blendDuration: 0.3)) {
+                permissionActive = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetPermissionReplied"))) { _ in
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.9, blendDuration: 0.25)) {
+                permissionActive = false
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetPermissionDecisionMade"))) { _ in
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.9, blendDuration: 0.25)) {
+                permissionActive = false
             }
         }
         .onAppear {

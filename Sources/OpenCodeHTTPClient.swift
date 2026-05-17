@@ -261,21 +261,21 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         req.httpMethod = "POST"
         req.setValue(authHeader, forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        // permission rules：所有工具（read/edit/write/bash/webfetch...）都 allow，
-        // 等价于 v1.2.x subprocess 模式的 `--dangerously-skip-permissions`。
-        // 不传的话 server 默认是 ask，HermesPet 没做 permission UI → 工具调用会 hang。
-        // 下一版本（v1.3+）会加 permission UI + 设置开关让追求安全的用户能切到 ask。
-        // 用通配 ** + allow，覆盖所有工具的所有 pattern
+        // permission rules：按 UserDefaults `permissionUIEnabled` 二选一。
+        //   开关关（默认）→ 全 allow，等价于 v1.2.x `--dangerously-skip-permissions`
+        //   开关开 → 全 ask，工具调用前会 SSE 推 `permission.asked` 事件，灵动岛弹卡片让用户决策
+        // 设置面板「权限审批」开关控制；默认关是为了 dmg 朋友的零摩擦体验
+        let action = UserDefaults.standard.bool(forKey: "permissionUIEnabled") ? "ask" : "allow"
         let permissionRules: [[String: String]] = [
-            ["permission": "*",          "pattern": "**", "action": "allow"],
-            ["permission": "read",       "pattern": "**", "action": "allow"],
-            ["permission": "edit",       "pattern": "**", "action": "allow"],
-            ["permission": "write",      "pattern": "**", "action": "allow"],
-            ["permission": "bash",       "pattern": "**", "action": "allow"],
-            ["permission": "webfetch",   "pattern": "**", "action": "allow"],
-            ["permission": "glob",       "pattern": "**", "action": "allow"],
-            ["permission": "grep",       "pattern": "**", "action": "allow"],
-            ["permission": "list",       "pattern": "**", "action": "allow"]
+            ["permission": "*",          "pattern": "**", "action": action],
+            ["permission": "read",       "pattern": "**", "action": action],
+            ["permission": "edit",       "pattern": "**", "action": action],
+            ["permission": "write",      "pattern": "**", "action": action],
+            ["permission": "bash",       "pattern": "**", "action": action],
+            ["permission": "webfetch",   "pattern": "**", "action": action],
+            ["permission": "glob",       "pattern": "**", "action": action],
+            ["permission": "grep",       "pattern": "**", "action": action],
+            ["permission": "list",       "pattern": "**", "action": action]
         ]
         let body: [String: Any] = [
             "title": "HermesPet 对话",
@@ -457,8 +457,133 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                 handleToolPart(part)
             }
 
+        case "permission.asked":
+            // permission.asked event payload 的 properties 字段就是 PermissionRequest 本身
+            handlePermissionAsked(props)
+
+        case "permission.replied":
+            // 服务端确认收到 reply（可能是我们自己 POST 的回执，也可能是其他 client）
+            // 广播让灵动岛把卡片收起来（防止两端同时 reply 出现 UI 残留）
+            if let requestID = props["requestID"] as? String {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .init("HermesPetPermissionReplied"),
+                        object: nil,
+                        userInfo: ["requestID": requestID]
+                    )
+                }
+            }
+
+        case "question.asked":
+            // AI 主动问问题（v1.3+ 新增）—— 卡片展示问题 + 选项让用户选
+            handleQuestionAsked(props)
+
+        case "question.replied", "question.rejected":
+            if let requestID = props["requestID"] as? String {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .init("HermesPetPermissionReplied"),   // 复用同一个 dismiss 通知
+                        object: nil,
+                        userInfo: ["requestID": requestID]
+                    )
+                }
+            }
+
         default:
             break
+        }
+    }
+
+    private func handleQuestionAsked(_ props: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: props) else { return }
+        guard let request = try? JSONDecoder().decode(QuestionRequest.self, from: data) else {
+            NSLog("[OpenCodeHTTP] failed to decode question.asked payload")
+            return
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .init("HermesPetQuestionAsked"),
+                object: nil,
+                userInfo: ["request": request]
+            )
+        }
+    }
+
+    /// 把 SSE permission.asked event 的 properties 解析成 PermissionRequest 并广播给灵动岛
+    private func handlePermissionAsked(_ props: [String: Any]) {
+        // properties 字段就是完整 PermissionRequest schema 的 JSON
+        // JSONSerialization → Data → JSONDecoder → PermissionRequest
+        guard let data = try? JSONSerialization.data(withJSONObject: props) else { return }
+        guard let request = try? JSONDecoder().decode(PermissionRequest.self, from: data) else {
+            NSLog("[OpenCodeHTTP] failed to decode permission.asked payload: %@",
+                  String(data: data, encoding: .utf8) ?? "(empty)")
+            return
+        }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .init("HermesPetPermissionAsked"),
+                object: nil,
+                userInfo: ["request": request]
+            )
+        }
+    }
+
+    // MARK: - Permission Reply (POST /permission/{id}/reply)
+
+    /// 用户在灵动岛点了 Allow/AllowAlways/Deny → 把决策 POST 回 opencode。
+    /// 服务端会取消阻塞，让对应工具调用 either 继续 (once/always) 或报错 (reject)。
+    ///
+    /// **不抛错**：失败只 NSLog，因为如果回执失败 server 那边会一直 hang 等。
+    /// UI 这边卡片已经收起来了，用户不会再次决策同一个 requestID
+    /// （服务端那边对同 id 二次 reply 会返回 200 / true 无副作用，见 issue 15386）
+    /// 回答 AI 提的问题 → POST /question/{id}/reply
+    /// answers 是嵌套数组：外层每个 question 一个元素，内层是该 question 选中的 label 数组
+    /// （单选 question 内层只有 1 个，multiple=true 时可能多个）
+    func replyQuestion(requestID: String, answers: [[String]]) async {
+        guard OpenCodeServerManager.shared.isReady,
+              let baseURL = OpenCodeServerManager.shared.serverURL,
+              let authHeader = OpenCodeServerManager.shared.authorizationHeader else { return }
+        var req = URLRequest(url: baseURL.appendingPathComponent("question/\(requestID)/reply"))
+        req.httpMethod = "POST"
+        req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["answers": answers]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    /// 拒绝回答 AI 提的问题 → POST /question/{id}/reject
+    func rejectQuestion(requestID: String) async {
+        guard OpenCodeServerManager.shared.isReady,
+              let baseURL = OpenCodeServerManager.shared.serverURL,
+              let authHeader = OpenCodeServerManager.shared.authorizationHeader else { return }
+        var req = URLRequest(url: baseURL.appendingPathComponent("question/\(requestID)/reject"))
+        req.httpMethod = "POST"
+        req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        _ = try? await URLSession.shared.data(for: req)
+    }
+
+    func replyPermission(requestID: String, decision: PermissionDecision) async {
+        guard OpenCodeServerManager.shared.isReady,
+              let baseURL = OpenCodeServerManager.shared.serverURL,
+              let authHeader = OpenCodeServerManager.shared.authorizationHeader else {
+            NSLog("[OpenCodeHTTP] replyPermission skipped: server not ready")
+            return
+        }
+        var req = URLRequest(url: baseURL.appendingPathComponent("permission/\(requestID)/reply"))
+        req.httpMethod = "POST"
+        req.setValue(authHeader, forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["reply": decision.rawValue]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
+                NSLog("[OpenCodeHTTP] replyPermission HTTP %d: %@",
+                      http.statusCode, String(data: data, encoding: .utf8) ?? "(empty)")
+            }
+        } catch {
+            NSLog("[OpenCodeHTTP] replyPermission error: %@", "\(error)")
         }
     }
 

@@ -450,14 +450,17 @@ struct ChatInputField: View {
 
         return ZStack(alignment: .bottomTrailing) {
             ZStack(alignment: .topLeading) {
-                if text.isEmpty {
-                    Text(placeholderText)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.tertiary)
-                        .padding(.leading, 8)
-                        .padding(.top, 5)
-                        .allowsHitTesting(false)
-                }
+                // placeholder 永远在 ZStack 里（用 opacity 控制可见性），
+                // 否则 text 由空变非空时 ZStack 子节点数从 2 变 1，
+                // SwiftUI 会把 SendOnEnterTextEditor 当成"新位置的 view"重建 NSScrollView →
+                // NSTextView 失 focus，导致用户输第一个字后无法继续输入（v1.3 用户反馈过）。
+                Text(placeholderText)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 8)
+                    .padding(.top, 5)
+                    .allowsHitTesting(false)
+                    .opacity(text.isEmpty ? 1 : 0)
 
                 SendOnEnterTextEditor(
                     text: $text,

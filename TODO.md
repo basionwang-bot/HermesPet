@@ -311,6 +311,7 @@
 
 ## [P2-治理] 稳定性 / 数据治理
 - [ ] `conversations.json` 大小上限 / 自动归档（聊几个月可能几 MB，启动加载慢）
+- [x] **activity.sqlite 自动归档** —— 2026-05-17 加 `ActivityStore.performMaintenance()`：events 48h / sessions 90 天 / user_questions 90 天 / app_usage_stats 365 天差异化保留；WAL checkpoint(TRUNCATE) 收 WAL 文件；db 文件超 50MB 才 VACUUM。ActivityRecorder 启动调一次 + 每 24h Timer 重复
 - [x] streaming 时切换对话的行为明确化：switchConversation 检测离开的对话仍 isStreaming 时，通过 ScreenshotAdded 通道弹 toast「对话 N 仍在生成中」
 - [x] **NSWindow level 全局梳理** —— 新建 `Sources/WindowLevels.swift` 定义 `HermesWindowLevel` 枚举（`.chat` = floating, `.intelligence` = floating, `.auxiliary` = mainMenu, `.dynamicIsland` = statusBar），5 个 controller 引用同一规范；ClawdBubble / VoiceTranscript 从 statusBar 降到 mainMenu 永不挡灵动岛
 - [ ] release 版本号自动化：改版本不用手动改 Info.plist
@@ -552,4 +553,43 @@ PR 作者 simpledavid，3 个独立 commit 塞一个 PR（3011+ 行）。本地 
 
 > **图例:** [x] 已完成 · [ ] 待实现
 > 优先级按用户体验影响排序
-> 最后更新：2026-05-16（灵动岛/桌宠/Pin 优化轮：① 灵动岛工具卡底部加 mode 主色迷你进度条 v3（Apple Music 风四层叠加 + TimelineView 30fps 连续推进 + 玻璃感反光描边）② Hermes 羽毛 + Codex 光标补完成庆祝动画（360° 旋转 / scale 弹跳 / 光圈扩散），三模式视觉反馈对齐 ③ 全局热键 ⌘⇧P 把当前对话最新 AI 回答 Pin 到桌面，结果走灵动岛通知提示）
+
+---
+
+## [P0-v1.3] Permission UI 灵动岛形变（2026-05-17）
+
+### Phase 1：在线 AI permission UI ✅
+- [x] **opencode permission ask 协议调研** —— 拉 OpenAPI spec 确认：SSE 事件 `permission.asked` payload (id/sessionID/permission/patterns/metadata/always/tool)；REST `POST /permission/{id}/reply` body `{reply: once|always|reject}`；`PermissionRule.action` 枚举 `allow|deny|ask`
+- [x] **Models.swift +120 行** —— `PermissionRequest` / `PermissionDecision` (`once/always/reject`) / `AnyCodable` 通用 JSON 容器（全 Sendable 跨 isolation 安全）
+- [x] **OpenCodeHTTPClient +90 行** —— session create 按 `UserDefaults.permissionUIEnabled` 切 `ask/allow` rules；SSE handler 加 `permission.asked` 解析 → 广播 `HermesPetPermissionAsked`；`replyPermission(requestID, decision)` POST 回执
+- [x] **PermissionCardView.swift 新增 ~180 行** —— 卡片：橙色 Permission Request 头 + 工具名 + Edit/Write diff 预览 + 三按钮竖排 Allow(绿) / Always(橙) / Deny(红)，`.frame(maxWidth: .infinity)` 等宽，⌘Y/⌘N chip
+- [x] **PermissionWindowController.swift 新增 ~240 行** —— **独立 NSWindow** 装 permission 卡片（不复用灵动岛 NSWindow）：灵动岛 NSWindow 改 frame 必崩（`NSHostingView.invalidateSafeAreaInsets` 嵌套 → `_postWindowNeedsUpdateConstraints` NSException）。独立窗口动态读 `HermesPetGeometry` 通知里的 `notchWidth + idleExtraWidth + 10pt antialias 补偿` 让宽度跟灵动岛严格视觉对齐
+- [x] **SettingsView 隐私分组加 Toggle** —— "工具调用前向我确认" 默认关，老用户 / dmg 朋友零迁移成本；开启后 ask 模式生效（下一次新对话）
+- [x] **CLAUDE.md 决策 #5 加深** —— NSWindow setFrame + SwiftUI overlay 同时变化必崩的两个根因：(1) `sizingOptions=[]` 挡 SwiftUI 主动 resize；(2) `animator()/animate:true` 走 `NSHostingView.updateAnimatedWindowSize` 反向 setFrame 嵌套必崩
+
+### 视觉一体化迭代（11 次调整后定型）
+- [x] **PermissionWindow 跟灵动岛严格视觉融合**：cardWidth = `notchWidth + idleExtraWidth + 10`（antialias 视觉补偿）+ `leftShrink=1pt` 微调对齐，各 MacBook 机型刘海宽度自适应
+- [x] **灵动岛形变响应**：`PillView.permissionActive` state，permission 显示中灵动岛底部 `currentRadius = 0`（直角衔接卡片顶部）、`onHover` ignore 不响应 hover 形变 → 灵动岛"冻结"成一体形态
+- [x] **柔和 spring 入场/退场**：入场 `response 0.7 damping 0.86 blendDuration 0.3`，退场 `response 0.55 damping 0.9`。灵动岛 `permissionActive` 切换 spring 参数同步避免错相
+- [x] **mask + offset 双重退场动画** —— `PermissionCardTransition` 用 `mask(.top) Rectangle.scaleEffect(y: progress, anchor: .top)` + `offset(y: -cardHeight*(1-progress))`，按钮原样消失（不压缩变形）+ 整体上滑像"被拉回灵动岛"
+
+### Phase 2：CLI 模式 permission ✅
+- [x] **PermissionHookServer.swift 新增 ~230 行** —— NWListener 内嵌本地 HTTP server，监听 127.0.0.1 任意端口，自写最小 HTTP 1.1 解析器（headers + Content-Length body 读完整）。POST /permission-hook 接 hook 调用 → 解析 payload → 转 PermissionRequest → 广播 HermesPetPermissionAsked → 挂起 HTTP 响应等用户决策 → dispatchDecision 回写 JSON。`HookSource` enum 按 hook_event_name 区分 Claude（`PreToolUse` → `hookSpecificOutput.permissionDecision`）/ Codex（`PermissionRequest` → `hookSpecificOutput.decision.behavior`）两套协议
+- [x] **PermissionHookInstaller.swift 新增 ~130 行** —— `installClaudeHook(port)` 写 `~/.claude/settings.json` 的 `hooks.PreToolUse` 用 `type: http` 直接 POST 到我们 server（带 `hermespet=true` 标识幂等去重）；`installCodexHook(port)` 写 `~/.codex/config.toml` 的 `[[hooks.PermissionRequest]]` + bundled shell script 用 curl 中转（Codex 不支持 http type）
+- [x] **toggle 联动 install/uninstall** —— `ChatViewModel.permissionUIEnabled.didSet` 切换时自动调 install/uninstall hook，App 启动时按 UserDefaults 状态恢复
+
+### Phase 3：扩展功能 ✅ (1/2 完成 + 1 决策跳过)
+- [x] **Question 卡片**（opencode `question.asked` 事件）—— AI 主动问问题 + 选项列表。新建 `Models.swift` QuestionRequest 数据结构 + `OpenCodeHTTPClient` question.asked SSE 监听 + replyQuestion/rejectQuestion API + 新建 `QuestionCardView.swift` 青色头 + 问题文本 + 选项列表（单选立即提交，multiple 加底部提交按钮）+ PermissionWindow viewState 支持 question/permission 互斥显示
+- [-] ~~**全局快捷键 ⌘Y / ⌘N**~~ —— 决策跳过。local monitor 需要 HermesPet 抢前台焦点（打断用户工作流），global monitor 需要 Accessibility 权限。chip UI 仍然显示 ⌘Y/⌘N 占位，未来 v1.4 若有强需求再做
+
+---
+
+## [P1-Bug] 持续追踪
+- [x] **截图 250ms 硬编码** —— 2026-05-17 改成事件驱动：`hideAndShowWindow(hide, done:)` 让调用方在窗口真正不可见时回调；ChatView alphaValue 同步立即调 done，HermesPetApp 全局热键等 ChatWindowController.hide() 0.22s 动画完成回调 done。彻底去掉时间猜测，慢电脑也不会截到半透明窗口
+- [ ] **CLIAvailability 探测失败的用户引导** —— v1.3 已加三层兜底（zsh→bash→14 个常见路径）+ 失败缓存 30s，但 UI 上还能加"PATH 没找到 X，到设置面板手动指定路径"toast 提示
+- [ ] **SchemaMigrator 框架** —— v1.3 已加，第一条迁移把旧 `directAPIKey` 全局 key 复制到 scoped `directAPIKey.<providerID>`。未来字段语义变化时按版本号继续加 migration（不要中间插入打乱顺序）
+
+---
+
+> 最后更新：2026-05-17（v1.3 Permission UI Phase 1/2/3 全部完成：在线 AI + Claude CLI HTTP hook + Codex CLI command hook + Question 卡片，3 个 mode 全覆盖）
+> 2026-05-17 工程质量轮：13 条 Swift 6 isolation 警告全清零（PermissionHookServer / PermissionWindowController / CanvasService 共 20 条 → 0）；截图改事件驱动告别 250ms 硬编码；ActivityStore 加 performMaintenance 解决 20MB+ sqlite 膨胀

@@ -268,6 +268,26 @@ final class ChatViewModel {
     var morningBriefingBackend: AgentMode {
         didSet { UserDefaults.standard.set(morningBriefingBackend.rawValue, forKey: "morningBriefingBackend") }
     }
+    /// 权限审批 UI 开关 —— v1.3 新增。
+    /// 关（默认）：directAPI 工具全 allow + Claude/Codex 的 ~/.claude/settings.json hook 撤销
+    /// 开：directAPI 走 ask + Claude/Codex 注入 hook → 工具调用前灵动岛弹卡片让用户决策
+    /// 切换后立即生效（hook 安装是异步的，下次工具调用时已经生效）
+    var permissionUIEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(permissionUIEnabled, forKey: "permissionUIEnabled")
+            Task { @MainActor in
+                let port = PermissionHookServer.shared.port
+                if permissionUIEnabled, port > 0 {
+                    PermissionHookInstaller.installClaudeHook(port: port)
+                    PermissionHookInstaller.installCodexHook(port: port)
+                } else {
+                    PermissionHookInstaller.uninstallClaudeHook()
+                    PermissionHookInstaller.uninstallCodexHook()
+                }
+            }
+        }
+    }
+
     var showSettings: Bool = false
     /// 开机自启状态（SMAppService 同步）
     var isLaunchAtLoginOn: Bool = false
@@ -341,6 +361,8 @@ final class ChatViewModel {
         self.showDockIcon = UserDefaults.standard.bool(forKey: "showDockIcon")
         // activityRecordingEnabled 默认 true（首次会弹 Accessibility 权限框，用户可在设置里关）
         self.activityRecordingEnabled = (UserDefaults.standard.object(forKey: "activityRecordingEnabled") as? Bool) ?? true
+        // permissionUIEnabled 默认 false —— dmg 朋友升级零摩擦（行为不变），追求安全的用户设置里手动开
+        self.permissionUIEnabled = UserDefaults.standard.bool(forKey: "permissionUIEnabled")
         // 早报后端默认 Hermes（自托管/隐私零风险），用户可改
         let savedBriefing = UserDefaults.standard.string(forKey: "morningBriefingBackend")
         self.morningBriefingBackend = AgentMode(rawValue: savedBriefing ?? "") ?? .hermes
@@ -392,6 +414,50 @@ final class ChatViewModel {
             let text = (note.userInfo?["text"] as? String) ?? ""
             Task { @MainActor in
                 self.submitVoiceInput(text)
+            }
+        }
+
+        // 灵动岛 permission 卡片用户决策 → POST 回 opencode（仅 directAPI 模式）
+        // 设置开关「权限审批」打开 + 用户点 Allow once/Always/Deny 时触发
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetPermissionDecisionMade"),
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let requestID = note.userInfo?["requestID"] as? String,
+                  let raw = note.userInfo?["decision"] as? String,
+                  let decision = PermissionDecision(rawValue: raw) else { return }
+            Task.detached(priority: .userInitiated) {
+                await OpenCodeHTTPClient.shared.replyPermission(
+                    requestID: requestID,
+                    decision: decision
+                )
+            }
+        }
+
+        // Question 卡片用户选了选项 → POST 回 opencode
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetQuestionAnswered"),
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let requestID = note.userInfo?["requestID"] as? String,
+                  let answers = note.userInfo?["answers"] as? [[String]] else { return }
+            Task.detached(priority: .userInitiated) {
+                await OpenCodeHTTPClient.shared.replyQuestion(
+                    requestID: requestID,
+                    answers: answers
+                )
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetQuestionRejected"),
+            object: nil,
+            queue: .main
+        ) { note in
+            guard let requestID = note.userInfo?["requestID"] as? String else { return }
+            Task.detached(priority: .userInitiated) {
+                await OpenCodeHTTPClient.shared.rejectQuestion(requestID: requestID)
             }
         }
     }
@@ -1900,18 +1966,20 @@ final class ChatViewModel {
     /// 截屏：先临时隐藏聊天窗口避免被截进去，截完恢复，把截图加到附件。
     /// 不用 CGPreflightScreenCaptureAccess 预检（macOS 26 + ScreenCaptureKit 下不可靠）。
     ///
-    /// **同步策略**：`hideAndShowWindow(true, done:)` 接受一个 `done` callback，
-    /// ChatView 端用 `NSAnimationContext.runAnimationGroup` 等动画完成后才调 done，
-    /// 这样不依赖固定 250ms sleep，慢电脑也不会截到一半的窗口。
-    func captureScreenAndAttach(hideAndShowWindow: @escaping (_ hide: Bool) -> Void) {
-        hideAndShowWindow(true)
-        Task { @MainActor [weak self] in
-            // alphaValue=0 是立即生效的（非动画），等一次 CALayer commit + 一帧渲染就好。
-            // 之前 250ms 是历史遗留，3 帧 ≈ 50ms 已经够，比之前快 5 倍 + 更可靠。
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            let result = await ScreenCapture.captureMainScreenWithError()
-            hideAndShowWindow(false)
-            self?.handleScreenCaptureResult(result)
+    /// **事件驱动同步**：以前用固定 250ms / 50ms sleep 等窗口隐藏完，但隐藏方式不一致：
+    /// - ChatView 按钮触发：用 alphaValue=0，瞬时生效
+    /// - 全局热键触发：用 ChatWindowController.hide()，0.22s 退出动画
+    /// 固定 sleep 在第二种场景下截到半透明窗口。改成 callback：调用方在窗口真正
+    /// 不可见时调 done()，截图才开始 —— 既快又准。
+    func captureScreenAndAttach(
+        hideAndShowWindow: @escaping @MainActor (_ hide: Bool, _ done: @escaping @MainActor () -> Void) -> Void
+    ) {
+        hideAndShowWindow(true) { [weak self] in
+            Task { @MainActor in
+                let result = await ScreenCapture.captureMainScreenWithError()
+                hideAndShowWindow(false) {}   // 恢复窗口不需要等回调
+                self?.handleScreenCaptureResult(result)
+            }
         }
     }
 

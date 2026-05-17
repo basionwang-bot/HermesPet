@@ -919,6 +919,18 @@ struct SettingsView: View {
 
     private var privacySection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // 在线 AI 工具调用前是否要用户审批 —— 默认关（行为同 v1.2.x），开了之后
+            // 灵动岛会在 AI 想跑 Edit/Write/Bash 等工具时弹卡片让 Allow/Always/Deny
+            captionToggle(
+                icon: "checkmark.shield.fill",
+                iconColor: .orange,
+                title: "工具调用前向我确认",
+                caption: "AI 想读写文件 / 跑命令时，灵动岛展开卡片让你点 Allow / Always / Deny。\n默认关（AI 全部放行）；开启后下一次新对话生效。仅「在线 AI」模式生效（v1.3）。",
+                isOn: $viewModel.permissionUIEnabled
+            )
+
+            Divider()
+
             captionToggle(
                 icon: "eye.fill",
                 iconColor: .indigo,

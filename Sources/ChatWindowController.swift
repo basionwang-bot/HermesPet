@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+extension Notification.Name {
+    /// ChatWindow 调 show()，通知 ChatView 强制 scrollToBottom（恢复用户期望的"看最新消息"位置）
+    static let hermesPetChatWindowShown = Notification.Name("HermesPetChatWindowShown")
+}
+
 /// 聊天窗口控制器：用 NSWindow 替代 NSPopover，
 /// 显示/隐藏时从灵动岛位置「展开/收回」动画，
 /// 但保留 NSWindow 可拖拽调整大小的能力。
@@ -77,6 +82,11 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         focusInputField()
 
+        // 显示窗口时强制滚到底部。NSWindow.orderFront 不会重新触发 SwiftUI 的 .onAppear，
+        // 但 ScrollView 内 LazyVStack 在窗口隐藏期间会卸载 cell —— 再次显示时位置可能从顶部
+        // lazy 加载，把用户带回对话开头。post 通知让 ChatView 主动 scrollToBottom 兜底。
+        NotificationCenter.default.post(name: .hermesPetChatWindowShown, object: nil)
+
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.34
             // CA 没有 spring，用 easeOut + 略长 duration 模拟弹性入场
@@ -93,6 +103,9 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
                 // 兜底再设一次焦点：极端情况下 NSHostingView 在动画期间才完成 mount，
                 // 第一次 focusInputField() 可能没找到 NSTextView
                 self.focusInputField()
+                // 兜底再 post 一次 —— ScrollView 的 contentSize 在动画结束、LazyVStack
+                // 全部 mount 完之后才稳定，这时再要求滚到底部最可靠
+                NotificationCenter.default.post(name: .hermesPetChatWindowShown, object: nil)
             }
         })
     }
@@ -115,8 +128,13 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         return nil
     }
 
-    func hide() {
-        guard isVisible else { return }
+    /// hide 完成回调 —— 截图流程需要等窗口真正不可见才能开拍，
+    /// 不然会拍到半透明的退出动画中间帧。完成 handler 里调一次
+    func hide(completion: (@MainActor () -> Void)? = nil) {
+        guard isVisible else {
+            completion?()
+            return
+        }
 
         // 退出前先把当前 frame 保存（万一用户没动也保存一次默认值）
         if !isAnimating { saveFrame() }
@@ -140,6 +158,7 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
                 self.window.alphaValue = 1
                 self.window.contentMinSize = NSSize(width: 360, height: 360)
                 self.isAnimating = false
+                completion?()
             }
         })
     }

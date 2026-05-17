@@ -199,10 +199,12 @@ struct ChatView: View {
             .padding(.horizontal, 6)
 
             HeaderIconButton(systemName: "camera.viewfinder", help: "截屏并附加（隐藏窗口截全屏）") {
-                viewModel.captureScreenAndAttach { hide in
+                viewModel.captureScreenAndAttach { hide, done in
                     if let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
                         win.alphaValue = hide ? 0 : 1
                     }
+                    // alphaValue 是同步生效的（非动画），立即可截
+                    done()
                 }
             }
 
@@ -412,6 +414,13 @@ struct ChatView: View {
                             proxy.scrollTo(msgID, anchor: .center)
                         }
                     }
+                }
+                // 窗口从灵动岛展开 → 强制滚到底部。
+                // 隐藏期间 LazyVStack 卸载了 cell，再次显示时如果不主动 scroll，
+                // 用户会被带回对话开头（看到的是旧消息而非最新）。
+                .onReceive(NotificationCenter.default.publisher(for: .hermesPetChatWindowShown)) { _ in
+                    isMessagesNearBottom = true
+                    scrollToBottom(proxy, animated: false)
                 }
             }
         }

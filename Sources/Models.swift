@@ -438,6 +438,150 @@ struct Delta: Codable {
     let content: String?
 }
 
+// MARK: - Permission System
+// opencode v1.15.x permission ask 协议的客户端侧模型。
+// 服务端 SSE 推 `permission.asked` 事件 → 我们解析成 PermissionRequest →
+// 灵动岛展示卡片 → 用户决策 → POST /permission/{id}/reply { reply: once|always|reject }
+
+/// 用户对 permission 请求的决策选项。
+/// 对应 opencode 的 reply 字段三档枚举。
+enum PermissionDecision: String, Codable {
+    /// 仅本次允许 —— 下次同样的工具调用还会再次询问
+    case once
+    /// 永久允许此 pattern —— opencode 会把 pattern 加进 session 的 always 列表，
+    /// 之后同样 pattern 自动放行不再 ask
+    case always
+    /// 拒绝 —— 工具调用直接报错给 AI，AI 通常会改用其他方式
+    case reject
+}
+
+/// 一条等待用户决策的 permission 请求。来自 opencode SSE permission.asked 事件。
+///
+/// **字段对应**（来自 opencode OpenAPI spec）:
+/// - id: "per_xxx" permission requestID（reply 时用这个）
+/// - sessionID: "ses_xxx"
+/// - permission: 权限类型（"read" / "write" / "edit" / "bash" / "webfetch" / ...）
+/// - patterns: 匹配的 patterns（如 ["**/*.ts"]，always 模式会把这些加进白名单）
+/// - metadata: 工具调用的实际参数（如 {"command": "rm -rf /"} / {"file_path": "...", "old_string": "..."}）
+/// - always: 当前 session 已经 always 允许的 pattern 列表（UI 可显示作为参考）
+/// - tool: 关联的工具调用元信息（messageID + callID，可用于关联气泡）
+struct PermissionRequest: Identifiable, Codable, Equatable, Sendable {
+    let id: String
+    let sessionID: String
+    let permission: String
+    let patterns: [String]
+    let metadata: [String: AnyCodable]
+    let always: [String]
+    let tool: ToolRef?
+
+    struct ToolRef: Codable, Equatable, Sendable {
+        let messageID: String
+        let callID: String
+    }
+
+    /// 工具名（如 "Edit" / "Write" / "Bash"）—— UI 展示用。
+    /// opencode metadata 里通常有 `tool` 字段，否则 fallback 到 permission 类型推断
+    var toolDisplayName: String {
+        if case .string(let s) = metadata["tool"] { return s }
+        switch permission.lowercased() {
+        case "read":     return "Read"
+        case "write":    return "Write"
+        case "edit":     return "Edit"
+        case "bash":     return "Bash"
+        case "webfetch": return "WebFetch"
+        case "glob":     return "Glob"
+        case "grep":     return "Grep"
+        case "list":     return "List"
+        default:         return permission.capitalized
+        }
+    }
+
+    /// 工具操作的"主参数"（如 Edit/Write 的 file_path，Bash 的 command）—— UI 头部显示。
+    /// 不同工具不同字段，按已知工具类型优先匹配
+    var primaryArg: String? {
+        if case .string(let s) = metadata["file_path"] { return s }
+        if case .string(let s) = metadata["filePath"] { return s }
+        if case .string(let s) = metadata["command"] { return s }
+        if case .string(let s) = metadata["url"] { return s }
+        if case .string(let s) = metadata["pattern"] { return s }
+        if case .string(let s) = metadata["path"] { return s }
+        return nil
+    }
+
+    /// Edit/Write 工具的 diff 预览（如果 metadata 里有 old_string + new_string）
+    var diffPreview: (oldText: String?, newText: String?)? {
+        var old: String? = nil
+        var new: String? = nil
+        if case .string(let s) = metadata["old_string"] { old = s }
+        else if case .string(let s) = metadata["oldText"] { old = s }
+        if case .string(let s) = metadata["new_string"] { new = s }
+        else if case .string(let s) = metadata["newText"] { new = s }
+        else if case .string(let s) = metadata["content"] { new = s }
+        guard old != nil || new != nil else { return nil }
+        return (old, new)
+    }
+}
+
+/// AI 主动问问题的请求（opencode `question.asked` SSE 事件）。
+/// 跟 PermissionRequest 平行，复用同一个 PermissionWindow 显示卡片
+struct QuestionRequest: Identifiable, Codable, Equatable, Sendable {
+    let id: String          // "que_xxx"
+    let sessionID: String   // "ses_xxx"
+    let questions: [QuestionInfo]
+    let tool: PermissionRequest.ToolRef?
+
+    struct QuestionInfo: Codable, Equatable, Sendable {
+        let question: String
+        let header: String
+        let options: [QuestionOption]
+        let multiple: Bool?
+        let custom: Bool?
+    }
+
+    struct QuestionOption: Codable, Equatable, Sendable {
+        let label: String
+        let description: String
+    }
+}
+
+/// 简单的 JSON 任意值容器 —— Codable 不直接支持 `[String: Any]`，
+/// 这里用 enum 列出所有可能类型让 JSONDecoder 自动选。
+/// 只需要 String / Bool / Double / Int / Array / Object 几种基本类型即可覆盖 opencode metadata
+enum AnyCodable: Codable, Equatable, Sendable {
+    case string(String)
+    case int(Int)
+    case double(Double)
+    case bool(Bool)
+    case array([AnyCodable])
+    case object([String: AnyCodable])
+    case null
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if c.decodeNil() { self = .null }
+        else if let v = try? c.decode(Bool.self)   { self = .bool(v) }
+        else if let v = try? c.decode(Int.self)    { self = .int(v) }
+        else if let v = try? c.decode(Double.self) { self = .double(v) }
+        else if let v = try? c.decode(String.self) { self = .string(v) }
+        else if let v = try? c.decode([AnyCodable].self) { self = .array(v) }
+        else if let v = try? c.decode([String: AnyCodable].self) { self = .object(v) }
+        else { self = .null }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        switch self {
+        case .null:          try c.encodeNil()
+        case .bool(let v):   try c.encode(v)
+        case .int(let v):    try c.encode(v)
+        case .double(let v): try c.encode(v)
+        case .string(let v): try c.encode(v)
+        case .array(let v):  try c.encode(v)
+        case .object(let v): try c.encode(v)
+        }
+    }
+}
+
 // MARK: - API Errors
 enum APIError: LocalizedError {
     case invalidResponse

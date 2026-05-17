@@ -81,6 +81,12 @@ spawn `claude -p` 时默认 permission-mode 会拒绝所有需要确认的工具
 - `ChatWindowController.show/hide` 内的 setFrame **不能同步触发别的 window 的 setFrame**
 - 否则 NSHostingView.windowDidLayout 触发嵌套 layout cycle → macOS 26 抛 NSException → 必崩
 - 跨窗口同步用 `DispatchQueue.main.async` 隔到下一个 runloop（已踩过坑的：灵动岛 compact 形态联动）
+- **同一个 window 内 NSWindow.setFrame + SwiftUI overlay 同时变化也会触发**（v1.3 permission UI 崩了两次才搞定）：
+  - 触发链：SwiftUI 加 ZStack overlay → SwiftUI 算 intrinsic size 觉得需要更大空间 → **NSHostingView 反向请求 NSWindow.setFrame** → 跟 controller 自己的 setFrame 在 CA transaction commit 期间撞车 → NSException
+  - **必须显式禁掉 NSHostingView 反向 resize**：`if #available(macOS 13.0, *) { hosting.sizingOptions = [] }` —— 默认 `.preferredContentSize` 会跟踪 SwiftUI intrinsic size。设空集合后 hosting 只渲染，window 尺寸 100% 由 controller 控制
+  - 同时 SwiftUI 那边监听 `pendingXxx` state 设置时**不要用 `withAnimation`**、不要 `.transition()` —— 这些会在 NSWindow setFrame 期间触发额外 layout 触发嵌套
+  - NSWindow setFrame 也**不要用 `animate: true`** —— AppKit 动画走自家系统，跟 NSHostingView 嵌套照样崩。要动画就在 SwiftUI 那边内部做，window frame 立即设
+  - controller 监听通知 setFrame 仍要包 `DispatchQueue.main.async`，让通知派发的同步 SwiftUI 更新先 stable
 
 ### 6. UI 设计：HIG 输入栏
 - 输入栏用 Capsule(20pt 圆角) 容器，包输入框 + 28pt 圆按钮

@@ -421,8 +421,72 @@ final class ActivityStore: @unchecked Sendable {
             self?.exec("DELETE FROM activity_events")
             self?.exec("DELETE FROM activity_sessions")
             self?.exec("DELETE FROM app_usage_stats")
+            self?.exec("DELETE FROM user_questions")
             self?.exec("VACUUM")
         }
+    }
+
+    /// 综合维护：定期清旧数据 + WAL checkpoint + 必要时 VACUUM。
+    /// 启动时调一次 + 每 24h 调一次。各表保留策略（按数据价值差异化）：
+    /// - events 48h（原始流水，量大价值低）
+    /// - sessions 90 天（聚合块，AI 早报回顾用）
+    /// - user_questions 90 天（用户跟 AI 说过的话，FTS 检索价值高）
+    /// - app_usage_stats 365 天（每日聚合，体积小留久）
+    /// 然后 WAL checkpoint(TRUNCATE) 把 WAL 文件清干净（不然能涨到几十 MB）。
+    /// 最后如果数据库文件超过 sizeThresholdMB，跑一次 VACUUM 收缩（VACUUM 较慢
+    /// 所以只在阈值之上才跑，平时靠 incremental autovacuum）
+    func performMaintenance(sessionsRetentionDays: Int = 90,
+                            userQuestionsRetentionDays: Int = 90,
+                            statsRetentionDays: Int = 365,
+                            sizeThresholdMB: Int = 50) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+
+            let now = Date().timeIntervalSince1970
+            let sessionCutoff = now - Double(sessionsRetentionDays) * 86400
+            let questionCutoff = now - Double(userQuestionsRetentionDays) * 86400
+            let statsCutoffDate: String = {
+                let date = Date().addingTimeInterval(-Double(statsRetentionDays) * 86400)
+                let f = DateFormatter()
+                f.dateFormat = "yyyy-MM-dd"
+                return f.string(from: date)
+            }()
+            let eventCutoff = now - 48 * 3600
+
+            // 各表 prune
+            self.deleteWhere(table: "activity_events", column: "timestamp", lessThan: eventCutoff)
+            self.deleteWhere(table: "activity_sessions", column: "end_time", lessThan: sessionCutoff)
+            self.deleteWhere(table: "user_questions", column: "timestamp", lessThan: questionCutoff)
+            // app_usage_stats 用 date 字段（TEXT 类型 yyyy-MM-dd），按字符串比较
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "DELETE FROM app_usage_stats WHERE date < ?",
+                                  -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, (statsCutoffDate as NSString).utf8String, -1, nil)
+                sqlite3_step(stmt)
+            }
+            sqlite3_finalize(stmt)
+
+            // WAL checkpoint(TRUNCATE)：把 WAL 文件清空（数据已合并回主 db）
+            self.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+
+            // 容量阈值之上才 VACUUM（VACUUM 重写整个 db，几百 MB 时会慢，平时不必）
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: self.dbPath),
+               let size = attrs[.size] as? Int64,
+               size > Int64(sizeThresholdMB) * 1024 * 1024 {
+                self.exec("VACUUM")
+            }
+        }
+    }
+
+    /// 内部辅助：按时间戳删 —— 替代散落的 pruneEvents/pruneSessions 重复代码
+    private func deleteWhere(table: String, column: String, lessThan cutoff: TimeInterval) {
+        guard let db else { return }
+        var stmt: OpaquePointer?
+        let sql = "DELETE FROM \(table) WHERE \(column) < ?"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_double(stmt, 1, cutoff)
+        sqlite3_step(stmt)
     }
 
     // MARK: - 私有辅助

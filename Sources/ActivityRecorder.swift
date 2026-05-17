@@ -71,6 +71,7 @@ final class ActivityRecorder: NSObject {
     private var mouseMonitor: Any?
     private var workspaceObserved = false
     private var sampleTimer: Timer?
+    private var maintenanceTimer: Timer?
 
     private var lastPasteboardChangeCount: Int = NSPasteboard.general.changeCount
     private var lastAggregateTime: Date = .distantPast
@@ -143,9 +144,14 @@ final class ActivityRecorder: NSObject {
             startNewSession(for: app)
         }
 
-        // 4) 启动后立即清理一次过期数据
-        store.pruneEvents()
-        store.pruneSessions()
+        // 4) 启动后立即综合维护一次（prune 旧数据 + WAL checkpoint + 必要时 VACUUM）
+        store.performMaintenance()
+
+        // 5) 每 24h 重复一次维护 —— app 常驻几天的话需要持续清理避免 db 膨胀
+        maintenanceTimer = Timer.scheduledTimer(withTimeInterval: 24 * 3600,
+                                                repeats: true) { [weak self] _ in
+            self?.store.performMaintenance()
+        }
     }
 
     /// 停止采集（暂停）。已在的 current session 会落盘。
@@ -161,6 +167,8 @@ final class ActivityRecorder: NSObject {
         if let m = mouseMonitor { NSEvent.removeMonitor(m); mouseMonitor = nil }
         sampleTimer?.invalidate()
         sampleTimer = nil
+        maintenanceTimer?.invalidate()
+        maintenanceTimer = nil
     }
 
     /// 用户在 settings / menu bar 切换"是否记录活动"
