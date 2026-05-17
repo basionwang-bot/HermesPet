@@ -1,13 +1,32 @@
 import AppKit
 import SwiftUI
 
+/// 灵动岛专用 NSPanel 子类。
+///
+/// override `constrainFrameRect` 返回原 frameRect —— macOS 26 默认会把 panel 约束到
+/// `screen.visibleFrame`（避开 menu bar），即使 `level = .statusBar` 也被约束。
+/// 我们要 panel 顶贴**物理屏顶**（盖住刘海两侧），所以原样返回。
+///
+/// 阶段 1 暂不 override `canBecomeKey` —— idle 状态没有键盘输入需求；阶段 2 做 permission
+/// UI 需要 NSTextView 接收输入时再开（届时配合 `isFloatingPanel + becomesKeyOnlyIfNeeded`）。
+final class EmbeddableIslandPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+}
+
 /// 与刘海融合的桌宠胶囊。
 /// 默认（idle）：刘海两侧探出来一段，像 iPhone 灵动岛常驻态显示信息。
 /// 悬停（hover）：横向收紧到刘海宽度、纵向也变短，像一个紧凑的可点击按钮。
 @MainActor
 final class DynamicIslandController {
     private(set) var pillWindow: NSWindow
-    private let hostingView: NSHostingView<DynamicIslandPillView>
+    /// 用 NSHostingController 而非 NSHostingView。
+    /// 两者的 `sizingOptions = []` 语义不同：NSHostingView 在 macOS 26 上**仍不能**完全阻止
+    /// `updateAnimatedWindowSize` 在 CA Transaction commit 期间反推 NSWindow.setFrame
+    /// (这是 v1.2.4 必须把 permission UI 放独立窗口的原因)。NSHostingController 能真正禁掉
+    /// 那条路径，让 panel.setFrame 安全可用 —— 为阶段 2 让灵动岛真正长大变形铺路。
+    private let hostingController: NSHostingController<DynamicIslandPillView>
 
     private weak var statusItem: NSStatusItem?
     /// 点击灵动岛胶囊时回调（由 AppDelegate 注册）
@@ -31,40 +50,40 @@ final class DynamicIslandController {
     init() {
         // window 始终是 idle 尺寸（也就是最大尺寸），命中区域 = 整个 window
         // 这样 hover 后形状收缩，鼠标若仍在 idle 范围内，hover 状态依然保持，不抖
-        let window = NSWindow(
+        let panel = EmbeddableIslandPanel(
             contentRect: NSRect(x: 0, y: 0, width: 280, height: 70),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
         )
-        window.level = HermesWindowLevel.dynamicIsland   // 最高层，见 WindowLevels.swift
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = false
-        window.acceptsMouseMovedEvents = true
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        window.isReleasedWhenClosed = false
-        self.pillWindow = window
+        panel.level = HermesWindowLevel.dynamicIsland   // 最高层，见 WindowLevels.swift
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.ignoresMouseEvents = false
+        panel.acceptsMouseMovedEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isReleasedWhenClosed = false
+        self.pillWindow = panel
 
-        let hosting = NSHostingView(rootView: DynamicIslandPillView())
-        hosting.frame = NSRect(x: 0, y: 0, width: 280, height: 70)
-        hosting.autoresizingMask = [.width, .height]
-        // **关键**：禁止 NSHostingView 根据 SwiftUI intrinsic size 反向请求 NSWindow 改 frame。
-        // 默认 sizingOptions 是 `.preferredContentSize`，当我们加新 overlay（permission 卡片）时
-        // SwiftUI 会通知 NSHostingView「我需要更大空间」→ NSHostingView 反向调 window.setFrame →
-        // 跟我们自己的 setFrame 嵌套在 CA transaction commit 期间撞车 → NSException 崩溃。
-        // 设成空集合后 hosting view 只渲染不改 window，window 尺寸由 controller 独占控制。
-        // 参考 CLAUDE.md 决策 #5 + #7
+        // 用 NSHostingController：sizingOptions = [] 能真正禁用 SwiftUI 反推 setFrame。
+        // 跟历史 NSHostingView 实现的关键差别 —— 后者即便 sizingOptions=[] 在 macOS 26 上
+        // 仍会通过 updateAnimatedWindowSize 在 CA transaction commit 期间反推 NSWindow.setFrame
+        // → 嵌套 layout → SIGABRT。这是 v1.2.4 PermissionWindowController 必须用独立窗口的根因。
+        // 改用 NSHostingController 后 panel.setFrame 安全可用，阶段 2 可以让灵动岛真正长大。
+        let hosting = NSHostingController(rootView: DynamicIslandPillView())
         if #available(macOS 13.0, *) {
             hosting.sizingOptions = []
         }
-        window.contentView = hosting
-        self.hostingView = hosting
+        panel.contentViewController = hosting
+        self.hostingController = hosting
 
+        // hostingController.view 是 NSHostingView 实例（私有类型），但 NSView 接口足够挂 gesture
+        let hostingNSView = hosting.view
+        hostingNSView.autoresizingMask = [.width, .height]
         let click = NSClickGestureRecognizer(target: self, action: #selector(toggleChat))
-        hosting.addGestureRecognizer(click)
-        hosting.wantsLayer = true
+        hostingNSView.addGestureRecognizer(click)
+        hostingNSView.wantsLayer = true
 
         positionWindow()
     }
