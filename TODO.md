@@ -61,6 +61,8 @@
 ## [P0-Bug] 🔥 优先修的 Bug
 - [x] **增加灵动岛显示开关** —— 设置页新增“显示灵动岛”开关，默认开启；关闭后 `DynamicIslandController` 即时隐藏顶部胶囊，启动时也尊重该状态，不影响菜单栏图标、快捷键、聊天窗和桌宠
 - [x] **在线 AI 设置页 Key/模型显示不一致** —— `OpenCodeConfigGenerator.hasConfiguredKey/currentModelID` 和真实请求读取规则统一：服务商专属 Key 即使为空也不再回退旧全局 Key；opencode 模型偏好读取改为 `directAPIResponsePreference`，避免设置页切服务商/快速平衡深度时提示和实际模型不同步
+- [x] **飞书群聊回复 v1（小龙虾同款长连接路线）** —— 设置页只填飞书 App ID / Secret；凭据齐全后本地启动 `@larksuiteoapi/node-sdk` 长连接 runner 订阅 `im.message.receive_v1`，群里 @ 飞书后台设置的机器人名字时才触发，先给原消息加 `SMILE` 表情反应，再交给在线 AI 生成正式回复并通过飞书消息 reply API 回到原消息；不做 OAuth、不做公网回调
+- [x] **飞书 v1 只读 MCP 跑通** —— 设置页不再单独放 MCP 开关；凭据齐全时 OpenCodeConfigGenerator 自动写入 `mcp.lark`，通过 `@larksuiteoapi/lark-mcp` 的 `preset.doc.default` 交给 opencode；用户粘贴飞书/Lark 文档链接时仅给本轮请求注入“读取并总结、不写回/不发消息”的提示，UI 消息不被污染
 - [x] **MiniMax 回复格式统一** —— 在 ChatViewModel 显示层统一过滤 assistant 正文里的 `<think>...</think>` 推理草稿；流式中未闭合的 `<think>` 暂不显示，最终消息和编号选项解析都基于清洗后的正文
 - [x] **MiniMax 拖 xlsx 后整个对话持续「没有响应」** —— 定位到 opencode HTTP 返回 200 但 `info.error.data.message = file part media type ...xlsx not supported`，旧逻辑没读 `info.error` 只看 text parts，导致显示空且坏 session 继续复用。现在 POST 返回体先识别 `info.error` 转成明确错误，并清掉该 conversation 的 opencode session，下条消息自动新建恢复
 - [x] **MiniMax 测试连接通过但对话显示「没有响应」** —— OpenCodeHTTPClient 增加最小兜底：记录本轮是否已 yield delta；若 opencode/MiniMax 没发 `message.part.delta`，则从明确 assistant/model 的 `message.part.updated` 或 POST `/message` 返回体里的 text part 补一次正文，避免空回复

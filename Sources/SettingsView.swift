@@ -255,6 +255,8 @@ struct SettingsView: View {
             // 让用户知道现在 directAPI 模式不只是 chat completion，还能读写文件 / 跑命令 / 联网
             opencodeEngineCard
 
+            feishuMCPCard
+
             // 服务商预设 Picker
             settingRow("服务商") {
                 Picker(selection: $selectedProvider) {
@@ -337,6 +339,57 @@ struct SettingsView: View {
             // 底部提示：服务商注册入口 + 备选模型
             providerHint
         }
+    }
+
+    private var feishuMCPCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label {
+                Text("飞书")
+                    .font(.system(size: 13, weight: .medium))
+            } icon: {
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .foregroundStyle(.green)
+            }
+
+            Text("填 App ID / Secret 后自动启用：群聊里 @ 飞书后台设置的机器人名字时回复；粘贴飞书文档链接时让在线 AI 读取总结。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            settingRow("App ID") {
+                TextField("cli_xxxxxxxxxxxxxxxx", text: $viewModel.feishuAppID)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            }
+
+            settingRow("Secret") {
+                Group {
+                    if showKey {
+                        TextField("app secret", text: $viewModel.feishuAppSecret)
+                    } else {
+                        SecureField("app secret", text: $viewModel.feishuAppSecret)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+            }
+
+            Divider()
+
+            Text("群聊回复按小龙虾方案走飞书长连接：开放平台启用机器人、事件订阅选择长连接，并订阅 im.message.receive_v1。群里 @ 飞书后台设置的机器人名字时才会回复，并会先给原消息加一个表情反应；首次启用会用本机 node/npm 安装飞书 Node SDK。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.green.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.green.opacity(0.18), lineWidth: 0.5)
+        )
     }
 
     /// 应用预设到「在线 AI」配置：写入 baseURL + 按当前回复偏好映射模型。

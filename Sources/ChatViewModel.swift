@@ -117,6 +117,20 @@ final class ChatViewModel {
     var directAPIResponsePreference: DirectResponsePreference {
         didSet { UserDefaults.standard.set(directAPIResponsePreference.rawValue, forKey: "directAPIResponsePreference") }
     }
+    var feishuAppID: String {
+        didSet {
+            UserDefaults.standard.set(feishuAppID, forKey: "feishuAppID")
+            scheduleOpenCodeConfigReload()
+            notifyFeishuBotSettingsChanged()
+        }
+    }
+    var feishuAppSecret: String {
+        didSet {
+            UserDefaults.standard.set(feishuAppSecret, forKey: "feishuAppSecret")
+            scheduleOpenCodeConfigReload()
+            notifyFeishuBotSettingsChanged()
+        }
+    }
     /// 上一次用过的 mode —— 持久化到 UserDefaults["agentMode"]。
     /// 新建对话时把这个值作为默认 mode 继承下去；切对话 / 切 mode 时也会跟着更新，
     /// 这样下次启动 / 下次新建都能记住"我习惯用什么"。
@@ -303,6 +317,8 @@ final class ChatViewModel {
         self.directAPIModel = UserDefaults.standard.string(forKey: "directAPIModel") ?? ""
         let savedPreference = UserDefaults.standard.string(forKey: "directAPIResponsePreference")
         self.directAPIResponsePreference = DirectResponsePreference(rawValue: savedPreference ?? "") ?? .balanced
+        self.feishuAppID = UserDefaults.standard.string(forKey: "feishuAppID") ?? ""
+        self.feishuAppSecret = UserDefaults.standard.string(forKey: "feishuAppSecret") ?? ""
         let savedMode = UserDefaults.standard.string(forKey: "agentMode")
         // 全新用户默认走「在线 AI」—— 对方拿到 dmg 多半没装 Hermes Gateway 也没 claude/codex CLI，
         // directAPI 配上 API Key 就能立刻用。老用户的 agentMode UserDefaults 还在，不受影响
@@ -596,6 +612,13 @@ final class ChatViewModel {
             if msg.role == .assistant || msg.role == .user {
                 apiMessages.append(msg)
             }
+        }
+        if mode == .directAPI,
+           !feishuAppID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !feishuAppSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           Self.containsFeishuLink(userText),
+           let userIndex = apiMessages.firstIndex(where: { $0.id == userMessage.id }) {
+            apiMessages[userIndex].content = Self.promptWithFeishuMCPHint(userText)
         }
 
         // 长对话裁剪：每次都重发完整历史会越来越慢 + 烧 token，超阈值时只发开头+近况
@@ -1070,6 +1093,21 @@ final class ChatViewModel {
         return result
     }
 
+    private static func containsFeishuLink(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("feishu.cn/")
+            || lower.contains("larksuite.com/")
+            || lower.contains("feishu.net/")
+    }
+
+    private static func promptWithFeishuMCPHint(_ text: String) -> String {
+        """
+        \(text)
+
+        [系统提示：用户消息里包含飞书/Lark 链接。飞书 MCP 已在 opencode 中启用，请优先使用 lark MCP 工具读取链接对应的文档内容，再用中文回答或总结。当前 v1 只做读取和总结，不要写回飞书，不要发送飞书消息，不要修改文档或多维表格。]
+        """
+    }
+
     /// 在线 AI 撞错时云朵气泡说什么 —— 按错误关键词分类给可操作的 hint。
     /// 用云朵的"飘逸"语气，告诉用户下一步该做啥（不是冷冰冰报错）
     static func petHintForError(_ msg: String) -> String {
@@ -1338,6 +1376,10 @@ final class ChatViewModel {
             OpenCodeHTTPClient.shared.clearAllSessions()
             _ = self
         }
+    }
+
+    private func notifyFeishuBotSettingsChanged() {
+        NotificationCenter.default.post(name: .hermesPetFeishuBotSettingsChanged, object: nil)
     }
 
     /// 手动重命名对话（右键胶囊 → 重命名）

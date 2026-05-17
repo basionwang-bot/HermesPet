@@ -243,9 +243,45 @@ enum OpenCodeConfigGenerator {
             }
         }
 
-        return [
+        var config: [String: Any] = [
             "$schema": "https://opencode.ai/config.json",
             "provider": providers
+        ]
+
+        let mcpServers = buildMCPServers()
+        if !mcpServers.isEmpty {
+            config["mcp"] = mcpServers
+        }
+
+        return config
+    }
+
+    private static func buildMCPServers() -> [String: Any] {
+        let appID = (UserDefaults.standard.string(forKey: "feishuAppID") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let appSecret = (UserDefaults.standard.string(forKey: "feishuAppSecret") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !appID.isEmpty, !appSecret.isEmpty else { return [:] }
+
+        return [
+            "lark": [
+                "type": "local",
+                "command": [
+                    "npx",
+                    "-y",
+                    "@larksuiteoapi/lark-mcp",
+                    "mcp",
+                    "-t",
+                    "preset.doc.default"
+                ],
+                "enabled": true,
+                "timeout": 15000,
+                "environment": [
+                    "APP_ID": appID,
+                    "APP_SECRET": appSecret,
+                    "LARK_DOMAIN": "https://open.feishu.cn"
+                ]
+            ]
         ]
     }
 }

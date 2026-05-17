@@ -187,4 +187,5 @@ enum HotkeyFormatter {
 
 extension Notification.Name {
     static let hermesPetHotkeysChanged = Notification.Name("HermesPetHotkeysChanged")
+    static let hermesPetFeishuBotSettingsChanged = Notification.Name("HermesPetFeishuBotSettingsChanged")
 }

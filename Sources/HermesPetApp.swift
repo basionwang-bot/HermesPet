@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let vm = ChatViewModel()
         viewModel = vm
+        FeishuBotManager.shared.startObserving()
 
         // 聊天窗口（可拖拽调整大小）
         chatWindow = ChatWindowController(viewModel: vm)
@@ -199,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// App 退出前：杀掉所有还在跑的 Claude/Codex 子进程，避免僵尸进程
     func applicationWillTerminate(_ notification: Notification) {
+        FeishuBotManager.shared.stop()
         // 先关 ReasoningProxy（OpenCodeServerManager 之前关，让正在 forward 的请求有机会收尾）
         ReasoningProxy.shared.stop()
         // 优雅 terminate opencode server（让它有机会 flush SQLite）
