@@ -17,6 +17,22 @@ import Foundation
 final class OpenCodeHTTPClient: @unchecked Sendable {
     static let shared = OpenCodeHTTPClient()
 
+    private final class StreamState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var yieldedText = false
+
+        var hasYieldedText: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return yieldedText
+        }
+
+        func markTextYielded() {
+            lock.lock()
+            yieldedText = true
+            lock.unlock()
+        }
+    }
+
     private let lock = NSLock()
     /// `conversationID -> opencode sessionID` 映射。第一次 POST /session 建出来后存进来，
     /// 后续同对话直接复用 sessionID（让 opencode 端跨消息保持上下文）
@@ -105,6 +121,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
 
         let modelTuple = parseModelID(modelOverride ?? OpenCodeConfigGenerator.currentModelID())
         let (providerID, modelID) = modelTuple
+        let streamState = StreamState()
 
         // 3. 拿 sessionID（model 变了 → 新建）
         let sessionID: String
@@ -127,6 +144,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                 sessionID: sessionID,
                 baseURL: baseURL,
                 authHeader: authHeader,
+                streamState: streamState,
                 continuation: continuation
             )
         }
@@ -140,16 +158,17 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         // 如果消息带图片，且当前 model 是文本模型 → 仅这次 prompt override 到该 provider 的 vision model。
         // session 仍绑用户原 model（不改 lastModelByConversation）—— 下次纯文本消息又用回原 model
         let hasImage = (userMsg?.images.isEmpty == false) || (userMsg?.imagePaths.isEmpty == false)
+        let preset = ProviderPreset.all.first(where: { $0.id == providerID })
         let promptModelID: String = {
             guard hasImage else { return modelID }
-            let preset = ProviderPreset.all.first(where: { $0.id == providerID })
             if let vm = preset?.visionModel { return vm }
             return modelID
         }()
-        if hasImage && promptModelID == modelID && providerID == "deepseek" {
-            // DeepSeek 没 vision model，直接报清晰错误，让用户切到 Kimi / GLM / GPT-4o
+        if hasImage && promptModelID == modelID && preset?.visionModel == nil {
+            let providerName = preset?.displayName ?? providerID
+            // 当前 provider 没有配置 vision model，直接报清晰错误，让用户切到支持图片的服务商
             continuation.finish(throwing: OpenCodeHTTPClientError.runtimeFailure(
-                "DeepSeek 当前不支持图片输入。请到设置切到 Moonshot Kimi / 智谱 GLM / OpenAI 任一家再试"
+                "\(providerName) 当前不支持图片输入。请到设置切到 Moonshot Kimi / 智谱 GLM / OpenAI 任一家再试"
             ))
             return
         }
@@ -166,7 +185,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                 sessionID: sessionID,
                 bodyData: bodyData,
                 baseURL: baseURL,
-                authHeader: authHeader
+                authHeader: authHeader,
+                streamState: streamState,
+                continuation: continuation
             )
         }
 
@@ -190,6 +211,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         sseTask.cancel()
 
         if let err = postError {
+            clearSession(for: conversationID)
             continuation.finish(throwing: err)
         } else {
             continuation.finish()
@@ -319,7 +341,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         sessionID: String,
         bodyData: Data,
         baseURL: URL,
-        authHeader: String
+        authHeader: String,
+        streamState: StreamState,
+        continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async -> Error? {
         var req = URLRequest(
             url: baseURL.appendingPathComponent("session/\(sessionID)/message"),
@@ -338,6 +362,18 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                 let msg = String(data: data, encoding: .utf8) ?? "(empty)"
                 return OpenCodeHTTPClientError.runtimeFailure("HTTP \(http.statusCode): \(msg.prefix(300))")
             }
+            guard let json = try? JSONSerialization.jsonObject(with: data) else {
+                return OpenCodeHTTPClientError.runtimeFailure("opencode 返回了无法解析的响应")
+            }
+            if let message = Self.extractOpenCodeError(from: json) {
+                return OpenCodeHTTPClientError.runtimeFailure(message)
+            }
+            if !streamState.hasYieldedText,
+               let text = Self.extractAssistantText(from: json),
+               !text.isEmpty {
+                streamState.markTextYielded()
+                continuation.yield(text)
+            }
             return nil
         } catch {
             return error
@@ -351,6 +387,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         sessionID: String,
         baseURL: URL,
         authHeader: String,
+        streamState: StreamState,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) async {
         var req = URLRequest(url: baseURL.appendingPathComponent("event"))
@@ -372,7 +409,12 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                       let event = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
                     continue
                 }
-                handleSSEEvent(event, targetSessionID: sessionID, continuation: continuation)
+                handleSSEEvent(
+                    event,
+                    targetSessionID: sessionID,
+                    streamState: streamState,
+                    continuation: continuation
+                )
             }
         } catch {
             // SSE 断了 —— 不报错给用户，POST 那边正常拿到完整 message 即可
@@ -382,6 +424,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
     private func handleSSEEvent(
         _ event: [String: Any],
         targetSessionID: String,
+        streamState: StreamState,
         continuation: AsyncThrowingStream<String, Error>.Continuation
     ) {
         guard let type = event["type"] as? String,
@@ -394,12 +437,23 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
             // text 增量：{"field":"text","delta":"hello"}
             if let field = props["field"] as? String, field == "text",
                let delta = props["delta"] as? String, !delta.isEmpty {
+                streamState.markTextYielded()
                 continuation.yield(delta)
             }
 
         case "message.part.updated":
-            // 工具事件来这里：part.type == "tool" + part.state.status 表示状态
             if let part = props["part"] as? [String: Any] {
+                // 有些 provider 经 opencode HTTP API 只发 updated 里的完整 text part，
+                // 不发 delta；这里补一次，避免 UI 显示「(没有响应)」。
+                let role = (props["role"] as? String)
+                    ?? ((props["message"] as? [String: Any])?["role"] as? String)
+                if !streamState.hasYieldedText,
+                   (role == "assistant" || role == "model"),
+                   let text = Self.extractAssistantText(from: part),
+                   !text.isEmpty {
+                    streamState.markTextYielded()
+                    continuation.yield(text)
+                }
                 handleToolPart(part)
             }
 
@@ -554,6 +608,55 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         let home = NSHomeDirectory()
         let safe = conversationID.replacingOccurrences(of: "/", with: "_")
         return "\(home)/Library/Application Support/HermesPet/conversations/\(safe)"
+    }
+
+    /// 从 opencode HTTP 的 part/message 返回体里抽 assistant 文本。
+    /// 只作为没有 delta 时的兜底，避免误把工具参数、用户输入等内容当回复。
+    private static func extractAssistantText(from value: Any) -> String? {
+        if let dict = value as? [String: Any] {
+            if let type = dict["type"] as? String,
+               type == "text",
+               let text = dict["text"] as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
+            }
+            if let role = dict["role"] as? String,
+               role != "assistant" && role != "model" {
+                return nil
+            }
+            for key in ["part", "message", "data"] {
+                if let nested = dict[key], let text = extractAssistantText(from: nested) {
+                    return text
+                }
+            }
+            if let parts = dict["parts"] as? [Any] {
+                let texts = parts.compactMap { extractAssistantText(from: $0) }
+                if !texts.isEmpty { return texts.joined() }
+            }
+        }
+        if let array = value as? [Any] {
+            let texts = array.compactMap { extractAssistantText(from: $0) }
+            if !texts.isEmpty { return texts.joined() }
+        }
+        return nil
+    }
+
+    private static func extractOpenCodeError(from value: Any) -> String? {
+        guard let dict = value as? [String: Any],
+              let info = dict["info"] as? [String: Any],
+              let error = info["error"] as? [String: Any] else {
+            return nil
+        }
+        let name = error["name"] as? String ?? "OpenCodeError"
+        let data = error["data"] as? [String: Any]
+        let message = (data?["message"] as? String)
+            ?? (error["message"] as? String)
+            ?? name
+        if message.contains("file part media type"),
+           message.contains("not supported") {
+            return "当前在线 AI 引擎不支持直接读取这个文件格式。请先转成 PDF / CSV / txt，或把内容复制进聊天框。"
+        }
+        return message
     }
 
     /// opencode 工具名 → HermesPet ToolKind 兼容名（让 PillView ToolKind.from 能识别）

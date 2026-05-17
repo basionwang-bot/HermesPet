@@ -93,7 +93,7 @@ final class OpenCodeClient: @unchecked Sendable {
         }
 
         // 2. 对话独立目录（multi-tenancy 隔离）+ 写 opencode.json 让 opencode
-        // 看到用户配的 DeepSeek/GLM/Kimi/OpenAI API Key 和 baseURL
+        // 看到用户配的 DeepSeek/GLM/Kimi/MiniMax/OpenAI API Key 和 baseURL
         let dir = Self.conversationDirectory(for: conversationID)
         try? FileManager.default.createDirectory(
             at: URL(fileURLWithPath: dir),

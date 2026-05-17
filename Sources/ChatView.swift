@@ -1046,7 +1046,7 @@ struct OnboardingCard: View {
                     Text("先选个 AI 服务商再聊天")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.primary)
-                    Text("点这里打开设置 · 内置 DeepSeek / 智谱 / Kimi / OpenAI 预设")
+                    Text("点这里打开设置 · 内置 DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 预设")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

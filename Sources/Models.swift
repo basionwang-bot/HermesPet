@@ -305,7 +305,7 @@ let kMaxConversations = 8
 
 /// 桌宠当前跟谁聊：
 /// - **Hermes Gateway**：用户自托管的 OpenAI 兼容 API Server（localhost）
-/// - **Direct API**：直连第三方服务商（DeepSeek / 智谱 / Kimi / OpenAI 等），只要 API Key 就能用 ——
+/// - **Direct API**：直连第三方服务商（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 等），只要 API Key 就能用 ——
 ///   给"没装任何 CLI 的朋友"分发场景做的"零依赖"档
 /// - **Claude Code CLI** / **OpenAI Codex CLI**：本地子进程，能读写文件 / 跑命令 / 生图
 enum AgentMode: String, Codable, CaseIterable, Identifiable {

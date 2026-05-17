@@ -116,6 +116,18 @@ struct ProviderPreset: Identifiable, Hashable {
             visionModel: "moonshot-v1-128k-vision-preview"   // Moonshot 官方 vision 模型
         ),
         ProviderPreset(
+            id: "minimax",
+            displayName: "MiniMax",
+            baseURL: "https://api.minimaxi.com/v1",
+            defaultModel: "MiniMax-M2.7",
+            altModels: ["MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+            signupURL: "https://platform.minimaxi.com/",
+            fastModel: "MiniMax-M2.7-highspeed",
+            balancedModel: "MiniMax-M2.7",
+            deepModel: "MiniMax-M2.7",
+            visionModel: nil   // MiniMax OpenAI-compatible Text API 暂不支持 image/audio input
+        ),
+        ProviderPreset(
             id: "openai",
             displayName: "OpenAI",
             baseURL: "https://api.openai.com/v1",

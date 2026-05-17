@@ -901,7 +901,7 @@ struct CloudPetIslandSprite: View {
     @State private var glassesProgress: Double = 0
     @State private var glassesHideTask: Task<Void, Never>?
 
-    private var cloudHeight: CGFloat { size * 1.3 }
+    private var cloudHeight: CGFloat { size * 1.4 }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1189,5 +1189,4 @@ struct CloudPetView: View {
         ctx.fill(Path(CGRect(x: x * unit, y: y * unit, width: w * unit, height: h * unit)), with: fill)
     }
 }
-
 

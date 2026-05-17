@@ -12,7 +12,7 @@ actor APIIdleClock {
 
 /// OpenAI-compatible API client，可服务两种 AgentMode：
 /// - `.hermes`：连本地 Hermes Gateway（用户自托管 API Server）
-/// - `.direct`：直连第三方 OpenAI 兼容服务商（DeepSeek / 智谱 / Kimi / OpenAI…）
+/// - `.direct`：直连第三方 OpenAI 兼容服务商（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI…）
 ///
 /// 两种 mode 的 URL / key / 模型名分别存在不同 UserDefaults key，避免相互覆盖。
 /// 实例化时传入对应的 `ConfigSource` 决定读哪一套配置。
@@ -283,7 +283,7 @@ final class APIClient: @unchecked Sendable {
 
     /// 健康检查 —— 两种 source 走不同 endpoint：
     /// - `.hermes`：访问 `<host>/health`（Hermes Gateway 自定义的健康端点）
-    /// - `.direct`：访问 `<baseURL>/models`（OpenAI 标准端点，DeepSeek / 智谱 / Kimi / OpenAI 都支持）
+    /// - `.direct`：访问 `<baseURL>/models`（OpenAI 标准端点，DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 都支持）
     func checkHealth() async throws -> Bool {
         let url: URL
         switch source {

@@ -59,6 +59,12 @@
 ---
 
 ## [P0-Bug] 🔥 优先修的 Bug
+- [x] **增加灵动岛显示开关** —— 设置页新增“显示灵动岛”开关，默认开启；关闭后 `DynamicIslandController` 即时隐藏顶部胶囊，启动时也尊重该状态，不影响菜单栏图标、快捷键、聊天窗和桌宠
+- [x] **在线 AI 设置页 Key/模型显示不一致** —— `OpenCodeConfigGenerator.hasConfiguredKey/currentModelID` 和真实请求读取规则统一：服务商专属 Key 即使为空也不再回退旧全局 Key；opencode 模型偏好读取改为 `directAPIResponsePreference`，避免设置页切服务商/快速平衡深度时提示和实际模型不同步
+- [x] **MiniMax 回复格式统一** —— 在 ChatViewModel 显示层统一过滤 assistant 正文里的 `<think>...</think>` 推理草稿；流式中未闭合的 `<think>` 暂不显示，最终消息和编号选项解析都基于清洗后的正文
+- [x] **MiniMax 拖 xlsx 后整个对话持续「没有响应」** —— 定位到 opencode HTTP 返回 200 但 `info.error.data.message = file part media type ...xlsx not supported`，旧逻辑没读 `info.error` 只看 text parts，导致显示空且坏 session 继续复用。现在 POST 返回体先识别 `info.error` 转成明确错误，并清掉该 conversation 的 opencode session，下条消息自动新建恢复
+- [x] **MiniMax 测试连接通过但对话显示「没有响应」** —— OpenCodeHTTPClient 增加最小兜底：记录本轮是否已 yield delta；若 opencode/MiniMax 没发 `message.part.delta`，则从明确 assistant/model 的 `message.part.updated` 或 POST `/message` 返回体里的 text part 补一次正文，避免空回复
+- [x] **在线 AI 增加 MiniMax 服务商** —— ProviderPreset 新增 MiniMax 国内站（baseURL `https://api.minimaxi.com/v1`，Key 入口 `https://platform.minimaxi.com/`），默认/平衡/深度 `MiniMax-M2.7`，快速 `MiniMax-M2.7-highspeed`；接入 opencode 配置生成、ReasoningProxy 路由和设置页 Key 占位；MiniMax Text API 暂不配 visionModel，拖图时给出清晰切换提示
 - [x] **在线 AI 切到 opencode HTTP API 彻底根治 v1.2.x "(没有响应)" (v1.2.3)** —— 新建 `OpenCodeHTTPClient.swift` (~520 行) 走 server REST API，替代之前 `opencode run` subprocess。Phase 1: OpenCodeServerManager 加 `prepareGlobalConfigDir()` 让 serve cwd 指向 `~/Library/Application Support/HermesPet/opencode-global/`，serve 启动时加载完整 4 家 provider（之前 server 只认 deepseek+anthropic+opencode）。Phase 2: ensureSession 通过 POST /session 创建会话（绑定 directory + agent=build + model），订阅 GET /event 长连接 SSE 拿 `message.part.delta` 流式 yield。Phase 3: 文件附件通过 FilePartInput 传，图片用 base64 data URL（文件 file:// 会被当文本传，model 看不到真图），多 mime 字节头检测。Phase 4: 设置改 API Key/服务商 → 防抖 800ms 后 restart server 让新配置热生效。彻底消除 subprocess EOF 假性结束问题，启动延迟 800ms→50ms
 - [x] **在线 AI 拖图被模型说「找不到图」(v1.2.3 hotfix)** —— 拖图到桌宠时 `handleFileDropped` 用了文件版默认 prompt「请帮我看看这个文件「image.png」」，AI 拿到 prompt 去用 Read 工具找文件名 → 找不到。修法：handleFileDropped 内按 isImage 分流 prompt，图片用「这张图里是什么？请帮我看看」、文件保留原版
 - [x] **拖图比剪贴板粘贴慢 5 倍 (v1.2.3)** —— DragDropUtil.processFile 之前对所有图片格式都走 NSImage decode → TIFF → PNG re-encode，200KB JPG 变 800KB+ PNG。修法：PNG/JPG/JPEG/GIF 直接 `try Data(contentsOf:)` 透传原 bytes；只有 HEIC/WEBP/BMP/TIFF（vision API 不通用的）才转 PNG。OpenCodeHTTPClient.buildParts 配套加 detectImageMime 按字节头检测真实 mime（避免 JPG 被错标 image/png）
@@ -101,6 +107,8 @@
 ## [P1-体验] 体验型升级
 
 - [x] **按住语音时实时显示识别字幕** —— 新建 VoiceTranscriptOverlayController（独立 NSWindow），订阅 HermesPetVoiceStarted/Partial/Finished/Cancelled；灵动岛下方约 18pt 浮一个 ultraThinMaterial Capsule 显示"🎙 正在听… / 实时识别文字"，宽度按字数自适应（220~700pt）。让用户按住时就能确认说没说对，不必等松手
+- [x] **点击桌宠切换聊天窗显示** —— 桌宠单击/双击发 `HermesPetOpenChatRequested(toggle:true)`，AppDelegate 收到后真正 toggle：已开则隐藏、已隐藏则打开；拖文件触发的同名通知不带 toggle，仍只负责打开，避免拖文件时误关窗口
+- [x] **在线 AI 云朵宠物尺寸对齐 Claude** —— 桌面 CloudPet 高度 30→32pt（云朵 14:10 更窄，同高显小），灵动岛 cloudHeight 1.3→1.4，和 Claude Clawd 的视觉体量一致
 - [x] **键盘快捷键**：`⌘N` 新对话 / `⌘[` 上一对话 / `⌘]` 下一对话 / `⌘1/2/3` 直达序号 / `⌘⌫` 关闭对话（⌘W 留给关窗口）
 - [ ] 跨对话搜索历史消息
 - [x] **拖入文档（PDF / txt / md）让 AI 读** —— ChatView 顶层全窗口接收拖入；DragDropUtil 统一处理：图片→pendingImages、文档→只回传 URL（不读全文）；拖入时全窗口出现 tint 虚线框 + "释放以附加"卡片提示
@@ -113,7 +121,7 @@
 - [x] **独立的「在线 AI」模式（无 CLI / 零依赖）** —— 为分发给没装 claude/codex 的朋友做。设计上是**第 4 个 AgentMode**（`.directAPI`，cloud.fill 图标 + indigo 主色），跟 Hermes / Claude Code / Codex 并列，独立的 UserDefaults 三件套（`directAPIBaseURL` / `directAPIKey` / `directAPIModel`），不复用 Hermes 那一套。具体内容：
   - **AgentMode 扩展**：Models.swift 加 `case directAPI = "direct_api"`，label "在线 AI"，iconName cloud.fill。10 个文件的 switch 全部补 case（ChatView / ChatComponents / DynamicIslandController / MarkdownRenderer / ModeSprite 让它共用 Hermes 羽毛精灵 / PinCardOverlay / QuickAskWindow / SettingsView / ChatViewModel）。
   - **APIClient 改造**：引入 `ConfigSource` 嵌套 enum（.hermes / .direct），决定从哪些 UserDefaults key 读 baseURL/apiKey/modelName。ChatViewModel 持两个 APIClient 实例：`apiClient` (source=.hermes) + `directClient` (source=.direct)。checkHealth 按 source 分流：Hermes 走 `/health`，directAPI 走 OpenAI 标准 `/models`，对 401/403 也算"连通"（智谱 GET /models 不开放是 403 但 chat 能用）。
-  - **ProviderPreset.swift**：内置 DeepSeek / 智谱 GLM / Moonshot Kimi / OpenAI 四家 OpenAI 兼容服务商预设（旗舰模型：`deepseek-v4-pro` / `glm-5` / `kimi-k2.6` / `gpt-5.4`，备选模型也写进 altModels）。
+  - **ProviderPreset.swift**：内置 DeepSeek / 智谱 GLM / Moonshot Kimi / MiniMax / OpenAI 五家 OpenAI 兼容服务商预设（旗舰模型：`deepseek-v4-pro` / `glm-5` / `kimi-k2.6` / `MiniMax-M2.7` / `gpt-5.4`，备选模型也写进 altModels）。
   - **SettingsView**：configViewingMode Picker 加 4th case，directAPIConfig 视图含 ProviderPreset Picker + 三个独立字段 + 服务商注册链接 + 备选模型提示。Hermes 配置区恢复成原始简版（不含预设 Picker）。`testConnection` 按 configViewingMode 决定测哪一组（ConfigSource.direct/.hermes）。
   - **CLIAvailability.swift**（actor）：`zsh -lic 'command -v <name>'` 探测 claude/codex CLI 是否在 PATH，带 5min 缓存 + 2s 超时；发现的真实路径写回 UserDefaults 让 ClaudeCodeClient/CodexClient 后续 spawn 用对路径。
   - **ChatViewModel**：toggleAgentMode 改成 async 4 态 cycle（Hermes → 在线 AI → Claude → Codex），切到需要 CLI 的 mode 时探测，缺失则跳过并 toast "切到「在线 AI」就能只用 API Key 聊天"；attachDocumentPath 现在 `.hermes` 和 `.directAPI` 都拒绝拖入文档（HTTP API 都读不到本地文件）；**新用户默认 mode 改成 `.directAPI`**，老用户保留原 mode（UserDefaults 已存的 agentMode 优先）。
@@ -210,7 +218,7 @@
 - [ ] **1.1 build.sh 集成 opencode 二进制** —— 下载 opencode-darwin-arm64 (~102MB) 到 `.app/Contents/Resources/opencode`；chmod +x；`codesign --deep` 让内嵌二进制也被签
 - [ ] **1.2 `OpenCodeServerManager.swift`** —— 单例 actor 管理 server 进程生命周期：① 启动时 copy bundled binary 到 `~/Library/Application Support/HermesPet/bin/opencode`（可写副本支持自升级）② random 32 字节 password 存 keychain ③ spawn `opencode serve --port 0 --hostname 127.0.0.1` ④ 从 stdout grep `listening on http://127.0.0.1:XXXX` 抓真实端口 ⑤ 健康检查 `/global/health` ⑥ `applicationWillTerminate` 时 SIGTERM 子进程
 - [ ] **1.3 `OpenCodeClient.swift`** —— URLSession + SSE 解析。核心方法：`streamCompletion(messages, conversationID)` 让 directAPI 路由分流到此 client。多对话 directory 隔离（每个 conversationID 一个独立 `~/Library/.../conversations/<id>/`）
-- [ ] **1.4 `opencode.json` 配置生成器** —— 启动时把 `ProviderPreset` 翻译成 opencode 格式写到 `~/.hermespet/opencode/opencode.json`：DeepSeek / GLM / Kimi / OpenAI 四家用 `@ai-sdk/openai-compatible` 套；用户 API Key 从 `directAPIKey.<providerID>` 取
+- [ ] **1.4 `opencode.json` 配置生成器** —— 启动时把 `ProviderPreset` 翻译成 opencode 格式写到 `~/.hermespet/opencode/opencode.json`：DeepSeek / GLM / Kimi / MiniMax / OpenAI 用 `@ai-sdk/openai-compatible` 套；用户 API Key 从 `directAPIKey.<providerID>` 取
 - [ ] **1.5 `ChatViewModel` directAPI 路由切换** —— 让 directAPI mode 调 OpenCodeClient 而非 APIClient；保留 APIClient 作为离线 fallback 占位（Phase 2 启用）
 - [ ] **1.6 工具事件 → 灵动岛 mapping** —— SSE event `tool_use[status=running]` post `HermesPetToolStarted`、`status=completed` post `HermesPetToolEnded`，灵动岛工具卡片 + 桌宠精灵无缝接通
 - [ ] **1.7 设置面板适配** —— "在线 AI" tab 加 ① opencode 引擎版本显示 ② 服务商配置（沿用 ProviderPreset）③ 手动"立即升级 opencode"按钮

@@ -980,7 +980,11 @@ final class ClawdWalkController {
         // jump 动画跑完一拍再开聊天，戳到的反馈更明确
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 200_000_000)
-            NotificationCenter.default.post(name: .init("HermesPetOpenChatRequested"), object: nil)
+            NotificationCenter.default.post(
+                name: .init("HermesPetOpenChatRequested"),
+                object: nil,
+                userInfo: ["toggle": true]
+            )
         }
     }
 
@@ -991,7 +995,11 @@ final class ClawdWalkController {
         triggerJump()
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 200_000_000)
-            NotificationCenter.default.post(name: .init("HermesPetOpenChatRequested"), object: nil)
+            NotificationCenter.default.post(
+                name: .init("HermesPetOpenChatRequested"),
+                object: nil,
+                userInfo: ["toggle": true]
+            )
         }
     }
 
@@ -1278,6 +1286,8 @@ struct ClawdWalkView: View {
 
     /// Clawd 像素高度（窗口 44pt，留 7pt 上下 padding 容纳 jumping）
     private let clawdHeight: CGFloat = 30
+    /// 云朵 viewBox 更窄（14:10），同高会显小一点；略增高后视觉面积接近 Clawd。
+    private let cloudHeight: CGFloat = 32
 
     var body: some View {
         ZStack {
@@ -1291,7 +1301,7 @@ struct ClawdWalkView: View {
                     // 不再用 SwiftUI 外层 bobOffset 重复模拟）
                     ClawdView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking)
                 case .cloud:
-                    CloudPetView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
+                    CloudPetView(pose: state.pose, height: cloudHeight, isWalking: state.isWalking,
                                  glassesProgress: glassesProgress)
                 }
             }
@@ -1331,7 +1341,7 @@ struct ClawdWalkView: View {
                 }
         )
         .onHover { hovering in onHoverChange(hovering) }
-        .help("Clawd 在散步 · 单击=打开聊天 · 双击=切到 Claude · 拖到桌面图标上=让它嗅一下")
+        .help("Clawd 在散步 · 单击=打开/隐藏聊天 · 拖到桌面图标上=让它嗅一下")
         // 桌面 CloudPet 跟灵动岛 CloudPetIslandSprite 同步戴眼镜
         // 用 Task 手动每帧驱动 @State —— Canvas 是 immediate-mode 不接受 withAnimation 插值
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetCloudPetWearGlasses"))) { note in

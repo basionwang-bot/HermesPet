@@ -8,6 +8,7 @@ import SwiftUI
 final class DynamicIslandController {
     private(set) var pillWindow: NSWindow
     private let hostingView: NSHostingView<DynamicIslandPillView>
+    private var visibilityObserver: NSObjectProtocol?
 
     private weak var statusItem: NSStatusItem?
     /// 点击灵动岛胶囊时回调（由 AppDelegate 注册）
@@ -56,6 +57,15 @@ final class DynamicIslandController {
         let click = NSClickGestureRecognizer(target: self, action: #selector(toggleChat))
         hosting.addGestureRecognizer(click)
         hosting.wantsLayer = true
+
+        visibilityObserver = NotificationCenter.default.addObserver(
+            forName: .init("HermesPetDynamicIslandVisibilityChanged"),
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let enabled = (note.userInfo?["enabled"] as? Bool) ?? true
+            enabled ? self?.show() : self?.hide()
+        }
 
         positionWindow()
     }

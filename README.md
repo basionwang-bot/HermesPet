@@ -28,7 +28,7 @@
 
 HermesPet 是一个常驻在 MacBook **顶部刘海下方**的 AI 聊天客户端 + 桌面伴侣。
 
-**最重要的一点**：装上就能用，不需要在你电脑上装任何命令行工具。打开 → 选个 AI 服务商（DeepSeek / 智谱 / Kimi / OpenAI 等）→ 粘贴 API Key → 开聊。如果你额外装了 `claude` / `codex` CLI，App 会自动检测出来并解锁"读写本地文件 / 跑命令 / 生图"这些高级能力。
+**最重要的一点**：装上就能用，不需要在你电脑上装任何命令行工具。打开 → 选个 AI 服务商（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 等）→ 粘贴 API Key → 开聊。如果你额外装了 `claude` / `codex` CLI，App 会自动检测出来并解锁"读写本地文件 / 跑命令 / 生图"这些高级能力。
 
 按一下刘海呼出聊天窗、按住 `⌘⇧V` 说话、拖文件给小家伙吃掉、让 Clawd 在桌面闲逛嗅你的文件 —— 桌面 AI 应当鲜活。
 
@@ -117,7 +117,7 @@ Claude 模式有 **Clawd 🦞**（橙色像素小螃蟹），在线 AI 模式有
 1. 去 [Releases 页面](https://github.com/basionwang-bot/HermesPet/releases) 下载最新 `HermesPet-x.x.dmg`
 2. 双击 DMG → 把"Hermes 桌宠"拖进应用程序
 3. 右键打开（首次需要绕过 Gatekeeper，因为是 ad-hoc 签名）
-4. 在菜单栏点 ✦ → 齿轮 ⚙️ → AI 后端 → **服务商下拉选一家**（DeepSeek / 智谱 / Kimi / OpenAI）→ 粘贴 API Key → 开聊
+4. 在菜单栏点 ✦ → 齿轮 ⚙️ → AI 后端 → **服务商下拉选一家**（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI）→ 粘贴 API Key → 开聊
 
 没有 API Key？设置面板里每个服务商旁都有一个**"获取 Key"链接**直达官方申请页。
 
@@ -161,7 +161,7 @@ cd HermesPet
 
 | Mode | 图标 | 适合场景 | 准备工作 |
 |---|---|---|---|
-| **在线 AI** ⭐ | ☁ | 对话 / 翻译 / 写作 / 看图 —— **零依赖，开箱即用** | 选服务商 + 填 API Key（DeepSeek / 智谱 / Kimi / OpenAI 内置预设） |
+| **在线 AI** ⭐ | ☁ | 对话 / 翻译 / 写作 / 看图 —— **零依赖，开箱即用** | 选服务商 + 填 API Key（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 内置预设） |
 | **Hermes** | ✦ | 对话型任务，走自部署的 OpenAI 兼容 Gateway | 接 [Hermes Gateway](https://github.com/NousResearch/hermes-gateway) 或自部署兼容 API |
 | **Claude Code** | ⌨ | 改文件 / 跑命令 / 深度编程 | 装 [`claude` CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview)（可选） |
 | **Codex** | ✨ | 生图 + 代码 | 装 OpenAI 官方 Codex CLI + `codex login`（可选） |

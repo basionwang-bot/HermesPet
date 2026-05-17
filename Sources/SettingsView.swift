@@ -398,6 +398,7 @@ struct SettingsView: View {
         case "deepseek": return "sk-xxxxxx (DeepSeek)"
         case "zhipu":    return "xxxxx.xxxxx (智谱)"
         case "moonshot": return "sk-xxxxxx (Moonshot)"
+        case "minimax":  return "sk-xxxxxx (MiniMax)"
         case "openai":   return "sk-xxxxxx (OpenAI)"
         default: return "your-secret-key"
         }
@@ -1036,6 +1037,16 @@ struct SettingsView: View {
                 title: "在 Dock 显示图标",
                 caption: "默认菜单栏 agent 风格不占 Dock。打开后会显示应用图标，Cmd+Tab 也能切到 HermesPet。切换即时生效，无需重启。",
                 isOn: $viewModel.showDockIcon
+            )
+
+            Divider()
+
+            captionToggle(
+                icon: "capsule.tophalf.filled",
+                iconColor: .blue,
+                title: "显示灵动岛",
+                caption: "显示顶部刘海下方的状态胶囊。关闭后仍可用菜单栏图标和快捷键打开聊天。",
+                isOn: $viewModel.dynamicIslandEnabled
             )
 
             Divider()

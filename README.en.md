@@ -29,7 +29,7 @@ Grab the macOS DMG · double-click to install · pick a provider, paste an API k
 
 HermesPet is an AI chat client + desktop companion that lives **right below your MacBook's notch**.
 
-**The most important thing**: it works out of the box. No CLI tools required on your machine. Open it → pick an AI provider (DeepSeek / Zhipu / Kimi / OpenAI, etc.) → paste an API Key → start chatting. If you also have `claude` / `codex` CLIs installed, the app auto-detects them and unlocks advanced capabilities like "read/write local files / run commands / generate images".
+**The most important thing**: it works out of the box. No CLI tools required on your machine. Open it → pick an AI provider (DeepSeek / Zhipu / Kimi / MiniMax / OpenAI, etc.) → paste an API Key → start chatting. If you also have `claude` / `codex` CLIs installed, the app auto-detects them and unlocks advanced capabilities like "read/write local files / run commands / generate images".
 
 Tap the notch to summon the chat window, hold `⌘⇧V` to talk, drop files onto the little guy, watch Clawd wander around your desktop sniffing your files — desktop AI should feel alive.
 
@@ -118,7 +118,7 @@ Saves context, saves tokens, runs faster, and the AI gets to decide which parts 
 1. Go to the [Releases page](https://github.com/basionwang-bot/HermesPet/releases) and download the latest `HermesPet-x.x.dmg`
 2. Double-click the DMG → drag "Hermes 桌宠" into Applications
 3. Right-click → Open (required once to bypass Gatekeeper, since it's ad-hoc signed)
-4. Click ✦ in the menu bar → gear ⚙️ → AI Backend → **pick a provider from the dropdown** (DeepSeek / Zhipu / Kimi / OpenAI) → paste API Key → start chatting
+4. Click ✦ in the menu bar → gear ⚙️ → AI Backend → **pick a provider from the dropdown** (DeepSeek / Zhipu / Kimi / MiniMax / OpenAI) → paste API Key → start chatting
 
 No API Key yet? Each provider in the settings panel has a **"Get Key" link** that goes directly to its official signup page.
 
@@ -162,7 +162,7 @@ After granting any permission, it's recommended to **fully quit and reopen** (me
 
 | Mode | Icon | Best for | Setup |
 |---|---|---|---|
-| **Online AI** ⭐ | ☁ | Chat / translation / writing / vision — **zero dependencies, just works** | Pick a provider + paste API Key (DeepSeek / Zhipu / Kimi / OpenAI presets built in) |
+| **Online AI** ⭐ | ☁ | Chat / translation / writing / vision — **zero dependencies, just works** | Pick a provider + paste API Key (DeepSeek / Zhipu / Kimi / MiniMax / OpenAI presets built in) |
 | **Hermes** | ✦ | Chat tasks via a self-hosted OpenAI-compatible Gateway | Run [Hermes Gateway](https://github.com/NousResearch/hermes-gateway) or any compatible self-hosted API |
 | **Claude Code** | ⌨ | File edits / running commands / deep coding | Install [`claude` CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview) (optional) |
 | **Codex** | ✨ | Image generation + code | Install OpenAI's Codex CLI + `codex login` (optional) |

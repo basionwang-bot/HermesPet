@@ -31,6 +31,7 @@ final class ReasoningProxy: @unchecked Sendable {
         "deepseek": "https://api.deepseek.com/v1",
         "zhipu":    "https://open.bigmodel.cn/api/paas/v4",
         "moonshot": "https://api.moonshot.cn/v1",
+        "minimax":  "https://api.minimaxi.com/v1",
         "openai":   "https://api.openai.com/v1"
     ]
 

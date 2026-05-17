@@ -1,7 +1,7 @@
 import Foundation
 
 /// 把 HermesPet 的 ProviderPreset + 用户 API Key 翻译成 opencode 能读的
-/// `opencode.json`。让用户在 HermesPet 设置里配的 DeepSeek/GLM/Kimi/OpenAI key
+/// `opencode.json`。让用户在 HermesPet 设置里配的 DeepSeek/GLM/Kimi/MiniMax/OpenAI key
 /// 自动透传给 bundled opencode runtime，无需用户再去配 opencode 自己的文件。
 ///
 /// **写到哪**：每次 `OpenCodeClient.runStream` spawn 之前，写一份到该对话的
@@ -88,6 +88,9 @@ enum OpenCodeConfigGenerator {
         if providerPart == "zhipu" {
             return ("\(modelPart.uppercased())", "智谱 AI / Zhipu")
         }
+        if providerPart == "minimax" {
+            return ("\(modelPart)", "MiniMax")
+        }
         if providerPart == "openai" {
             return ("\(modelPart.uppercased())", "OpenAI")
         }
@@ -127,7 +130,7 @@ enum OpenCodeConfigGenerator {
         guard let preset = ProviderPreset.all.first(where: { $0.id == providerID }) else {
             return defaultFreeModel
         }
-        let prefRaw = UserDefaults.standard.string(forKey: "directResponsePreference") ?? "balanced"
+        let prefRaw = UserDefaults.standard.string(forKey: "directAPIResponsePreference") ?? "balanced"
         let pref = DirectResponsePreference(rawValue: prefRaw) ?? .balanced
         let model = preset.model(for: pref)
         return "\(providerID)/\(model)"
@@ -157,8 +160,10 @@ enum OpenCodeConfigGenerator {
     /// 每个 provider 的 API Key 存在 `directAPIKey.<providerID>`，
     /// 老用户可能只存了全局 `directAPIKey`（迁移兜底）
     private static func effectiveAPIKey(for providerID: String) -> String {
-        let scoped = UserDefaults.standard.string(forKey: "directAPIKey.\(providerID)") ?? ""
-        if !scoped.isEmpty { return scoped }
+        let scopedKey = "directAPIKey.\(providerID)"
+        if UserDefaults.standard.object(forKey: scopedKey) != nil {
+            return UserDefaults.standard.string(forKey: scopedKey) ?? ""
+        }
         return UserDefaults.standard.string(forKey: "directAPIKey") ?? ""
     }
 

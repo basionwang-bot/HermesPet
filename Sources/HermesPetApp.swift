@@ -72,7 +72,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 灵动岛胶囊
         let island = DynamicIslandController()
-        island.show()
+        if vm.dynamicIslandEnabled {
+            island.show()
+        }
         island.onTapped = { [weak self] in
             // 错误态（连接断开）下点击灵动岛 → 顺便重新检测一次连接，再打开聊天
             if let vm = self?.viewModel,
@@ -210,15 +212,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ActivityRecorder.shared.stop()
     }
 
-    /// Clawd 桌面漫步上单击 / 双击都会触发此通知，统一回到打开聊天窗口
+    /// Clawd 桌面漫步上单击 / 双击触发时切换聊天窗口；拖文件等场景仍只负责打开。
     @objc private func handleOpenChatRequested(_ note: Notification) {
         // 如果当前没在 chat 窗口（比如断连状态），同时检查一次连接
         if let vm = viewModel, case .disconnected = vm.connectionStatus {
             vm.checkConnection()
         }
-        // 已显示则不重复打开（toggle 会反向收起），只在隐藏时才呼出
-        if chatWindow?.isVisible == true { return }
-        toggleChatWindow()
+        let shouldToggle = (note.userInfo?["toggle"] as? Bool) ?? false
+        if shouldToggle {
+            toggleChatWindow()
+        } else if chatWindow?.isVisible != true {
+            toggleChatWindow()
+        }
     }
 
     /// AI 回复完成时的音效反馈（跟按住语音的 "duang" 区分）
