@@ -52,7 +52,8 @@ enum DragDropUtil {
     }
 
     /// 根据 URL 扩展名分流：
-    /// - 图片扩展名 → 读 PNG Data（图片必须传 base64/Data，没法走路径）
+    /// - 图片扩展名 → 优先**保留原 Data 不转码**（PNG/JPG 直接读字节，体积一致）
+    ///   仅 HEIC/WEBP 等模型不通用的格式才转 PNG（必要转码）
     /// - 其他所有文件 → 只回传 URL，让 AI 自己用 Read 工具去读
     nonisolated static func processFile(
         _ url: URL,
@@ -61,8 +62,17 @@ enum DragDropUtil {
     ) {
         let ext = url.pathExtension.lowercased()
 
-        let imageExts: Set<String> = ["png", "jpg", "jpeg", "heic", "webp", "gif", "bmp", "tiff"]
-        if imageExts.contains(ext), let img = NSImage(contentsOf: url), let png = pngData(from: img) {
+        // 模型原生支持的格式：直接读原 bytes，省去 NSImage decode + re-encode 的开销
+        // （一张 200KB JPG 不转 PNG 还是 200KB，转完可能变 800KB+，base64 后体积翻 5 倍）
+        let nativeImageExts: Set<String> = ["png", "jpg", "jpeg", "gif"]
+        if nativeImageExts.contains(ext), let data = try? Data(contentsOf: url) {
+            onImage(data)
+            return
+        }
+
+        // 其他图片格式（HEIC/WEBP/BMP/TIFF）：模型一般不支持原生 → 必须转 PNG
+        let convertibleImageExts: Set<String> = ["heic", "webp", "bmp", "tiff"]
+        if convertibleImageExts.contains(ext), let img = NSImage(contentsOf: url), let png = pngData(from: img) {
             onImage(png)
             return
         }

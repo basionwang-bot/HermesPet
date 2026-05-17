@@ -897,12 +897,16 @@ struct CloudPetIslandSprite: View {
     @State private var workingTask: Task<Void, Never>?
     @State private var lookTask: Task<Void, Never>?
     @State private var currentTool: ToolKind = .other
+    /// 戴眼镜动画进度（0~1）。监听 HermesPetCloudPetWearGlasses 通知触发
+    @State private var glassesProgress: Double = 0
+    @State private var glassesHideTask: Task<Void, Never>?
 
     private var cloudHeight: CGFloat { size * 1.3 }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            CloudPetView(pose: pose, height: cloudHeight, isWalking: false)
+            CloudPetView(pose: pose, height: cloudHeight, isWalking: false,
+                         glassesProgress: glassesProgress)
             if isWorking {
                 ToolOverlay(kind: currentTool)
                     .offset(x: 3, y: -2)
@@ -912,11 +916,56 @@ struct CloudPetIslandSprite: View {
         .animation(AnimTok.smooth, value: isWorking)
         .onAppear { applyState(isWorking) }
         .onChange(of: isWorking) { _, w in applyState(w) }
-        .onDisappear { workingTask?.cancel(); lookTask?.cancel() }
+        .onDisappear { workingTask?.cancel(); lookTask?.cancel(); glassesHideTask?.cancel() }
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetToolStarted"))) { note in
             guard let name = note.userInfo?["name"] as? String else { return }
             withAnimation(AnimTok.snappy) { currentTool = ToolKind.from(toolName: name) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetCloudPetWearGlasses"))) { note in
+            // OpenCodeHTTPClient 自动切到 vision model 时 post 此通知。
+            // 默认保持 6 秒（一个 vision 请求够长，再短就刚戴上就摘了）
+            let duration = (note.userInfo?["duration"] as? Double) ?? 6.0
+            triggerGlasses(duration: duration)
+        }
+    }
+
+    /// 戴上眼镜 → 保持 duration 秒 → 取下
+    /// **关键**：用 Task 手动每帧驱动 @State，**不能用 withAnimation**
+    /// 原因：CloudPetView 内 Canvas 是 immediate-mode 自绘，SwiftUI 不会自动给 Canvas
+    /// 插值动画进度参数。withAnimation 只会改最终值，Canvas 看到的是 0 → 突然 1
+    private func triggerGlasses(duration: Double) {
+        glassesHideTask?.cancel()
+        glassesHideTask = Task { @MainActor in
+            // 戴上动画：0 → 1，约 1.4s（用户要求看清"掏眼镜→戴上"的整个过程），easeOutBack 略弹
+            let onFrames = 84   // 60fps × 1.4s
+            for i in 1...onFrames {
+                if Task.isCancelled { return }
+                let t = Double(i) / Double(onFrames)
+                glassesProgress = easeOutBack(t)
+                try? await Task.sleep(nanoseconds: 16_666_666)
+            }
+            glassesProgress = 1
+            // 保持戴着
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            if Task.isCancelled { return }
+            // 摘下动画：1 → 0，0.6s ease-in 慢慢消失
+            let offFrames = 36
+            for i in 1...offFrames {
+                if Task.isCancelled { return }
+                let t = 1 - Double(i) / Double(offFrames)
+                glassesProgress = t * t   // ease-in
+                try? await Task.sleep(nanoseconds: 16_666_666)
+            }
+            glassesProgress = 0
+        }
+    }
+
+    /// EaseOutBack 缓动 —— 在 1.0 附近会略微超过再回落，模拟「啪嗒戴上」的弹性
+    private func easeOutBack(_ t: Double) -> Double {
+        let c1 = 1.70158
+        let c3 = c1 + 1
+        let x = t - 1
+        return 1 + c3 * x * x * x + c1 * x * x
     }
 
     private func applyState(_ working: Bool) {
@@ -965,6 +1014,10 @@ struct CloudPetView: View {
     let pose: ClawdPose
     let height: CGFloat
     var isWalking: Bool = false
+    /// 戴眼镜动画进度：0 = 不戴 / 隐藏在身后；1 = 完全戴在脸上。
+    /// 外层用 withAnimation 改这个值，draw 内按 progress 单参数计算 alpha / offset / scale。
+    /// 0→1 的过渡视觉上是「从身后掏出 → 飞到脸上戴好」
+    var glassesProgress: Double = 0
 
     private static let bodyColor = Color(red: 0.45, green: 0.40, blue: 0.85)
     private static let bodyTopColor = Color(red: 0.58, green: 0.52, blue: 0.95)
@@ -1067,6 +1120,67 @@ struct CloudPetView: View {
         if pose == .armsUp {
             fillRect(x: 5 + dx, y: 1 + dy, w: 4, h: 1.5, ctx: ctx, unit: unit, fill: topFill)
         }
+
+        // 眼镜（vision 模式自动切换时戴上）—— 必须最后画，盖在眼睛上层
+        drawGlasses(ctx: ctx, unit: unit, dx: dx, dy: dy, eyeY: eyeY, progress: glassesProgress)
+    }
+
+    /// 戴眼镜动画。progress 0→1 视觉上：
+    /// - 0.0~0.15：藏在云朵右上方（offset x:+3.5, y:+1.5, alpha 0, scale 0.45）
+    /// - 0.15~0.6：飞向脸（alpha 渐显，scale 渐大，offset 缩小）
+    /// - 0.6~1.0：稳稳戴在眼睛上（offset 0, scale 1.0, alpha 1）
+    private func drawGlasses(ctx: GraphicsContext, unit: CGFloat,
+                             dx: CGFloat, dy: CGFloat, eyeY: CGFloat,
+                             progress: Double) {
+        guard progress > 0.02 else { return }
+        let p = CGFloat(progress)
+        let alpha = min(1, p * 3.5)             // 前 30% 就完全可见，让"飞行"过程也看得清
+        let xOff = (1 - p) * 3.5                // 从右后方滑入（不要太远，避免飞出 viewBox）
+        let yOff = (1 - p) * 1.5                // 微微从下方上浮
+        let scale = 0.45 + p * 0.55             // 起始更大让看得清，到 1.0
+
+        // 关键修正：cx 用眼睛中心 (4.5 + 8.5)/2 = 6.5（眼睛 1.8 宽，中心 5.4 / 9.4 → 整体中心 7.4）
+        // 偏 7.4 而不是 7（云朵主体几何中心），让眼镜对齐眼睛
+        let cx = 7.4 + dx + xOff
+        let cy = eyeY + 0.9 + yOff
+
+        // 镜框用深紫色（跟云朵主色系协调，不突兀的黑色），加粗到 1.5pt+ 让肉眼能清楚看见
+        let frameColor = Color(red: 0.15, green: 0.10, blue: 0.30).opacity(Double(alpha))
+        let lensColor = Color(red: 0.55, green: 0.80, blue: 1.0).opacity(Double(alpha) * 0.55)
+        let frameFill = GraphicsContext.Shading.color(frameColor)
+        let lensFill = GraphicsContext.Shading.color(lensColor)
+        let lineW = max(1.5, scale * 2.0)        // 至少 1.5pt 粗，scale 大时更粗
+
+        // 左镜片：宽 2.2（cover 眼睛 1.8 + padding），高 2.0，圆角 0.55
+        let leftLens = CGRect(
+            x: (cx - 2.0 - 1.1 * scale) * unit,
+            y: (cy - 1.0 * scale) * unit,
+            width: 2.2 * scale * unit,
+            height: 2.0 * scale * unit
+        )
+        let leftPath = Path(roundedRect: leftLens, cornerRadius: 0.55 * scale * unit)
+        ctx.fill(leftPath, with: lensFill)
+        ctx.stroke(leftPath, with: frameFill, lineWidth: lineW)
+
+        // 右镜片：右眼中心相对 cx 偏右 +2.0
+        let rightLens = CGRect(
+            x: (cx + 2.0 - 1.1 * scale) * unit,
+            y: (cy - 1.0 * scale) * unit,
+            width: 2.2 * scale * unit,
+            height: 2.0 * scale * unit
+        )
+        let rightPath = Path(roundedRect: rightLens, cornerRadius: 0.55 * scale * unit)
+        ctx.fill(rightPath, with: lensFill)
+        ctx.stroke(rightPath, with: frameFill, lineWidth: lineW)
+
+        // 中间桥梁（连接两镜片）—— 一根横向粗线
+        let bridge = CGRect(
+            x: (cx - 0.5 * scale) * unit,
+            y: (cy - 0.15 * scale) * unit,
+            width: 1.0 * scale * unit,
+            height: 0.35 * scale * unit
+        )
+        ctx.fill(Path(bridge), with: frameFill)
     }
 
     private func fillRect(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat,

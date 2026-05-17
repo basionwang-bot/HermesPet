@@ -385,14 +385,18 @@ struct DynamicIslandPillView: View {
             // 计数 +1（已结束的工具数）—— 通知本身已按 toolId 去重
             stepEnded += 1
         }
-        // C) 长任务情绪气泡 —— 仅 Claude 模式触发（其他 mode 的桌宠没"性格"）
+        // C) 长任务情绪气泡 —— Clawd / CloudPet 都触发，按 mode 切换台词
         .onChange(of: elapsedSeconds) { _, secs in
-            guard currentMode == .claudeCode else { return }
-            switch secs {
-            case 30:  ClawdBubbleOverlayController.show("等等，快好了…")
-            case 90:  ClawdBubbleOverlayController.show("emm，再花点时间")
-            case 180: ClawdBubbleOverlayController.show("这个真的有点复杂…")
-            default:  break
+            switch (currentMode, secs) {
+            // Clawd（claudeCode）—— 严肃工程师人设
+            case (.claudeCode, 30):  ClawdBubbleOverlayController.show("等等，快好了…")
+            case (.claudeCode, 90):  ClawdBubbleOverlayController.show("emm，再花点时间")
+            case (.claudeCode, 180): ClawdBubbleOverlayController.show("这个真的有点复杂…")
+            // CloudPet（directAPI）—— 云端 / 飘逸人设
+            case (.directAPI, 30):   ClawdBubbleOverlayController.show("云端有点慢呢…")
+            case (.directAPI, 90):   ClawdBubbleOverlayController.show("这朵云有点大…")
+            case (.directAPI, 180):  ClawdBubbleOverlayController.show("这片云遮了好久…")
+            default: break
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetTaskFinished"))) { note in
@@ -441,9 +445,11 @@ struct DynamicIslandPillView: View {
                 withAnimation(AnimTok.snappy) {
                     taskStatus = .idle
                 }
-                // Claude 模式 + 失败 → Clawd 冒一个"糟糕 😵"气泡
-                if currentMode == .claudeCode {
-                    ClawdBubbleOverlayController.show("糟糕 😵", duration: 2.2)
+                // 失败 → 按 mode 冒不同人设气泡
+                switch currentMode {
+                case .claudeCode: ClawdBubbleOverlayController.show("糟糕 😵", duration: 2.2)
+                case .directAPI:  ClawdBubbleOverlayController.show("云飘走了 😢", duration: 2.2)
+                default: break   // Hermes / Codex 暂不冒
                 }
             }
         }

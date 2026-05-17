@@ -15,7 +15,7 @@ cd "$SCRIPT_DIR"
 
 APP_NAME="HermesPet"
 DISPLAY_NAME="Hermes 桌宠"
-VERSION="1.2.2"
+VERSION="1.2.3"
 BUILD_DIR="$SCRIPT_DIR/.build"
 DIST_DIR="$SCRIPT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
@@ -132,13 +132,31 @@ cat > "$STAGING_DIR/⚠️ 第一次打开请看我.txt" <<'EOF'
 授权完任一权限后，建议完全退出 Hermes 桌宠（菜单栏右键 → 退出）
 再重新打开一次，让新权限对进程生效。
 
-【v1.2.2 修复内容】
+【v1.2.3 主要更新】
 
-  · 修复在线 AI 拖入文档偶尔显示「(没有响应)」的问题
-    —— 模型只跑 reasoning 没产正文时，自动重置上下文 + 给出友好提示
-  · OpenCode 事件解析兼容 5 种 part 类型，未来 opencode 升级也不掉链
-  · 排查工具增强：~/.hermespet/opencode-debug.log 现在带 events=[...]
-    分布，下次出问题一眼定位是哪个环节断的
+  ▍架构升级
+  · 在线 AI 切换到 opencode HTTP API（替代 subprocess 方案）—— 彻底根治
+    v1.2.x 用户撞过的「(没有响应)」bug，启动延迟也从 800ms 降到 50ms
+  · 工具权限默认全 allow，等价于之前 --dangerously-skip-permissions，
+    用户朋友再也不会撞到工具调用 hang。下版本会做完整 permission UI
+
+  ▍新功能
+  · vision 模型自动切换 —— 拖图时自动 override 到 provider 的 vision 模型：
+      Moonshot Kimi → moonshot-v1-128k-vision-preview
+      智谱       → glm-4v-plus
+      OpenAI     → gpt-4o
+      DeepSeek   → 报清晰提示（DeepSeek 没 vision API）
+  · 云朵桌宠 vision 模式戴眼镜动画 —— 拖图时从身后掏出眼镜飞到脸上戴稳，
+    持续整个识图过程（1.4s 戴上 + 6s 保持 + 0.6s 摘下）
+  · 云朵长任务情绪气泡 —— 30s「云端有点慢呢…」90s「这朵云有点大…」
+    180s「这片云遮了好久…」失败「云飘走了 😢」
+  · 错误态友好化 —— 7 种错误关键词分类成可操作 hint
+    （「Key 不对去检查」/「切到 Kimi/GLM」/「云被堵在路上」等）
+
+  ▍Bug 修复
+  · 拖图到桌宠 prompt 误用文件版被 AI 当文件去找 → 改成「这张图里是什么」
+  · 拖图比剪贴板粘贴慢 5 倍 → 不再无谓 NSImage decode/encode，直接读原 bytes
+  · 图片 mime 错标 image/png → 按字节头检测真实格式
 
 【v1.2.1 沿用】
 

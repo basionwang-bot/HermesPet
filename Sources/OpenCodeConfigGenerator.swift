@@ -181,6 +181,20 @@ enum OpenCodeConfigGenerator {
             for alt in preset.altModels {
                 models[alt] = ["name": "\(preset.displayName) · \(alt)"]
             }
+            // 拖图时自动用的 vision 模型 —— 必须也注册到 opencode.json，
+            // 否则 OpenCodeHTTPClient 切到 vision model 时 server 报 ProviderModelNotFoundError
+            // **关键**：必须显式标 modalities.input 含 "image"，否则 opencode 会拦截 image part
+            // 并报「此模型不支持图像输入」（即便上游 API 实际支持）
+            if let vm = preset.visionModel {
+                models[vm] = [
+                    "name": "\(preset.displayName) · \(vm) (vision)",
+                    "modalities": [
+                        "input": ["text", "image"],
+                        "output": ["text"]
+                    ],
+                    "attachment": true
+                ]
+            }
 
             // 改写 baseURL 到本地代理（仅当代理在跑）。代理按 providerID 路由：
             // http://127.0.0.1:<port>/<providerID> → 真实 baseURL

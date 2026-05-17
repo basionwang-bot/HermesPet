@@ -85,7 +85,10 @@ final class ChatViewModel {
     // 在线 AI（directAPI）的配置 —— 跟 Hermes 完全独立，
     // 用户分发给朋友的场景：只用配这一组就能聊
     var directAPIBaseURL: String {
-        didSet { UserDefaults.standard.set(directAPIBaseURL, forKey: "directAPIBaseURL") }
+        didSet {
+            UserDefaults.standard.set(directAPIBaseURL, forKey: "directAPIBaseURL")
+            scheduleOpenCodeConfigReload()
+        }
     }
     var directAPIKey: String {
         didSet {
@@ -94,10 +97,14 @@ final class ChatViewModel {
             if !providerID.isEmpty {
                 UserDefaults.standard.set(directAPIKey, forKey: Self.directAPIKeyStorageKey(providerID: providerID))
             }
+            scheduleOpenCodeConfigReload()
         }
     }
     var directAPIModel: String {
-        didSet { UserDefaults.standard.set(directAPIModel, forKey: "directAPIModel") }
+        didSet {
+            UserDefaults.standard.set(directAPIModel, forKey: "directAPIModel")
+            scheduleOpenCodeConfigReload()
+        }
     }
     /// 在线 AI 的回复偏好，默认平衡。最终仍会映射成 directAPIModel 发给 API。
     var directAPIResponsePreference: DirectResponsePreference {
@@ -487,6 +494,23 @@ final class ChatViewModel {
         let attachedDocPaths = pendingDocuments.map { $0.path }
         pendingDocuments = []
 
+        // **关键**：在线 AI + 拖图 → 立刻通知云朵戴眼镜。
+        // 必须在下面的 `isStreaming = true` + broadcastBackgroundStreamingCount() 之前 post，
+        // 否则 ClawdWalkOverlayController 收到 streaming 通知会先把云朵收回灵动岛，
+        // 等 OpenCodeHTTPClient.runStream 那边异步触发 wear glasses 时云朵已经不在桌面了
+        if agentMode == .directAPI && !attachedImages.isEmpty {
+            NotificationCenter.default.post(
+                name: .init("HermesPetCloudPetWearGlasses"),
+                object: nil,
+                userInfo: ["duration": 6.0]
+            )
+            NotificationCenter.default.post(
+                name: .init("HermesPetClawdBubble"),
+                object: nil,
+                userInfo: ["text": "戴上眼镜看图~ 🖼️", "duration": 2.5]
+            )
+        }
+
         inputText = ""
         errorMessage = nil
         // 把当前激活对话标记为 streaming（每个对话独立 loading 状态）
@@ -607,7 +631,7 @@ final class ChatViewModel {
             // 在线 AI 走 bundled opencode agent runtime（v1.2.0+）。
             // quick-ask 没有真实 conversationID，用固定 "quick-ask" 让 opencode 端
             // 复用同一个 session 不重复创建（多次 quick-ask 也有上下文延续）
-            return OpenCodeClient.shared.streamCompletion(
+            return OpenCodeHTTPClient.shared.streamCompletion(
                 messages: messages,
                 conversationID: "quick-ask"
             )
@@ -765,7 +789,7 @@ final class ChatViewModel {
                     // 在 reasoning 阶段就 disconnect）。上游 PR #25110 修复中，HermesPet 暂不在
                     // 路由层 fallback —— 保留 agent 能力（读文件/跑命令）优先，少数对话偶尔
                     // 空响应让用户重试或换 prompt 解决
-                    stream = OpenCodeClient.shared.streamCompletion(
+                    stream = OpenCodeHTTPClient.shared.streamCompletion(
                         messages: apiMessages,
                         conversationID: targetConversationID
                     )
@@ -843,6 +867,15 @@ final class ChatViewModel {
                     msg.content = "❌ \(friendly)"
                 }
                 self.errorMessage = friendly
+                // directAPI 模式 + 撞错 → 云朵冒一句可操作 hint，让用户知道接下来怎么办
+                if mode == .directAPI {
+                    let petHint = Self.petHintForError(friendly)
+                    NotificationCenter.default.post(
+                        name: .init("HermesPetClawdBubble"),
+                        object: nil,
+                        userInfo: ["text": petHint, "duration": 2.8]
+                    )
+                }
             }
             // 清理：目标对话 isStreaming → false；task 从字典里移除
             if let idx = self.conversations.firstIndex(where: { $0.id == targetConversationID }) {
@@ -992,6 +1025,35 @@ final class ChatViewModel {
         }
 
         return result
+    }
+
+    /// 在线 AI 撞错时云朵气泡说什么 —— 按错误关键词分类给可操作的 hint。
+    /// 用云朵的"飘逸"语气，告诉用户下一步该做啥（不是冷冰冰报错）
+    static func petHintForError(_ msg: String) -> String {
+        let m = msg.lowercased()
+        if m.contains("deepseek") && (m.contains("图片") || m.contains("vision") || m.contains("image")) {
+            return "DeepSeek 不会看图，切到 Kimi/GLM~ 🌥️"
+        }
+        if m.contains("api key") || m.contains("配置") || m.contains("apikey") {
+            return "去设置粘个 API Key~ 🔑"
+        }
+        if m.contains("还在启动") || m.contains("serverready") || m.contains("server") && m.contains("ready") {
+            return "云在飘来，等我一下~ ☁️"
+        }
+        if m.contains("超时") || m.contains("timeout") {
+            return "云被堵在路上，再试一次 🔄"
+        }
+        if m.contains("401") || m.contains("403") || m.contains("权限") {
+            return "Key 不对，去设置检查~ 🔑"
+        }
+        if m.contains("没产出正文") || m.contains("没有响应") {
+            return "云走神了，点重发试试 🔄"
+        }
+        if m.contains("断") || m.contains("network") || m.contains("network") {
+            return "信号弱，再试一次 📡"
+        }
+        // 兜底
+        return "云遇到点问题 😢"
     }
 
     /// 把各种 Error 转成中文友好提示。
@@ -1216,6 +1278,23 @@ final class ChatViewModel {
             object: nil,
             userInfo: ["count": count]
         )
+    }
+
+    /// v1.3 起在线 AI 走 opencode serve HTTP API，server 启动时一次性加载 provider 配置。
+    /// 用户在设置改 API Key / 切服务商 → 防抖 800ms 后重启 server 让新配置生效。
+    /// 防抖原因：directAPIKey 是 TextField 绑定，每打一个字符 didSet 都会触发；
+    /// 800ms 内连续修改只会重启一次
+    private var openCodeReloadTask: Task<Void, Never>?
+    private func scheduleOpenCodeConfigReload() {
+        openCodeReloadTask?.cancel()
+        openCodeReloadTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled else { return }
+            await OpenCodeServerManager.shared.restartForConfigChange()
+            // server 重启后所有 conversation 的 sessionID 失效，让 HTTPClient 下次发消息时重建
+            OpenCodeHTTPClient.shared.clearAllSessions()
+            _ = self
+        }
     }
 
     /// 手动重命名对话（右键胶囊 → 重命名）

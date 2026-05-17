@@ -104,6 +104,11 @@ final class ClawdWalkController {
     /// 飞行中的 AI 调用 Task，stop 时取消避免桌面巡视关掉后还在跑
     private var sniffAITask: Task<Void, Never>? = nil
 
+    /// 戴眼镜动画完整结束的截止时间。在此之前 shouldShow 强制返回 true，
+    /// 确保用户能看完戴眼镜全过程而不被 streaming 立即回家打断
+    private var glassesPendingUntil: Date? = nil
+    private var glassesEvalTask: Task<Void, Never>? = nil
+
     private init() {}
 
     /// AppDelegate 启动时调一次。后续完全靠通知驱动状态切换
@@ -163,6 +168,27 @@ final class ClawdWalkController {
             }
         }
 
+        // CloudPet 戴眼镜通知 —— vision 自动切换时触发。
+        // 总动画时长 = 戴上 1.4s + 保持 duration + 摘下 0.6s，整个期间云朵必须留在桌面
+        nc.addObserver(forName: .init("HermesPetCloudPetWearGlasses"), object: nil, queue: .main) { [weak self] note in
+            let duration = (note.userInfo?["duration"] as? Double) ?? 6.0
+            let totalSec = 1.4 + duration + 0.6
+            Task { @MainActor in
+                guard let self = self else { return }
+                self.glassesPendingUntil = Date().addingTimeInterval(totalSec)
+                // 立刻 evaluate：把刚回家的云朵叫回来（或保持现状）
+                self.evaluateState()
+                // 动画结束时再 evaluate 一次：若那时 streaming 仍在跑会自然回家
+                self.glassesEvalTask?.cancel()
+                self.glassesEvalTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(totalSec * 1_000_000_000))
+                    if Task.isCancelled { return }
+                    self.glassesPendingUntil = nil
+                    self.evaluateState()
+                }
+            }
+        }
+
         // Mode 变化（切到非 Claude → 立刻收起）
         nc.addObserver(forName: .init("HermesPetModeChanged"), object: nil, queue: .main) { [weak self] note in
             let raw = (note.userInfo?["mode"] as? String) ?? ""
@@ -207,6 +233,9 @@ final class ClawdWalkController {
         guard let vm = viewModel else { return false }
         guard vm.clawdWalkEnabled else { return false }
         guard vm.agentMode == .claudeCode || vm.agentMode == .directAPI else { return false }
+        // 戴眼镜动画期间强制保持显示 —— 用户能看完整个"掏眼镜→戴上→保持→摘下"流程，
+        // 之后再按常规规则判定是否回家（vision 切换后通常 streaming 仍在跑会回家）
+        if let pending = glassesPendingUntil, pending > Date() { return true }
         // streaming 时永远不出来（不管哪种模式），避免抢灵动岛进度的注意力
         if vm.conversations.contains(where: { $0.isStreaming }) { return false }
         // directAPI 在线 AI 模式：宠物直接到桌面，不等 idle（云朵小精灵主动陪伴）
@@ -1034,19 +1063,41 @@ final class ClawdWalkController {
                 try? await Task.sleep(nanoseconds: 125_000_000)
             }
             state.pose = .rest
-            // 4) 缩到 0 消失（450ms）
-            state.eatScale = 0
-            try? await Task.sleep(nanoseconds: 450_000_000)
 
-            // 5) 注入默认 prompt（用户没填东西时）+ 发送 + 打开聊天窗
+            // 5) 注入默认 prompt —— **图片 vs 文件不同 prompt**
+            //   - 图片：让模型直接描述图（之前误用文件版 prompt 会让模型去 Read 工具找文件，找不到报"找不到"）
+            //   - 文件：让模型按路径 Read
             if vm.inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                vm.inputText = "请帮我看看这个文件「\(fileName)」是什么 / 主要内容是什么"
+                if isImage {
+                    vm.inputText = "这张图里是什么？请帮我看看"
+                } else {
+                    vm.inputText = "请帮我看看这个文件「\(fileName)」是什么 / 主要内容是什么"
+                }
             }
+
+            // 6) 收尾策略 —— **图片 + directAPI** 走特殊路径：
+            //   不缩 0 消失也不 hideImmediately，让云朵留在桌面戴眼镜（vision 切换）。
+            //   sendMessage 内会 post wear glasses 通知设 glassesPendingUntil，
+            //   evaluateState 看到 pending 会强制保持显示，戴完后自然回家
+            let shouldStayForGlasses = isImage && vm.agentMode == .directAPI
+            if !shouldStayForGlasses {
+                // 缩到 0 消失（450ms）
+                state.eatScale = 0
+                try? await Task.sleep(nanoseconds: 450_000_000)
+            }
+
             vm.sendMessage()
             NotificationCenter.default.post(name: .init("HermesPetOpenChatRequested"), object: nil)
 
-            // 6) Clawd 已缩为 0，立即收尾（不走 stopAndHide 的飞回岛动画，避免缩 0 之后又出现一个飞回轨迹）
-            hideImmediately()
+            if shouldStayForGlasses {
+                // 留在桌面 → reset eating 状态，让戴眼镜动画接管
+                state.isEating = false
+                state.eatScale = 1.0
+                state.pose = .rest
+            } else {
+                // 文件 / Claude 模式：保持原行为，立刻消失
+                hideImmediately()
+            }
         }
     }
 
@@ -1221,6 +1272,9 @@ struct ClawdWalkView: View {
     var onDragEnded: (CGSize) -> Void = { _ in }
 
     @State private var dragStarted = false
+    /// 桌面漫步的 CloudPet 同步戴眼镜（跟灵动岛 CloudPetIslandSprite 同款动画）
+    @State private var glassesProgress: Double = 0
+    @State private var glassesHideTask: Task<Void, Never>?
 
     /// Clawd 像素高度（窗口 44pt，留 7pt 上下 padding 容纳 jumping）
     private let clawdHeight: CGFloat = 30
@@ -1237,7 +1291,8 @@ struct ClawdWalkView: View {
                     // 不再用 SwiftUI 外层 bobOffset 重复模拟）
                     ClawdView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking)
                 case .cloud:
-                    CloudPetView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking)
+                    CloudPetView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
+                                 glassesProgress: glassesProgress)
                 }
             }
             // 朝向 + 吃东西时的整体缩放（鼓胀 / 缩小消失）合到一个 scaleEffect
@@ -1277,6 +1332,35 @@ struct ClawdWalkView: View {
         )
         .onHover { hovering in onHoverChange(hovering) }
         .help("Clawd 在散步 · 单击=打开聊天 · 双击=切到 Claude · 拖到桌面图标上=让它嗅一下")
+        // 桌面 CloudPet 跟灵动岛 CloudPetIslandSprite 同步戴眼镜
+        // 用 Task 手动每帧驱动 @State —— Canvas 是 immediate-mode 不接受 withAnimation 插值
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetCloudPetWearGlasses"))) { note in
+            guard state.visual == .cloud else { return }
+            let duration = (note.userInfo?["duration"] as? Double) ?? 6.0
+            glassesHideTask?.cancel()
+            glassesHideTask = Task { @MainActor in
+                let onFrames = 84   // 1.4s 戴上
+                for i in 1...onFrames {
+                    if Task.isCancelled { return }
+                    let t = Double(i) / Double(onFrames)
+                    let c1 = 1.70158, c3 = c1 + 1, x = t - 1
+                    glassesProgress = 1 + c3 * x * x * x + c1 * x * x
+                    try? await Task.sleep(nanoseconds: 16_666_666)
+                }
+                glassesProgress = 1
+                try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+                if Task.isCancelled { return }
+                let offFrames = 36   // 0.6s 摘下
+                for i in 1...offFrames {
+                    if Task.isCancelled { return }
+                    let t = 1 - Double(i) / Double(offFrames)
+                    glassesProgress = t * t
+                    try? await Task.sleep(nanoseconds: 16_666_666)
+                }
+                glassesProgress = 0
+            }
+        }
+        .onDisappear { glassesHideTask?.cancel() }
     }
 }
 

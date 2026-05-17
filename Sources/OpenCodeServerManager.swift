@@ -75,7 +75,14 @@ final class OpenCodeServerManager: @unchecked Sendable {
         do {
             let binary = try prepareWritableBinary()
             let pwd = ensurePassword()
-            let (port, proc) = try await spawnAndWaitForReady(binary: binary, password: pwd)
+            // 关键：v1.3 走 HTTP API 路线，serve 必须能加载所有用户配的 provider。
+            // 准备一个"全局 config dir"放完整 opencode.json，让 serve cwd 指向它
+            let configDir = try prepareGlobalConfigDir()
+            let (port, proc) = try await spawnAndWaitForReady(
+                binary: binary,
+                password: pwd,
+                cwd: configDir
+            )
             try await healthCheck(port: port, password: pwd)
 
             commitReady(process: proc, port: port, password: pwd)
@@ -90,6 +97,30 @@ final class OpenCodeServerManager: @unchecked Sendable {
             recordError(msg)
             throw error
         }
+    }
+
+    /// 用户在设置改了 provider / API Key → 重写 globalConfigDir 的 opencode.json，
+    /// 同步重启 server 让新配置生效（PATCH /config 这条路 opencode 1.15.1 对部分字段不热加载，最稳的是 restart）
+    func restartForConfigChange() async {
+        terminate()
+        // 给 server 退出 + 端口释放一点时间
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        try? await start()
+    }
+
+    /// 全局 config dir：`~/Library/Application Support/HermesPet/opencode-global/`，
+    /// `opencode serve` cwd 指向这里 → server 启动时加载该 dir 的 opencode.json。
+    /// 同一份 OpenCodeConfigGenerator.ensureConfig 复用，所有 provider 一次性注册到 server。
+    private func prepareGlobalConfigDir() throws -> URL {
+        let fm = FileManager.default
+        let appSupport = try fm.url(for: .applicationSupportDirectory,
+                                    in: .userDomainMask,
+                                    appropriateFor: nil,
+                                    create: true)
+        let dir = appSupport.appendingPathComponent("HermesPet/opencode-global", isDirectory: true)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        OpenCodeConfigGenerator.ensureConfig(in: dir.path)
+        return dir
     }
 
     // Swift 6 严格并发：NSLock 不能在 async 函数里直接 lock/unlock。
@@ -210,10 +241,12 @@ final class OpenCodeServerManager: @unchecked Sendable {
     }
 
     /// spawn 子进程并等 stdout 给出端口（超时 10s）
-    private func spawnAndWaitForReady(binary: URL, password: String) async throws -> (port: Int, process: Process) {
+    private func spawnAndWaitForReady(binary: URL, password: String, cwd: URL) async throws -> (port: Int, process: Process) {
         let proc = Process()
         proc.executableURL = binary
         proc.arguments = ["serve", "--port", "0", "--hostname", "127.0.0.1"]
+        // 关键：cwd 指向准备好 opencode.json 的全局配置 dir，让 serve 启动时加载完整 provider 列表
+        proc.currentDirectoryURL = cwd
 
         var env = CLIProcessEnvironment.make(executablePath: binary.path)
         env["OPENCODE_SERVER_PASSWORD"] = password

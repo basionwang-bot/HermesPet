@@ -39,6 +39,10 @@ struct ProviderPreset: Identifiable, Hashable {
     let defaultModel: String// 推荐主力模型
     let altModels: [String] // 备选模型（写进 placeholder / 文档提示）
     let signupURL: String?  // 注册 / 获取 API Key 的入口（用户点"如何获取 Key"时跳）
+    /// 该 provider 的 vision-capable 模型 ID。用户拖图时 OpenCodeHTTPClient 仅这次 prompt
+    /// 用这个 model（不影响 session 绑定的主力 model），让 Kimi/GLM/DeepSeek 等纯文本模型用户
+    /// 也能拖图不报「环境不能处理图片」。nil = 该 provider 没有 vision 模型（如 DeepSeek 截至 2026-05）
+    let visionModel: String?
     private let fastModel: String
     private let balancedModel: String
     private let deepModel: String
@@ -51,7 +55,8 @@ struct ProviderPreset: Identifiable, Hashable {
          signupURL: String?,
          fastModel: String? = nil,
          balancedModel: String? = nil,
-         deepModel: String? = nil) {
+         deepModel: String? = nil,
+         visionModel: String? = nil) {
         self.id = id
         self.displayName = displayName
         self.baseURL = baseURL
@@ -61,6 +66,7 @@ struct ProviderPreset: Identifiable, Hashable {
         self.fastModel = fastModel ?? defaultModel
         self.balancedModel = balancedModel ?? defaultModel
         self.deepModel = deepModel ?? defaultModel
+        self.visionModel = visionModel
     }
 
     /// 预设列表 —— 顺序就是 UI 上 Picker 显示的顺序。
@@ -79,7 +85,8 @@ struct ProviderPreset: Identifiable, Hashable {
             signupURL: "https://platform.deepseek.com/api_keys",
             fastModel: "deepseek-v4-flash",
             balancedModel: "deepseek-v4-pro",
-            deepModel: "deepseek-v4-pro"
+            deepModel: "deepseek-v4-pro",
+            visionModel: nil   // DeepSeek 截至 2026-05 还没公开 vision API
         ),
         ProviderPreset(
             id: "zhipu",
@@ -90,7 +97,8 @@ struct ProviderPreset: Identifiable, Hashable {
             signupURL: "https://open.bigmodel.cn/usercenter/apikeys",
             fastModel: "glm-5-turbo",
             balancedModel: "glm-5",
-            deepModel: "glm-5.1"
+            deepModel: "glm-5.1",
+            visionModel: "glm-4v-plus"   // 智谱多模态主力
         ),
         ProviderPreset(
             id: "moonshot",
@@ -104,7 +112,8 @@ struct ProviderPreset: Identifiable, Hashable {
             signupURL: "https://platform.moonshot.cn/console/api-keys",
             fastModel: "kimi-k2",
             balancedModel: "kimi-k2.5",
-            deepModel: "kimi-k2.6"
+            deepModel: "kimi-k2.6",
+            visionModel: "moonshot-v1-128k-vision-preview"   // Moonshot 官方 vision 模型
         ),
         ProviderPreset(
             id: "openai",
@@ -116,7 +125,8 @@ struct ProviderPreset: Identifiable, Hashable {
             signupURL: "https://platform.openai.com/api-keys",
             fastModel: "gpt-5.4-mini",
             balancedModel: "gpt-5.4",
-            deepModel: "gpt-5.5"
+            deepModel: "gpt-5.5",
+            visionModel: "gpt-4o"   // GPT-4o 对 vision 最稳，5.x 还有 quota 限制
         )
     ]
 
