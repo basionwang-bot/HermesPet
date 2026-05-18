@@ -16,6 +16,10 @@ let kChatWindowAlwaysOnTopKey = "chatWindowAlwaysOnTop"
 /// 但保留 NSWindow 可拖拽调整大小的能力。
 @MainActor
 final class ChatWindowController: NSObject, NSWindowDelegate {
+    /// 全局单例引用 —— PetHeaderStrip / PermissionWindowController 等需要查 isVisible 来分发
+    /// permission 卡片走 PetStrip 还是走原灵动岛卡片。weak 避免循环引用：实际持有者是 AppDelegate
+    static weak var shared: ChatWindowController?
+
     private let window: NSWindow
 
     /// 上次触发显示时用的锚点（灵动岛胶囊或菜单栏按钮），用于 hide 时收回方向
@@ -65,6 +69,7 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         self.window = window
         super.init()
         window.delegate = self
+        Self.shared = self
 
         // 监听用户在 header 切 pin 图标
         NotificationCenter.default.addObserver(
@@ -155,6 +160,10 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
             completion?()
             return
         }
+
+        // 广播即将隐藏 —— PetHeaderStrip 收到后会把当前 pending permission 移交给灵动岛
+        // 避免用户在 permission 决策中途 ⌘W 关聊天窗导致决策被丢
+        NotificationCenter.default.post(name: .init("HermesPetChatWindowWillHide"), object: nil)
 
         // 退出前先把当前 frame 保存（万一用户没动也保存一次默认值）
         if !isAnimating { saveFrame() }

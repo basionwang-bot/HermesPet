@@ -389,7 +389,7 @@ final class ChatViewModel {
         if loaded.isEmpty {
             // 全新用户 / 没历史 —— 起一个带欢迎语的对话，mode 用上次记得的 lastUsedMode
             loaded = [Conversation(
-                title: "对话 1",
+                title: "新对话",
                 messages: [ChatMessage(
                     role: .assistant,
                     content: "👋 你好！我是你的 Hermes 桌宠，随时找我聊天或干活～\n点击 ⚙️ 配置好 API 地址和密钥就能用了。"
@@ -431,6 +431,23 @@ final class ChatViewModel {
             let text = (note.userInfo?["text"] as? String) ?? ""
             Task { @MainActor in
                 self.submitVoiceInput(text)
+            }
+        }
+
+        // PetHeaderStrip 右侧 mode mini sprite 点击 → 以指定 mode 新建对话
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetNewConversationWithMode"),
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self = self else { return }
+            guard let raw = note.userInfo?["mode"] as? String,
+                  let target = AgentMode(rawValue: raw) else { return }
+            Task { @MainActor in
+                let ok = self.newConversation(mode: target)
+                if !ok {
+                    self.errorMessage = "对话已达 \(kMaxConversations) 条上限，关掉一条再试"
+                }
             }
         }
 
@@ -966,16 +983,9 @@ final class ChatViewModel {
                 }
                 didSucceed = !visibleContent.isEmpty || !generatedImages.isEmpty
 
-                // 检测 AI 回复末尾是否有连续编号列表 → 灵动岛弹出选项下拉菜单
-                // 仅当此回复属于当前激活对话才弹（后台对话不打扰用户当前注意力）
-                if didSucceed, targetConversationID == self.activeConversationID,
-                   let choices = Self.extractTrailingChoices(from: visibleContent) {
-                    NotificationCenter.default.post(
-                        name: .init("HermesPetChoiceListReady"),
-                        object: nil,
-                        userInfo: ["options": choices]
-                    )
-                }
+                // 灵动岛下方选项菜单 ChoiceMenuOverlay 已废弃 —— 跟聊天窗内 ChoiceCard 信息重复，
+                // 用户决定只保留聊天窗里的 ChoiceCard。不再 post HermesPetChoiceListReady。
+                // ChoiceMenuOverlay 渲染代码暂保留作 dead code，没人 trigger 永不弹出。
             } catch is CancellationError {
                 self.updateMessage(conversationID: targetConversationID, messageID: assistantMessageID) { msg in
                     msg.isStreaming = false
@@ -1019,6 +1029,24 @@ final class ChatViewModel {
                 object: nil,
                 userInfo: ["success": didSucceed]
             )
+            // 任务成功 + 聊天窗关着 → 触发"AI 回复摘要"卡片（v1.2.7-dev）
+            // 解决 ⌘⇧V 语音 / ⌘⇧Space quickAsk 这类场景"看不到回复"的痛点
+            if didSucceed,
+               ChatWindowController.shared?.isVisible != true,
+               let idx = self.conversations.firstIndex(where: { $0.id == targetConversationID }),
+               let lastAssistant = self.conversations[idx].messages.last(where: { $0.role == .assistant }),
+               !lastAssistant.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               !lastAssistant.content.hasPrefix("❌") {
+                NotificationCenter.default.post(
+                    name: .init("HermesPetResponseReady"),
+                    object: nil,
+                    userInfo: [
+                        "content": lastAssistant.content,
+                        "conversationID": targetConversationID,
+                        "modeRaw": mode.rawValue
+                    ]
+                )
+            }
             // 任务成功完成 → 给个轻触觉提示（不打扰，只是"做完了"的回执感）
             if didSucceed {
                 Haptic.tap(.alignment)
@@ -1295,8 +1323,7 @@ final class ChatViewModel {
         ]
         // 标题也重置回默认（让下次发消息时能再次 auto-title）
         if let idx = conversations.firstIndex(where: { $0.id == activeConversationID }) {
-            let n = nextDefaultTitleNumber()
-            conversations[idx].title = "对话 \(n)"
+            conversations[idx].title = "新对话"
         }
         // 清空时也重置 Claude 的会话延续状态
         claudeClient.resetSession()
@@ -1312,10 +1339,9 @@ final class ChatViewModel {
     @discardableResult
     func newConversation(mode: AgentMode? = nil) -> Bool {
         guard conversations.count < kMaxConversations else { return false }
-        let n = nextDefaultTitleNumber()
         let resolved = mode ?? lastUsedMode
         let conv = Conversation(
-            title: "对话 \(n)",
+            title: "新对话",
             messages: [ChatMessage(
                 role: .assistant,
                 content: Self.welcomeMessageContent(for: resolved)
@@ -1483,16 +1509,6 @@ final class ChatViewModel {
             checkConnection()
         }
         storage.saveConversations(conversations)
-    }
-
-    /// 找一个不冲突的默认标题序号（避免新建后跟现有的"对话 N"重名）
-    private func nextDefaultTitleNumber() -> Int {
-        let usedNumbers = conversations.compactMap { conv -> Int? in
-            guard conv.title.hasPrefix("对话 ") else { return nil }
-            return Int(conv.title.dropFirst(3).trimmingCharacters(in: .whitespaces))
-        }
-        let maxUsed = usedNumbers.max() ?? 0
-        return maxUsed + 1
     }
 
     /// 重试：把最后一条出错的 assistant 消息及它对应的 user 消息撤回，

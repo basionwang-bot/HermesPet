@@ -778,7 +778,7 @@ struct SettingsView: View {
                 paletteRow(label: "Claude · Clawd 🦞", mode: .claudeCode)
                 paletteRow(label: "在线 AI · 云朵 ☁️", mode: .directAPI)
                 paletteRow(label: "Hermes · 小马 🐴", mode: .hermes)
-                paletteRow(label: "Codex · 喷射机器人 🤖", mode: .codex)
+                paletteRow(label: "Codex · coco 🤖", mode: .codex)
             }
             .padding(12)
             .background(Color.secondary.opacity(0.06))

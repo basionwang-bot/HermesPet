@@ -834,33 +834,39 @@ struct DynamicIslandPillView: View {
     private func toolStateCard(_ toolKind: ToolKind) -> some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: notchHeight)
-            HStack(spacing: 8) {
-                ModeSpriteView(mode: currentMode, isWorking: true, size: 18)
-                HStack(spacing: 5) {
+            HStack(spacing: 6) {
+                ModeSpriteView(mode: currentMode, isWorking: true, size: 16)
+                HStack(spacing: 4) {
                     Text(toolKind.verb)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     if !currentToolArg.isEmpty {
                         Text(currentToolArg)
-                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.75))
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                     if stepStarted >= 2 {
-                        Text("· 第 \(min(stepEnded + 1, stepStarted))/\(stepStarted) 步")
-                            .font(.system(size: 11, weight: .medium))
+                        Text("· \(min(stepEnded + 1, stepStarted))/\(stepStarted)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     if elapsedSeconds >= 10 {
                         Text("· \(elapsedSeconds)s")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.6))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
             }
             .frame(maxHeight: .infinity)
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 10)
         }
         .overlay(alignment: .bottom) {
             toolProgressBar

@@ -27,6 +27,10 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 顶部桌宠状态条 —— 占据 NSWindow titlebar 透明区 (28pt)，
+            // 让用户能看到"是哪只小宠物在帮我处理" + 实时工具进度
+            PetHeaderStrip(viewModel: viewModel)
+
             // Header
             headerView
 
@@ -208,24 +212,14 @@ struct ChatView: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(spacing: 4) {
-            // 画布对话：显示混合模式标签（规划走在线 AI，生图走 Codex），不可切换
-            // 普通对话：显示 ModeSwitcherButton 可切 hermes / directAPI / claudeCode / codex
+        HStack(spacing: 6) {
+            // 画布对话：显示混合模式标签（规划走在线 AI，生图走 Codex）
+            // 普通对话：mode 表达完全由 PetHeaderStrip 接管（左侧大 sprite + 右侧 4 只 mode rail），
+            //         这里直接铺 ConversationTab，[+] 继承当前 active tab 的 mode 新建
             if isActiveCanvas {
                 CanvasModeBadge(tint: headerTint)
-            } else {
-                ModeSwitcherButton(
-                    mode: viewModel.agentMode,
-                    tint: headerTint,
-                    isLocked: currentConversationLocked,
-                    onTap: viewModel.toggleAgentMode,
-                    onLockedTap: {
-                        viewModel.errorMessage = "这个对话已锁定为 \(viewModel.agentMode.label)；想换模型请新建对话。"
-                    }
-                )
             }
 
-            // 对话胶囊：最多 3 个，可切换 / 新建 / 关闭 / 右键重命名
             ConversationPills(
                 conversations: viewModel.conversations,
                 activeID: viewModel.activeConversationID,
@@ -237,7 +231,6 @@ struct ChatView: View {
                 onAddCanvas: { showCanvasCreator = true },
                 onRename: { id, newTitle in viewModel.renameConversation(id: id, to: newTitle) }
             )
-            .padding(.leading, 2)
 
             Spacer()
 
@@ -285,13 +278,6 @@ struct ChatView: View {
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }
-    }
-
-    /// 当前对话是否已锁定 mode（发过 user 消息就锁）—— 用于 mode 切换器禁用判断
-    private var currentConversationLocked: Bool {
-        viewModel.conversations
-            .first(where: { $0.id == viewModel.activeConversationID })?
-            .hasUserMessages ?? false
     }
 
     private var connectionDotColor: Color {
@@ -751,6 +737,15 @@ struct SuggestionCard: View {
 
 // MARK: - 对话胶囊条（最多 3 个）
 
+/// 对话 Tab 栏 —— 矩形 tab 横排，每个 tab 显示 mode mini icon + title + 序号。
+/// 这是之前圆形 `ConversationPill` 的替代品（圆形太小易误点，看不出哪条是哪条 mode）。
+///
+/// 设计要点：
+/// - tab 形态：8pt 圆角矩形，32pt 高，固定 max width 160pt（避免长 title 撑爆 header）
+/// - active tab：mode 主色 0.18 底 + 顶部 2pt 主色条 + title 加粗
+/// - 后台流式中：底部 1.5pt mode tint 呼吸条（保留原圆形胶囊行为）
+/// - hover 时右侧出现 × 关闭按钮（仅 canClose 时）
+/// - 最右侧 `[+]` 按钮：常驻显示；canAddMore=false 时灰掉 disabled
 struct ConversationPills: View {
     let conversations: [Conversation]
     let activeID: String
@@ -763,33 +758,29 @@ struct ConversationPills: View {
     let onRename: (String, String) -> Void
 
     var body: some View {
-        // 横向 ScrollView —— 对话上限提到 8 之后，header 装不下，超出可滑动
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 3) {
+                HStack(spacing: 4) {
                     ForEach(Array(conversations.enumerated()), id: \.element.id) { (idx, conv) in
-                        ConversationPill(
+                        ConversationTab(
                             index: idx + 1,
                             title: conv.title,
+                            mode: conv.mode,
                             isActive: conv.id == activeID,
                             hasUnread: conv.hasUnread && conv.id != activeID,
                             isBackgroundStreaming: conv.isStreaming && conv.id != activeID,
                             canClose: conversations.count > 1,
-                            tint: tint,
                             onSelect: { onSelect(conv.id) },
                             onClose: { onClose(conv.id) },
                             onRename: { newTitle in onRename(conv.id, newTitle) }
                         )
                         .id(conv.id)
                     }
-                    if canAddMore {
-                        AddPillButton(onAdd: onAdd, onAddCanvas: onAddCanvas)
-                    }
+                    AddTabButton(canAdd: canAddMore, onAdd: onAdd, onAddCanvas: onAddCanvas)
                 }
-                .padding(.vertical, 2)   // 留点空间给底部发光线和未读红点不被裁
+                .padding(.vertical, 2)
             }
             .onChange(of: activeID) { _, newID in
-                // 切换对话时自动滚到对应胶囊，确保超出视口的也能露面
                 withAnimation(AnimTok.smooth) {
                     proxy.scrollTo(newID, anchor: .center)
                 }
@@ -800,15 +791,15 @@ struct ConversationPills: View {
     }
 }
 
-struct ConversationPill: View {
+/// 单个对话 tab（矩形）。
+struct ConversationTab: View {
     let index: Int
     let title: String
+    let mode: AgentMode
     let isActive: Bool
     let hasUnread: Bool
-    /// 非激活对话正在后台流式 → 显示底部呼吸发光线
     var isBackgroundStreaming: Bool = false
     let canClose: Bool
-    let tint: Color
     let onSelect: () -> Void
     let onClose: () -> Void
     let onRename: (String) -> Void
@@ -817,48 +808,69 @@ struct ConversationPill: View {
     @State private var isRenaming = false
     @State private var renameDraft = ""
     @State private var streamPulse = false
-    private let pillDiameter: CGFloat = 18
-    private var expandedWidth: CGFloat { (isHovering && canClose) ? 34 : pillDiameter }
+
+    private static let tabHeight: CGFloat = 28
+    private static let tabMaxWidth: CGFloat = 150
+
+    /// mode tint —— tab 视觉主色（active 底 / 顶条 / 流式发光线）
+    private var modeTint: Color {
+        switch mode {
+        case .hermes:     return .green
+        case .directAPI:  return .indigo
+        case .claudeCode: return .orange
+        case .codex:      return .cyan
+        }
+    }
 
     var body: some View {
-        HStack(spacing: isHovering && canClose ? 4 : 3) {
-            Button(action: onSelect) {
-                Text("\(index)")
-                    .font(.system(size: 11, weight: isActive ? .bold : .medium))
-                    .foregroundStyle(isActive ? Color.white : .secondary)
-                    .frame(width: 10, height: pillDiameter)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Button(action: onSelect) {
+            HStack(spacing: 5) {
+                // mode mini icon —— 让用户一眼分辨"这是哪只桌宠的对话"
+                Image(systemName: mode.iconName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isActive ? modeTint : Color.secondary)
 
-            if isHovering && canClose {
-                Button(action: onClose) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(isActive ? Color.white.opacity(0.9) : .secondary)
-                        .frame(width: 10, height: pillDiameter)
-                        .contentShape(Rectangle())
+                // 标题（序号不显示 —— mode icon + title 已足够区分；⌘1~⌘8 快捷键保留按 conversations 数组顺序）
+                Text(title)
+                    .font(.system(size: 11, weight: isActive ? .semibold : .regular))
+                    .foregroundStyle(isActive ? .primary : .secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                // hover 时右侧关闭按钮（仅 canClose 时）
+                if isHovering && canClose {
+                    Button(action: onClose) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 14, height: 14)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("关闭对话")
+                    .transition(.scale(scale: 0.72).combined(with: .opacity))
                 }
-                .buttonStyle(.plain)
-                .help("关闭对话")
-                .transition(.asymmetric(
-                    insertion: .scale(scale: 0.72, anchor: .leading).combined(with: .opacity),
-                    removal: .scale(scale: 0.72, anchor: .leading).combined(with: .opacity)
-                ))
             }
+            .padding(.horizontal, 8)
+            .frame(height: Self.tabHeight)
+            .frame(maxWidth: Self.tabMaxWidth, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .frame(width: expandedWidth, height: pillDiameter)
+        .buttonStyle(.plain)
         .background(
-            Capsule()
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .fill(isActive
-                      ? AnyShapeStyle(tint.opacity(0.85))
-                      : AnyShapeStyle(Color.primary.opacity(isHovering ? 0.08 : 0)))
+                      ? modeTint.opacity(0.16)
+                      : Color.primary.opacity(isHovering ? 0.06 : 0))
         )
         .overlay(
-            Capsule()
-                .stroke(isActive ? Color.clear : Color.primary.opacity(0.18), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    isActive ? modeTint.opacity(0.45) : Color.primary.opacity(0.10),
+                    lineWidth: isActive ? 1.0 : 0.6
+                )
         )
-        // 后台对话完成时的未读红点 —— 浮在胶囊右上角
+        // 后台对话完成的未读红点 —— 浮在 tab 右上角
         .overlay(alignment: .topTrailing) {
             if hasUnread {
                 Circle()
@@ -869,15 +881,16 @@ struct ConversationPill: View {
                     .transition(.scale.combined(with: .opacity))
             }
         }
-        // 后台流式中的发光线 —— 浮在胶囊底部，呼吸 (mode tint)
+        // 后台流式中的呼吸发光线
         .overlay(alignment: .bottom) {
             if isBackgroundStreaming {
                 Capsule()
-                    .fill(tint)
+                    .fill(modeTint)
                     .frame(height: 1.5)
-                    .shadow(color: tint.opacity(0.8), radius: 2)
+                    .shadow(color: modeTint.opacity(0.8), radius: 2)
                     .opacity(streamPulse ? 1.0 : 0.45)
-                    .offset(y: 2)
+                    .padding(.horizontal, 4)
+                    .offset(y: 1.5)
                     .onAppear {
                         withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true)) {
                             streamPulse = true
@@ -889,12 +902,11 @@ struct ConversationPill: View {
         .animation(AnimTok.snappy, value: hasUnread)
         .animation(AnimTok.snappy, value: isBackgroundStreaming)
         .animation(AnimTok.snappy, value: isHovering)
-        .contentShape(Capsule())
+        .animation(AnimTok.smooth, value: isActive)
         .onHover { hovering in
             withAnimation(AnimTok.snappy) { isHovering = hovering }
         }
         .help(canClose ? "\(title) · 悬停可关闭，右键可重命名" : title)
-        // 右键菜单：重命名、关闭
         .contextMenu {
             Button {
                 renameDraft = title
@@ -909,7 +921,6 @@ struct ConversationPill: View {
                 }
             }
         }
-        // 重命名弹出层：小输入框，回车确认 / ESC 取消
         .popover(isPresented: $isRenaming, arrowEdge: .bottom) {
             HStack(spacing: 6) {
                 TextField("新名称", text: $renameDraft)
@@ -930,18 +941,19 @@ struct ConversationPill: View {
     }
 }
 
-struct AddPillButton: View {
-    /// 单击：新建普通对话；画布模式开启时弹菜单可选画布
+/// 加号按钮 —— 矩形 tab 风格，跟普通 tab 视觉对齐。
+/// canAdd=false 时灰掉 disabled，hover 显示"对话数已达上限"。
+struct AddTabButton: View {
+    let canAdd: Bool
     let onAdd: () -> Void
     let onAddCanvas: () -> Void
     @State private var isHovering = false
-    /// 画布模式是实验性功能，默认隐藏；用户在设置→系统→实验性功能里打开后才显示"新建画布"
     @AppStorage("canvasModeEnabled") private var canvasModeEnabled: Bool = false
-    private let pillDiameter: CGFloat = 18
+    private static let tabHeight: CGFloat = 28
 
     var body: some View {
         Group {
-            if canvasModeEnabled {
+            if canvasModeEnabled && canAdd {
                 Menu {
                     Button {
                         onAdd()
@@ -955,10 +967,12 @@ struct AddPillButton: View {
                 .fixedSize()
                 .help("新建（对话 / 画布）")
             } else {
-                // 画布关闭时退化成简单按钮：点一下直接新建对话，不弹菜单
-                Button(action: onAdd) { plusIcon }
+                Button(action: { if canAdd { onAdd() } }) { plusIcon }
                     .buttonStyle(.plain)
-                    .help("新建对话")
+                    .disabled(!canAdd)
+                    .help(canAdd
+                          ? "新建对话（继承当前模式）"
+                          : "对话数已达 \(kMaxConversations) 条上限")
             }
         }
         .onHover { hovering in
@@ -968,16 +982,16 @@ struct AddPillButton: View {
 
     private var plusIcon: some View {
         Image(systemName: "plus")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.secondary)
-            .frame(width: pillDiameter, height: pillDiameter)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(canAdd ? Color.secondary : Color.secondary.opacity(0.35))
+            .frame(width: Self.tabHeight, height: Self.tabHeight)
             .background(
-                Capsule()
-                    .fill(Color.primary.opacity(isHovering ? 0.08 : 0))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(canAdd && isHovering ? 0.06 : 0))
             )
             .overlay(
-                Capsule()
-                    .stroke(Color.primary.opacity(0.18), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.primary.opacity(canAdd ? 0.10 : 0.05), lineWidth: 0.6)
             )
     }
 }
@@ -1017,66 +1031,6 @@ struct CanvasModeBadge: View {
                 .stroke(Color.indigo.opacity(0.25), lineWidth: 0.5)
         )
         .help("画布工作区 · 规划用在线 AI，图片生成走 Codex（GPT Image 2）")
-    }
-}
-
-// MARK: - mode 切换按钮（带 hover 高亮 + tap 弹性反馈 + 颜色过渡）
-
-struct ModeSwitcherButton: View {
-    let mode: AgentMode
-    let tint: Color
-    /// 对话已发过 user 消息 → mode 锁死，按钮右侧的 chevron 变成锁图标，点击走 onLockedTap
-    var isLocked: Bool = false
-    let onTap: () -> Void
-    var onLockedTap: (() -> Void)? = nil
-
-    @State private var isHovering = false
-    @State private var isPressed = false
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: mode.iconName)
-                .foregroundStyle(tint)
-                .font(.headline)
-                .contentTransition(.symbolEffect(.replace))
-            Text(mode.label)
-                .font(.headline)
-                .foregroundStyle(.primary)
-                .contentTransition(.numericText())
-            // 锁定时显示小锁；未锁定时显示上下箭头表"可切换"
-            Image(systemName: isLocked ? "lock.fill" : "chevron.up.chevron.down")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(isLocked ? .secondary : .tertiary)
-                .contentTransition(.symbolEffect(.replace))
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                // 锁定状态不再 hover 高亮（避免误以为可点）
-                .fill(.primary.opacity(isHovering && !isLocked ? 0.06 : 0))
-        )
-        .scaleEffect(isPressed ? 0.94 : 1.0)
-        .opacity(isLocked ? 0.85 : 1.0)
-        .animation(AnimTok.snappy, value: isHovering)
-        .animation(AnimTok.bouncy, value: isPressed)
-        .animation(AnimTok.smooth, value: mode)
-        .animation(AnimTok.smooth, value: isLocked)
-        .onHover { hovering in isHovering = hovering }
-        .onTapGesture {
-            if isLocked {
-                onLockedTap?()
-                return
-            }
-            isPressed = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                isPressed = false
-            }
-            onTap()
-        }
-        .help(isLocked
-              ? "此对话已锁定为 \(mode.label)；想换模型请新建对话（⌘N）"
-              : "点击切换：Hermes → Claude Code → Codex")
     }
 }
 

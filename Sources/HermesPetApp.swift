@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var islandController: DynamicIslandController?
     /// Permission UI 独立窗口控制器（v1.3+，监听 NotificationCenter 自驱）
     private var permissionWindowController: PermissionWindowController?
+    /// 任务回复摘要卡片控制器（v1.2.7-dev）—— 聊天窗关着时 task 完成 → 灵动岛下方弹摘要
+    private var responseSummaryController: ResponseSummaryWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 配置迁移：把老版本的 UserDefaults 字段升级到当前 schema。
@@ -92,6 +94,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Permission UI 独立窗口 —— 监听 NotificationCenter 自驱，独立于灵动岛 NSWindow
         self.permissionWindowController = PermissionWindowController()
+
+        // 任务回复摘要卡片 —— 监听 HermesPetResponseReady 自驱（v1.2.7-dev）
+        self.responseSummaryController = ResponseSummaryWindowController()
 
         // Permission hook server + Claude / Codex CLI hook 安装。
         // 不论 permissionUIEnabled 开关如何，server 都启动（端口固定后才能写 hook 配置）

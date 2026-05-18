@@ -109,6 +109,17 @@ final class PermissionWindowController {
                 if let req = req { self?.show(request: req) }
             }
         }
+        // 聊天窗 hide 时把 PetStrip 里的 pending permission 移交过来 —— 无条件 show，
+        // 跳过 show(request:) 内的 ChatWindowController.isVisible 检查（此时聊天窗已经进入退出动画）
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetPermissionMigrateToIsland"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let req = note.userInfo?["request"] as? PermissionRequest
+            MainActor.assumeIsolated {
+                if let req = req { self?.showUnconditionally(request: req) }
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: .init("HermesPetPermissionReplied"),
             object: nil, queue: .main
@@ -210,6 +221,17 @@ final class PermissionWindowController {
     // MARK: - 显示 / 隐藏
 
     private func show(request: PermissionRequest) {
+        // 聊天窗开着时让 PetHeaderStrip 接管展开决策面（v1.2.7-dev）。
+        // 此处直接 return，避免双显示。PetStrip 也监听 HermesPetPermissionAsked，自己展开
+        if ChatWindowController.shared?.isVisible == true {
+            return
+        }
+        showUnconditionally(request: request)
+    }
+
+    /// 跳过 ChatWindowController.isVisible 检查直接 show。
+    /// 用于：聊天窗收起时 PetStrip 把 pending permission 移交给灵动岛
+    private func showUnconditionally(request: PermissionRequest) {
         // 动态卡片高度：Diff 模式需要更多垂直空间显示 +- 行；单参数 case（WebFetch/Bash）简短紧凑
         cardHeight = request.diffPreview != nil ? 250 : 150
         positionUnderIsland()

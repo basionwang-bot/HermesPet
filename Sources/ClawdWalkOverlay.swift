@@ -123,6 +123,24 @@ final class ClawdWalkController {
     private var glassesPendingUntil: Date? = nil
     private var glassesEvalTask: Task<Void, Never>? = nil
 
+    // MARK: - 灵动岛避让 + 传送门
+    /// 灵动岛物理水平占用范围两侧再各 buffer 30pt 形成"避让带" —— 桌宠普通漫步不进，必须穿越时走传送门
+    private static let notchAvoidBuffer: CGFloat = 30
+    /// 传送门动画总耗时：开门 0.2s + 移动 0.0s（瞬移） + 收门 0.2s + 桌宠淡入淡出 0.4s = 0.6s 左右
+    private static let teleportTotalDuration: TimeInterval = 0.6
+    /// 传送门冷却：完成一次后 3s 内禁止再次触发，避免鼠标在两侧乱晃时反复闪
+    private static let teleportCooldown: TimeInterval = 3.0
+    /// 当前是否正在传送中（tick 期间应跳过所有自动位移逻辑）
+    private var isTeleporting: Bool = false
+    /// 上次传送结束时间，加 teleportCooldown 算冷却到期点
+    private var lastTeleportEndedAt: Date? = nil
+    /// 传送门 SwiftUI state（openness 0~1 驱动门展开/收回）
+    private let portalState = TeleportPortalState()
+    /// 传送门 NSPanel（独立窗口，跟桌宠 NSWindow 平级 z-order）
+    private var portalWindow: NSWindow?
+    /// 传送门窗口尺寸 —— 比桌宠略大，让外圈光晕能溢出
+    private static let portalWindowSize = NSSize(width: 80, height: 80)
+
     private init() {}
 
     /// AppDelegate 启动时调一次。后续完全靠通知驱动状态切换
@@ -316,6 +334,24 @@ final class ClawdWalkController {
         return screen.frame.midX
     }
 
+    /// 灵动岛"避让带" —— 桌宠普通漫步不能进、chasing/patrol 跨越要触发传送门。
+    /// 范围 = 物理刘海宽度向两侧各 +notchAvoidBuffer (30pt)。
+    /// 非 notch 屏返回 nil（无避让需求）
+    private func notchAvoidZone(on screen: NSScreen) -> ClosedRange<CGFloat>? {
+        guard let l = screen.auxiliaryTopLeftArea, let r = screen.auxiliaryTopRightArea else {
+            return nil
+        }
+        return (l.maxX - Self.notchAvoidBuffer)...(r.minX + Self.notchAvoidBuffer)
+    }
+
+    /// 判断桌宠窗口（左下角 = positionX，宽 = windowSize.width）是否跟避让带相交。
+    /// 用桌宠中心 x 判断更直观 —— 桌宠中心进入 zone = 算作"接触"
+    private func clawdCenterInAvoidZone(positionX: CGFloat, on screen: NSScreen) -> Bool {
+        guard let zone = notchAvoidZone(on: screen) else { return false }
+        let cx = positionX + windowSize.width / 2
+        return zone.contains(cx)
+    }
+
     /// 漫步 y：菜单栏下方 4pt 处。visibleFrame.maxY 已扣掉菜单栏，正好用
     private func walkBaseY(on screen: NSScreen) -> CGFloat {
         let h = windowSize.height
@@ -390,6 +426,10 @@ final class ClawdWalkController {
         sniffAITask?.cancel()
         sniffAITask = nil
         state.isBeingDragged = false
+        // 传送门：取消进行中的传送 + 立即收门，避免桌宠隐藏后门还浮着
+        isTeleporting = false
+        portalState.openness = 0
+        portalWindow?.orderOut(nil)
 
         guard let win = window, let screen = targetScreen() else {
             window?.orderOut(nil)
@@ -465,6 +505,154 @@ final class ClawdWalkController {
         self.hostingView = host
     }
 
+    /// 传送门独立窗口 —— 跟桌宠 NSWindow 平级，spawn 时在桌宠当前位置打开门、瞬移后在 target 位置打开门。
+    /// 不接收点击（穿透到桌面），永远在桌宠上层略偏，让门视觉包住桌宠
+    private func createPortalWindow() {
+        let w = NSPanel(
+            contentRect: NSRect(origin: .zero, size: Self.portalWindowSize),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        w.level = HermesWindowLevel.dynamicIsland
+        w.isOpaque = false
+        w.backgroundColor = .clear
+        w.hasShadow = false
+        w.ignoresMouseEvents = true
+        w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        w.isReleasedWhenClosed = false
+        let host = NSHostingView(rootView: TeleportPortalView(state: portalState))
+        host.frame = NSRect(origin: .zero, size: Self.portalWindowSize)
+        host.autoresizingMask = [.width, .height]
+        w.contentView = host
+        portalWindow = w
+    }
+
+    /// 传送门每 tick 跟桌宠中心对齐 —— 传送中桌宠移动时门也跟着滑过去
+    private func syncPortalWindow() {
+        guard let portal = portalWindow, isTeleporting else { return }
+        let cx = positionX + windowSize.width / 2
+        let cy = walkY + windowSize.height / 2
+        portal.setFrameOrigin(NSPoint(
+            x: cx - Self.portalWindowSize.width / 2,
+            y: cy - Self.portalWindowSize.height / 2
+        ))
+    }
+
+    /// 当前 mode 主色 —— 传送门 tint 跟着桌宠
+    private func currentModeTintColor() -> Color {
+        switch lastMode {
+        case .hermes:     return .green
+        case .directAPI:  return .indigo
+        case .claudeCode: return .orange
+        case .codex:      return .cyan
+        }
+    }
+
+    /// 尝试触发传送门 —— 把桌宠从当前位置嗖一下传到 targetPositionX（NSWindow 左下角 x）。
+    /// 触发条件全部满足才会启动：(1) 冷却到期 (2) 当前不在传送中 (3) avoidZone 存在
+    /// 动画时序：
+    ///   t=0.00 → 开门 + 桌宠 fade out（持续 0.18s）
+    ///   t=0.20 → positionX 设到 targetPositionX，window 和 portal 同时 setFrameOrigin 瞬移
+    ///   t=0.20~0.40 → 桌宠 fade in
+    ///   t=0.40 → 收门动画启动
+    ///   t=0.60 → 收门完成，portal orderOut，isTeleporting = false，记 lastTeleportEndedAt 进冷却
+    @discardableResult
+    private func tryTeleport(toX targetPositionX: CGFloat, on screen: NSScreen) -> Bool {
+        if isTeleporting { return false }
+        if let last = lastTeleportEndedAt,
+           Date().timeIntervalSince(last) < Self.teleportCooldown {
+            return false
+        }
+        guard let win = window else { return false }
+        if portalWindow == nil { createPortalWindow() }
+        guard let portal = portalWindow else { return false }
+
+        isTeleporting = true
+        // 桌宠停掉 chasing / patrol 临时状态，免得动画结束后跟自身位移冲突
+        state.isWalking = false
+        state.pose = .rest
+
+        // 入门位置 = 桌宠当前中心
+        let cx0 = positionX + windowSize.width / 2
+        let cy0 = walkY + windowSize.height / 2
+        portal.setFrameOrigin(NSPoint(
+            x: cx0 - Self.portalWindowSize.width / 2,
+            y: cy0 - Self.portalWindowSize.height / 2
+        ))
+        portalState.tintColor = currentModeTintColor()
+        portalState.openness = 0
+        portal.alphaValue = 1
+        portal.orderFront(nil)
+
+        // 阶段 1：开门 0.2s（withAnimation 内部已带 spring，0.32s 完成弹出）+ 桌宠 fade out 0.18s
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.62)) {
+            portalState.openness = 1.0
+        }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.18
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            win.animator().alphaValue = 0
+        }
+
+        // 阶段 2 (t=0.20)：瞬移
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+            guard let self = self, self.isTeleporting else { return }
+            self.positionX = targetPositionX
+            self.walkY = self.walkBaseY(on: screen)  // 确保 walkY 是菜单栏下（patrol 可能下到桌面中央）
+            let cx1 = self.positionX + self.windowSize.width / 2
+            let cy1 = self.walkY + self.windowSize.height / 2
+            self.window?.setFrameOrigin(NSPoint(x: self.positionX, y: self.walkY))
+            self.portalWindow?.setFrameOrigin(NSPoint(
+                x: cx1 - Self.portalWindowSize.width / 2,
+                y: cy1 - Self.portalWindowSize.height / 2
+            ))
+
+            // 桌宠淡入 0.20s
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.20
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.window?.animator().alphaValue = 1
+            }
+
+            // 阶段 3 (t=0.40)：收门
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+                guard let self = self, self.isTeleporting else { return }
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.74)) {
+                    self.portalState.openness = 0
+                }
+
+                // 阶段 4 (t=0.60)：清理
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [weak self] in
+                    guard let self = self else { return }
+                    self.portalWindow?.orderOut(nil)
+                    self.isTeleporting = false
+                    self.lastTeleportEndedAt = Date()
+                }
+            }
+        }
+
+        return true
+    }
+
+    /// patrol 进 .goingTo / .returning 第一帧时检查：target 是否在 zone 另一侧？
+    /// 是 → 触发传送门跨过（成功返回 true，advancePatrol 应跳过本帧 moveToward）
+    @discardableResult
+    private func tryTeleportAcrossZoneForPatrol(targetWindowOrigin: NSPoint, on screen: NSScreen) -> Bool {
+        guard let zone = notchAvoidZone(on: screen) else { return false }
+        let clawdCx = positionX + windowSize.width / 2
+        let targetCx = targetWindowOrigin.x + windowSize.width / 2
+        let clawdLeft = clawdCx < zone.lowerBound
+        let clawdRight = clawdCx > zone.upperBound
+        let targetLeft = targetCx < zone.lowerBound
+        let targetRight = targetCx > zone.upperBound
+        guard (clawdLeft && targetRight) || (clawdRight && targetLeft) else {
+            return false
+        }
+        // 直接传送到目标位置（patrol 的 target 已经是 window origin）
+        return tryTeleport(toX: targetWindowOrigin.x, on: screen)
+    }
+
     /// Clawd 头顶气泡的独立窗口 —— 透明、不接收点击，每 tick 跟随 Clawd 中心 x 对齐
     private func createBubbleWindow() {
         let w = NSPanel(
@@ -503,6 +691,13 @@ final class ClawdWalkController {
         let now = Date()
         let dt = now.timeIntervalSince(lastTickAt ?? now)
         lastTickAt = now
+
+        // —— -2) 正在传送 —— 所有自动位移让位，位置由 startTeleport / completeTeleport 直接控制
+        if isTeleporting {
+            syncPortalWindow()
+            syncBubbleWindow()
+            return
+        }
 
         // —— -1) 用户正在拖动 Clawd —— 一切自动逻辑让位，位置完全由 handleClawdDragChanged 控制
         if state.isBeingDragged {
@@ -609,6 +804,63 @@ final class ClawdWalkController {
                 return
             }
 
+            // 1.5) 灵动岛避让 —— 鼠标在 zone 内 → 走到 zone 边停下不进；
+            //      桌宠跟鼠标分布在 zone 两侧 → 触发传送门跨过。
+            //      （avoid zone 仅 notch 屏存在；非 notch 屏 zone=nil 跳过整段）
+            if let zone = notchAvoidZone(on: screen) {
+                let clawdCx = positionX + windowSize.width / 2
+                let mouseX = mouseLoc.x
+                let mouseInZone = zone.contains(mouseX)
+                let clawdLeftOfZone  = clawdCx < zone.lowerBound
+                let clawdRightOfZone = clawdCx > zone.upperBound
+
+                if mouseInZone {
+                    // 鼠标停在灵动岛附近 —— 桌宠走到 zone 边外 6pt 处停下看着鼠标，不进 zone
+                    let stopCx: CGFloat = clawdLeftOfZone ? (zone.lowerBound - 6)
+                                        : clawdRightOfZone ? (zone.upperBound + 6)
+                                        : clawdCx   // 已经在 zone 内（罕见，刚 spawn 时），原地不动
+                    let stopX = stopCx - windowSize.width / 2
+                    if abs(positionX - stopX) < 3 {
+                        if abs(dx) > poseHysteresis {
+                            setPoseLookingAt(worldRight: dx > 0)
+                        }
+                        state.isWalking = false
+                        syncBubbleWindow()
+                        return
+                    }
+                    // 朝 stopX 走，不越过
+                    let wantDir: CGFloat = (stopX - positionX) >= 0 ? 1 : -1
+                    direction = wantDir
+                    state.facingRight = (wantDir > 0)
+                    if abs(dx) > poseHysteresis {
+                        setPoseLookingAt(worldRight: dx > 0)
+                    }
+                    let stepX = Self.walkSpeed * Self.chaseSpeedMul * direction * CGFloat(dt)
+                    positionX += stepX
+                    if (direction > 0 && positionX > stopX) || (direction < 0 && positionX < stopX) {
+                        positionX = stopX
+                    }
+                    win.setFrameOrigin(NSPoint(x: positionX, y: walkY))
+                    state.isWalking = true
+                    syncBubbleWindow()
+                    return
+                }
+
+                // 鼠标在 zone 另一侧 → 传送门跨过
+                let mouseLeftOfZone  = mouseX < zone.lowerBound
+                let mouseRightOfZone = mouseX > zone.upperBound
+                if (clawdLeftOfZone && mouseRightOfZone) || (clawdRightOfZone && mouseLeftOfZone) {
+                    // 跳到 zone 另一侧外 24pt 处刚好走出避让带
+                    let targetCx: CGFloat = clawdLeftOfZone ? (zone.upperBound + 24)
+                                                            : (zone.lowerBound - 24)
+                    let targetX = targetCx - windowSize.width / 2
+                    if tryTeleport(toX: targetX, on: screen) {
+                        return
+                    }
+                    // 冷却中 → fallthrough 走 chasing 但下一帧 mouseInZone 判定会卡在 zone 边
+                }
+            }
+
             // 2) 移动态：facing/direction 切换必须 |dx| 跨过阈值才允许，避免抖动
             let wantDir: CGFloat = (dx >= 0) ? 1 : -1
             let shouldFlip = (state.facingRight  && dx < -facingHysteresis) ||
@@ -659,6 +911,35 @@ final class ClawdWalkController {
             state.facingRight = false
             maybeBumpQuote()
         }
+
+        // 灵动岛 zone：普通漫步走到边界 → 优先尝试触发传送门嗖到另一侧继续走；
+        // 冷却中（3s 内）回退到软墙反向，避免桌宠卡在 zone 边死磕
+        if let zone = notchAvoidZone(on: screen) {
+            let cx = positionX + windowSize.width / 2
+            if direction > 0 && cx >= zone.lowerBound && cx < zone.upperBound {
+                // 朝右走撞到 zone 左边 → 传送到 zone 右边外 24pt 继续朝右
+                let targetCx = zone.upperBound + 24
+                let targetX = targetCx - windowSize.width / 2
+                if tryTeleport(toX: targetX, on: screen) {
+                    return
+                }
+                // 冷却中 → 反向走
+                positionX = zone.lowerBound - windowSize.width / 2
+                direction = -1
+                state.facingRight = false
+            } else if direction < 0 && cx <= zone.upperBound && cx > zone.lowerBound {
+                // 朝左走撞到 zone 右边 → 传送到 zone 左边外 24pt 继续朝左
+                let targetCx = zone.lowerBound - 24
+                let targetX = targetCx - windowSize.width / 2
+                if tryTeleport(toX: targetX, on: screen) {
+                    return
+                }
+                positionX = zone.upperBound - windowSize.width / 2
+                direction = 1
+                state.facingRight = true
+            }
+        }
+
         win.setFrameOrigin(NSPoint(x: positionX, y: walkY))
 
         // —— 6) 普通漫步时随机冒泡 ——
@@ -727,6 +1008,10 @@ final class ClawdWalkController {
 
         switch patrol {
         case .goingTo(let target, let icon):
+            // 跨灵动岛 → 走传送门一步到位（成功后下一帧 isTeleporting=true 拦 tick）
+            if tryTeleportAcrossZoneForPatrol(targetWindowOrigin: target, on: screen) {
+                return
+            }
             if moveToward(target: target, dt: dt, win: win) {
                 // 到了 → 切到 sniffing，触发 AI 短评
                 let duration = Double.random(in: Self.sniffDurationRange)
@@ -755,6 +1040,10 @@ final class ClawdWalkController {
             }
 
         case .returning(let target):
+            // 返回菜单栏路径如果穿越灵动岛 → 也走传送门
+            if tryTeleportAcrossZoneForPatrol(targetWindowOrigin: target, on: screen) {
+                return
+            }
             if moveToward(target: target, dt: dt, win: win) {
                 // 回到菜单栏 —— 结束巡视，恢复普通漫步
                 patrol = nil
