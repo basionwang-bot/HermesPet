@@ -834,8 +834,8 @@ PR 作者 simpledavid，3 个独立 commit 塞一个 PR（3011+ 行）。本地 
 #### 第 5 期：验证（3 项）
 
 - [x] **V1. 编译 + install 验证全套 PR-A** —— `./build.sh 2>&1 | grep -E "error:|warning:|Build complete"` → `xattr -cr ~/Desktop/HermesPet/HermesPet.app && ./install.sh`
-- [ ] **V2. 实测全新用户首启** —— 清 UserDefaults 模拟：`defaults delete com.basionwang.HermesPet`（或重命名 `~/.hermespet/conversations.json` 模拟），启动 app → 应只见在线 AI mode → 设置里逐个开启 OpenClaw/Hermes/Claude/Codex 看检测状态
-- [ ] **V3. 实测 OpenClaw 零配置首连** —— 设置里开 OpenClaw toggle → HermesPet 自动 enable chatCompletions endpoint + 启 daemon（如果未跑）→ 切到 OpenClaw 对话 → 发"你好" → 看到流式回复（连贯流不卡顿）
+- [x] **V2. 实测全新用户首启**（v1.2.9 发布后实测通过）—— 清 UserDefaults 模拟全新用户，启动 app 只见在线 AI mode；设置里逐个开启 OpenClaw / Hermes / Claude / Codex 都正常检测出"已连接 / 未安装"状态
+- [x] **V3. 实测 OpenClaw 零配置首连**（v1.2.9 发布后实测通过）—— 装了 OpenClaw 的机器启动 HermesPet 自动 enable chatCompletions endpoint + 启 daemon + 切到 OpenClaw 对话 → 流式回复正常
 
 ### PR-B：fomo 九尾狐 sprite（6 项 · 已完成 2026-05-19）
 
@@ -861,4 +861,4 @@ PR 作者 simpledavid，3 个独立 commit 塞一个 PR（3011+ 行）。本地 
 
 ---
 
-> 最后更新：2026-05-19（v1.3.6 OpenClaw 接入 + 默认隐藏 mode 架构规划完成）
+> 最后更新：2026-05-19（v1.2.9 已发布到 GitHub Releases —— OpenClaw 接入 + fomo 桌宠 + 默认隐藏 mode + 设置面板小白化 + 防伪验证 / V2 V3 实测通过）

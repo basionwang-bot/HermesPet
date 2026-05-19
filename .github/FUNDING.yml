@@ -1,0 +1,8 @@
+# GitHub 仓库顶部 ❤ Sponsor 按钮配置
+# 详细文档：https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/displaying-a-sponsor-button-in-your-repository
+#
+# 目前仅启用爱发电（国内主战场）
+# 后续如开通 GitHub Sponsors / Buy Me a Coffee 等海外渠道，再补到 custom 列表
+
+custom:
+  - https://afdian.com/a/basionwang

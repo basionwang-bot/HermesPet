@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="56" height="56" viewBox="0 0 56 56" role="img" aria-label="next slot">
+  <circle cx="28" cy="28" r="25" fill="#F5F5F7" stroke="#D8D8DC" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="28" y1="19" x2="28" y2="37" stroke="#B0B0B6" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="19" y1="28" x2="37" y2="28" stroke="#B0B0B6" stroke-width="2.5" stroke-linecap="round"/>
+</svg>
