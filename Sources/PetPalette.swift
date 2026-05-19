@@ -14,25 +14,47 @@ import AppKit
 /// 避免用户改完后失去 sprite 的视觉辨识度。
 struct PetPalette: Codable, Equatable {
     /// 主色（16 进制 hex，无 # 前缀，如 "DE886D"）
-    var primaryHex: String
+    /// `private(set)` —— 外部要改主色必须新建 PetPalette 实例，让 init 一次性算好派生色。
+    /// 之前是 `var`，外部直接改 hex 不会刷新 cached primary/derivedTop/derivedBottom
+    private(set) var primaryHex: String
+
+    /// 主色 SwiftUI Color（init 时一次性算好，避免每帧 sprite Canvas draw 时重新 parse hex）
+    let primary: Color
+    /// 顶部高光（主色 +12% brightness）—— init 时算好缓存
+    let derivedTop: Color
+    /// 底部阴影（主色 -15% brightness）—— init 时算好缓存
+    let derivedBottom: Color
 
     init(primaryHex: String) {
         self.primaryHex = primaryHex
+        // 性能优化：一次性把派生色算好存为 stored property。
+        // 60fps Canvas draw 时每帧调几十次 palette.primary / .derivedTop / .derivedBottom，
+        // 之前是 computed property → 每次 NSColor() + getHue/setHue 重算，CPU 大头之一。
+        let base = Color(hex: primaryHex) ?? Self.fallbackColor
+        self.primary = base
+        self.derivedTop = base.lightened(by: 0.12)
+        self.derivedBottom = base.darkened(by: 0.15)
     }
 
-    /// 主色 SwiftUI Color
-    var primary: Color {
-        Color(hex: primaryHex) ?? Self.fallbackColor
+    // MARK: - Codable —— 只 encode/decode primaryHex，派生色 init 里重算
+
+    enum CodingKeys: String, CodingKey { case primaryHex }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let hex = try c.decode(String.self, forKey: .primaryHex)
+        self.init(primaryHex: hex)
     }
 
-    /// 顶部高光（主色 +12% brightness）
-    var derivedTop: Color {
-        primary.lightened(by: 0.12)
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(primaryHex, forKey: .primaryHex)
     }
 
-    /// 底部阴影（主色 -15% brightness）
-    var derivedBottom: Color {
-        primary.darkened(by: 0.15)
+    // MARK: - Equatable —— 只比 primaryHex（派生色一定等价）
+
+    static func == (lhs: PetPalette, rhs: PetPalette) -> Bool {
+        lhs.primaryHex == rhs.primaryHex
     }
 
     // —— 各 mode 默认 palette ——
@@ -41,6 +63,8 @@ struct PetPalette: Codable, Equatable {
     static let clawdDefault    = PetPalette(primaryHex: "DE886D")
     /// 在线 AI · 云朵默认 indigo #7367D9
     static let cloudDefault    = PetPalette(primaryHex: "7367D9")
+    /// OpenClaw · fomo 九尾狐默认月光银白 #B4C5E8（参考图主体色调）
+    static let fomoDefault     = PetPalette(primaryHex: "B4C5E8")
     /// Hermes · 金黄小马默认 #E8C97A
     static let horseDefault    = PetPalette(primaryHex: "E8C97A")
     /// Codex · 喷射机器人默认深空蓝 #1C2A3A
@@ -62,6 +86,7 @@ final class PetPaletteStore {
 
     var claudePalette: PetPalette
     var directAPIPalette: PetPalette
+    var fomoPalette: PetPalette
     var hermesPalette: PetPalette
     var codexPalette: PetPalette
 
@@ -73,6 +98,7 @@ final class PetPaletteStore {
         }()
         self.claudePalette    = stored?.claude    ?? .clawdDefault
         self.directAPIPalette = stored?.directAPI ?? .cloudDefault
+        self.fomoPalette      = stored?.fomo      ?? .fomoDefault
         self.hermesPalette    = stored?.hermes    ?? .horseDefault
         self.codexPalette     = stored?.codex     ?? .terminalDefault
     }
@@ -82,6 +108,7 @@ final class PetPaletteStore {
         switch mode {
         case .claudeCode: return claudePalette
         case .directAPI:  return directAPIPalette
+        case .openclaw:   return fomoPalette
         case .hermes:     return hermesPalette
         case .codex:      return codexPalette
         }
@@ -92,16 +119,16 @@ final class PetPaletteStore {
         switch mode {
         case .claudeCode: claudePalette    = palette
         case .directAPI:  directAPIPalette = palette
+        case .openclaw:   fomoPalette      = palette
         case .hermes:     hermesPalette    = palette
         case .codex:      codexPalette     = palette
         }
         save()
     }
 
-    /// 改主色（保留其他字段，目前 palette 只有 primaryHex 字段，但留扩展性）
+    /// 改主色 —— 新建 PetPalette 让 init 重算派生色（primaryHex 是 private(set)）
     func updatePrimary(for mode: AgentMode, color: Color) {
-        var p = palette(for: mode)
-        p.primaryHex = color.hexString
+        let p = PetPalette(primaryHex: color.hexString)
         updatePalette(for: mode, p)
     }
 
@@ -110,6 +137,7 @@ final class PetPaletteStore {
         switch mode {
         case .claudeCode: claudePalette    = .clawdDefault
         case .directAPI:  directAPIPalette = .cloudDefault
+        case .openclaw:   fomoPalette      = .fomoDefault
         case .hermes:     hermesPalette    = .horseDefault
         case .codex:      codexPalette     = .terminalDefault
         }
@@ -121,6 +149,8 @@ final class PetPaletteStore {
     private struct Stored: Codable {
         var claude: PetPalette
         var directAPI: PetPalette
+        /// fomo palette —— PR-B 新增，老版本 JSON 缺这个字段时 decode 走 decodeIfPresent fallback
+        var fomo: PetPalette?
         var hermes: PetPalette
         var codex: PetPalette
     }
@@ -131,6 +161,7 @@ final class PetPaletteStore {
         let s = Stored(
             claude: claudePalette,
             directAPI: directAPIPalette,
+            fomo: fomoPalette,
             hermes: hermesPalette,
             codex: codexPalette
         )

@@ -307,6 +307,8 @@ struct ResponseSummaryCardView: View {
     @State private var paletteStore = PetPaletteStore.shared
     /// 让相对时间每秒更新（"5s 前" → "6s 前"）
     @State private var nowTick: Date = Date()
+    /// 全局「桌宠动效」开关。摘要卡片是临时展示，quietMode 时 sprite 也走静态帧
+    @AppStorage("quietMode") private var quietMode: Bool = false
 
     private var palette: PetPalette { paletteStore.palette(for: state.mode) }
 
@@ -314,6 +316,7 @@ struct ResponseSummaryCardView: View {
         switch state.mode {
         case .claudeCode: return "Clawd"
         case .directAPI:  return "云朵"
+        case .openclaw:   return "fomo"
         case .hermes:     return "小马"
         case .codex:      return "coco"
         }
@@ -467,18 +470,21 @@ struct ResponseSummaryCardView: View {
     /// 按 mode 渲染对应桌宠迷你 sprite (20pt 高 × 1.5 宽 = 30pt)
     @ViewBuilder
     private func miniSprite(mode: AgentMode, height: CGFloat, palette: PetPalette) -> some View {
+        let anim = !quietMode
         Group {
             switch mode {
             case .claudeCode:
-                ClawdView(pose: .rest, height: height, isWalking: false, palette: palette)
+                ClawdView(pose: .rest, height: height, isWalking: false, palette: palette, animated: anim)
             case .directAPI:
                 CloudPetView(pose: .rest, height: height, isWalking: false,
-                             glassesProgress: 0, palette: palette)
+                             glassesProgress: 0, palette: palette, animated: anim)
+            case .openclaw:
+                FomoView(pose: .rest, height: height, isWalking: false, palette: palette, animated: anim)
             case .hermes:
-                HorseView(pose: .rest, height: height, isWalking: false, palette: palette)
+                HorseView(pose: .rest, height: height, isWalking: false, palette: palette, animated: anim)
             case .codex:
                 TerminalView(pose: .rest, height: height, isWalking: false,
-                             isWorking: false, palette: palette)
+                             isWorking: false, palette: palette, animated: anim)
             }
         }
         .frame(width: height * 1.5, height: height)

@@ -50,7 +50,8 @@ final class DynamicIslandController {
     private let idleExtraWidth: CGFloat = 80
 
     /// 悬停（hover）状态：向下展开的高度
-    private let hoverDrop: CGFloat = 36
+    /// 36 → 42pt：让黑色多出 6pt 给文字呼吸空间，避免内容被摄像头/刘海视觉区压住
+    private let hoverDrop: CGFloat = 42
     /// 悬停（hover）状态：横向比刘海多出多少。
     /// **水滴动画**：idle 时两侧耳朵全宽（80）跟刘海融为一体；hover 时收窄到 4，
     /// 整体宽度几乎等同于 MacBook 硬件刘海宽度（auxiliaryTopArea 反推得到的真实像素），
@@ -342,6 +343,9 @@ struct DynamicIslandPillView: View {
     @State private var idleExtraWidth: CGFloat = 70
     @State private var hoverDrop: CGFloat = 14
     @State private var hoverExtraWidth: CGFloat = 4
+    /// 卡片内容顶部额外 padding —— 在 notchHeight 之上再往下移文字，远离摄像头/刘海视觉区。
+    /// 之前文字紧贴刘海下沿，物理摄像头镜头位置会切到第一行字。
+    private let contentTopPad: CGFloat = 4
     /// floating（无刘海）显示模式：胶囊 4 角全圆 + mode 主色外发光 glow，
     /// 不再画顶部直角 NotchShape。由 DynamicIslandController.positionWindow 广播 HermesPetGeometry
     /// 携带 isFloating 字段驱动
@@ -404,6 +408,24 @@ struct DynamicIslandPillView: View {
     @State private var shutterScale: CGFloat = 1.0
     @State private var shutterTask: Task<Void, Never>? = nil
 
+    // MARK: - Wave A3 hover caption
+    /// 当日意图采集总数 —— 用来判断 UserIntent 功能是否在工作（>0 才显示陪伴语）。
+    /// 来源：UserIntentRecorder 每次落库后 broadcast，PillView.onAppear 主动查一次拿到初值
+    @State private var todayIntentCount: Int = 0
+
+    /// Wave C 边界：UserIntent 总开关，关掉时连陪伴语也不显示（避免旧数据残留误导）
+    @AppStorage("userIntentEnabled") private var userIntentEnabled: Bool = false
+
+    /// hover 时显示的陪伴语 —— 每次 isHovering 从 false→true 时随机换一句
+    /// 池子按时段（早/午/下午/晚上/深夜）+ 通用混合，让"AI 在场"感更鲜活
+    @State private var hoverCaption: String = "陪着你呢"
+
+    // MARK: - Wave B 灵动岛 transient label（detector 命中后短临时反馈）
+    /// 显示 2.5s 后自动消失的短文字（≤ 8 字），由 HermesPetIslandTransientLabel 通知触发
+    @State private var transientLabelText: String = ""
+    @State private var transientLabelVisible: Bool = false
+    @State private var transientLabelTask: Task<Void, Never>? = nil
+
     // MARK: - o) 5 段音量条实时电平
     @State private var voiceLevel: Float = 0
 
@@ -411,14 +433,18 @@ struct DynamicIslandPillView: View {
     /// 跟下方 PermissionWindow（280pt 宽）左右对齐，看起来是一体的 UI
     @State private var permissionActive: Bool = false
 
-    /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态让胶囊"展开"成 hover 水滴形态。
+    /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态 / Wave B 短反馈 → 都让胶囊"展开"成 hover 水滴形态。
     /// **注意 permissionActive 不进 isExpanded**：permission 卡片宽 280pt 跟 idle 形态等宽，
     /// 进 hover 反而收窄到 204pt 导致跟卡片错位
+    ///
+    /// **transientLabelVisible 必须进 isExpanded**（之前漏了，bug 修复）：
+    /// 不撑开时 idleDrop 只有 4pt，文字塞不下 → 被刘海/摄像头视觉区遮住
     private var isExpanded: Bool {
         isHovering || isShowingNotification
             || currentToolKind != nil
             || diffSummaryVisible
             || isInErrorState
+            || transientLabelVisible
     }
 
     enum ConnectionStatusDisplay {
@@ -687,6 +713,32 @@ struct DynamicIslandPillView: View {
                 voiceLevel = lvl
             }
         }
+        // Wave A3：UserIntentRecorder 落库时把 todayCount 更新到 hoverCard caption。
+        // Wave A2 的 glanceShimmer 自发光效已砍 —— 每次切窗口都闪让人困惑，且"AI 在场"
+        // 信号已经由桌宠 glance 动画（明确方向感）+ Wave B 短反馈卡片（有具体文案）覆盖
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetIntentRecorded"))) { note in
+            if let c = note.userInfo?["todayCount"] as? Int {
+                todayIntentCount = c
+            }
+        }
+        // Wave B：detector 命中后短临时反馈
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetIslandTransientLabel"))) { note in
+            let text = (note.userInfo?["text"] as? String) ?? ""
+            let dur = (note.userInfo?["duration"] as? Double) ?? 2.5
+            guard !text.isEmpty else { return }
+            transientLabelTask?.cancel()
+            transientLabelText = text
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
+                transientLabelVisible = true
+            }
+            transientLabelTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(dur * 1_000_000_000))
+                if Task.isCancelled { return }
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                    transientLabelVisible = false
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetPermissionAsked"))) { _ in
             // 灵动岛底部从圆角变直角 → 跟 PermissionWindow 卡片衔接。柔和 spring 跟卡片同步
             withAnimation(.spring(response: 0.7, dampingFraction: 0.86, blendDuration: 0.3)) {
@@ -706,6 +758,9 @@ struct DynamicIslandPillView: View {
         .onAppear {
             let hasKey = !(UserDefaults.standard.string(forKey: "apiKey") ?? "").isEmpty
             status = hasKey ? .connected : .unknown
+            // Wave A3：从 ActivityStore 拉一次今日已观察总数（PillView 启动时只跑一次）
+            // 后续每条新意图通过 HermesPetIntentRecorded 通知里的 todayCount 增量更新
+            todayIntentCount = ActivityRecorder.shared.queryStore.todayIntentCount()
         }
     }
 
@@ -714,6 +769,7 @@ struct DynamicIslandPillView: View {
         switch mode {
         case .hermes:     return .green
         case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }
@@ -763,6 +819,10 @@ struct DynamicIslandPillView: View {
             if permissionActive { return }
             let target = (note.userInfo?["hovering"] as? Bool) ?? false
             if isHovering != target {
+                // 每次 hover 从 false → true 时换一句陪伴语（hover 期间稳定，离开再 hover 才再换）
+                if target {
+                    hoverCaption = Self.pickCompanionPhrase()
+                }
                 // **水滴动画**：width 80→4 + height 32→64 + radius 14→22 三轴同步驱动。
                 // interpolatingSpring 让水流感更连贯（mass=1.0 给形变惯性 / stiffness 180 比标准
                 // spring 软不"砸" / damping 22 收尾无回弹）
@@ -770,6 +830,36 @@ struct DynamicIslandPillView: View {
                     isHovering = target
                 }
             }
+        }
+    }
+
+    /// Wave A3 polish：随机挑一句陪伴语。
+    /// 70% 概率从通用池选（短而暖），30% 概率从当前时段池选（带时间感）。
+    /// 写成 static 方便测试 + 不依赖 PillView 实例状态。
+    static func pickCompanionPhrase() -> String {
+        let general = [
+            "陪着你呢", "嗯，在哒", "你忙你的", "在这儿",
+            "我在", "嘿，在", "嗯哼～", "随你"
+        ]
+        let hour = Calendar.current.component(.hour, from: Date())
+        let timed: [String]
+        if (6...10).contains(hour) {
+            timed = ["早呀～", "早安", "起这么早", "新一天～"]
+        } else if (11...13).contains(hour) {
+            timed = ["午饭了吗", "中午好", "歇会儿"]
+        } else if (14...17).contains(hour) {
+            timed = ["下午好", "继续吧", "在哒"]
+        } else if (18...21).contains(hour) {
+            timed = ["晚上好", "辛苦啦", "在呢"]
+        } else {
+            // 22:00 - 05:59 深夜
+            timed = ["还在忙呢", "早点睡", "夜深啦", "注意休息"]
+        }
+        // 70/30 通用 vs 时段
+        if Int.random(in: 0..<10) < 7 {
+            return general.randomElement() ?? "陪着你呢"
+        } else {
+            return timed.randomElement() ?? "在哒"
         }
     }
 
@@ -786,6 +876,10 @@ struct DynamicIslandPillView: View {
         }
     }
 
+    // Wave A2 的 glanceShimmer（每次 UserIntent 落库灵动岛闪一下 mode 主色）已砍 ——
+    // 自发光效跟用户切窗口/滚动节奏绑定，反复闪让人困惑且没传具体信息。"AI 在场"信号已经
+    // 由桌宠 glance 动画（有明确方向感）+ Wave B 短反馈卡片（带文案）覆盖。
+
     /// 灵动岛胶囊主内容（按状态优先级分发到不同分支卡片）
     @ViewBuilder
     private var pillContent: some View {
@@ -797,6 +891,9 @@ struct DynamicIslandPillView: View {
             notificationCard
         } else if let toolKind = currentToolKind {
             toolStateCard(toolKind)
+        } else if transientLabelVisible && !isHovering {
+            // Wave B：detector 命中后的短临时反馈（≤ 8 字），让位 hover/工具/通知/错误态
+            transientLabelCard
         } else {
             ZStack {
                 if isHovering {
@@ -814,7 +911,7 @@ struct DynamicIslandPillView: View {
     /// e) 错误态卡片：⚠️ 已断开 + 提示点击重试
     private var errorStateCard: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
+            Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 13, weight: .semibold))
@@ -834,7 +931,7 @@ struct DynamicIslandPillView: View {
     /// c) diff 摘要卡片
     private var diffSummaryCard: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
+            Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 8) {
                 ModeSpriteView(mode: currentMode, isWorking: false, size: 18)
                 Image(systemName: "checkmark.seal.fill")
@@ -853,7 +950,7 @@ struct DynamicIslandPillView: View {
     private var notificationCard: some View {
         let isError = notificationText.contains("⚠️") || notificationText.contains("失败") || notificationText.contains("权限")
         return VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
+            Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 8) {
                 Image(systemName: isError ? "exclamationmark.triangle.fill" : "camera.viewfinder")
                     .font(.system(size: 14, weight: .semibold))
@@ -873,10 +970,28 @@ struct DynamicIslandPillView: View {
         .transition(.opacity.combined(with: .scale(scale: 0.92)))
     }
 
+    /// Wave B：detector 命中后短临时反馈卡片（"看到 Foo 报错" 等）
+    /// 用 sprite + 文字组合，比 notificationCard 更克制（无 icon、无副标）
+    private var transientLabelCard: some View {
+        VStack(spacing: 0) {
+            Color.clear.frame(height: notchHeight + contentTopPad)
+            HStack(spacing: 6) {
+                ModeSpriteView(mode: currentMode, isWorking: false, size: 14)
+                Text(transientLabelText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+            }
+            .frame(maxHeight: .infinity)
+        }
+        // 纯 opacity 过渡，避免决策 #6 几何 transform 风险
+        .transition(.opacity)
+    }
+
     /// 工具调用卡片：[Clawd] [verb] [arg] · [M/N 步] · [Xs] + 底部进度条
     private func toolStateCard(_ toolKind: ToolKind) -> some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
+            Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 6) {
                 ModeSpriteView(mode: currentMode, isWorking: true, size: 16)
                 HStack(spacing: 4) {
@@ -995,10 +1110,10 @@ struct DynamicIslandPillView: View {
         .frame(height: 3)
     }
 
-    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名）
+    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名 + 陪伴语）
     private var hoverCard: some View {
         VStack(spacing: 0) {
-            Color.clear.frame(height: notchHeight)
+            Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 8) {
                 Circle()
                     .fill(status.color)
@@ -1010,6 +1125,18 @@ struct DynamicIslandPillView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .tracking(0.3)
+                // Wave A3：陪伴语 caption —— 不暴露"今天观察 X 次"这种统计感（间谍感），
+                // 改成简短陪伴感的短语，让用户感到"AI 在场"而非"AI 在数着"。
+                // 每次 hover 进入时随机换一句（hover 期间稳定，离开再 hover 才换）。
+                // Wave C 边界：必须 userIntentEnabled = true 且今天有过观察才显示
+                if userIntentEnabled && todayIntentCount > 0 {
+                    Text("· \(hoverCaption)")
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .lineLimit(1)
+                        .id(hoverCaption)            // 文字变化时 transition 生效
+                        .transition(.opacity)
+                }
             }
             .frame(maxHeight: .infinity)
         }
@@ -1070,6 +1197,7 @@ struct DynamicIslandPillView: View {
         switch currentMode {
         case .claudeCode: return "Clawd"
         case .directAPI:  return "云朵"
+        case .openclaw:   return "fomo"   // PR-B 上线龙虾 sprite 后正式启用
         case .hermes:     return "小马"
         case .codex:      return "coco"
         }
@@ -1096,6 +1224,8 @@ struct IdleModeDot: View {
     let tint: Color
     @State private var breathe = false
     @State private var isSleeping = false
+    /// 全局「桌宠动效」开关。quietMode=true 时圆点保持固定 opacity，不再 2s 周期呼吸
+    @AppStorage("quietMode") private var quietMode: Bool = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1116,11 +1246,13 @@ struct IdleModeDot: View {
         }
         .animation(AnimTok.smooth, value: isSleeping)
         .onAppear {
+            // 进入 view 时立即同步一次状态（之前已经 idle 5min 的话直接显示 sleeping）
+            isSleeping = IdleStateTracker.shared.isSleeping
+            // quietMode=true 时不启动呼吸 —— breathe 保持 false，圆点固定中等亮度
+            guard !quietMode else { return }
             withAnimation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true)) {
                 breathe = true
             }
-            // 进入 view 时立即同步一次状态（之前已经 idle 5min 的话直接显示 sleeping）
-            isSleeping = IdleStateTracker.shared.isSleeping
         }
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetUserIdleChanged"))) { note in
             isSleeping = (note.userInfo?["isSleeping"] as? Bool) ?? false
@@ -1154,6 +1286,8 @@ struct BackgroundStreamingBadge: View {
     let tint: Color
 
     @State private var pulse = false
+    /// 全局「桌宠动效」开关。quietMode=true 时角标点保持固定 opacity
+    @AppStorage("quietMode") private var quietMode: Bool = false
 
     var body: some View {
         HStack(spacing: 1.5) {
@@ -1177,6 +1311,7 @@ struct BackgroundStreamingBadge: View {
                 .stroke(tint.opacity(0.5), lineWidth: 0.5)
         )
         .onAppear {
+            guard !quietMode else { return }
             withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
                 pulse = true
             }

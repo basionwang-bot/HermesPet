@@ -27,6 +27,20 @@ Grab the macOS DMG · double-click to install · pick a provider, paste an API k
 
 ---
 
+> ## 🛡️ Official Download Source
+>
+> HermesPet is independently developed and open-sourced by **[Basion (@basionwang-bot)](https://github.com/basionwang-bot)**.
+>
+> **The only official download source**: [github.com/basionwang-bot/HermesPet/releases](https://github.com/basionwang-bot/HermesPet/releases)
+>
+> Third parties have been re-uploading this project to personal cloud drives / secondary marketplaces / unrelated websites and impersonating the original author. **DMGs from anywhere outside the official channel are NOT guaranteed safe or authentic** — please download only from the GitHub Releases page above.
+>
+> After installation, check **Settings → About → Official Version Verification** inside the App for codesign verification (the authentic build shows the original author's Team ID `R34KL4X4D9`).
+>
+> If you spot impersonation or unauthorized distribution, please report via [GitHub Issues](https://github.com/basionwang-bot/HermesPet/issues).
+
+---
+
 HermesPet is an AI chat client + desktop companion that lives **right below your MacBook's notch**.
 
 **The most important thing**: it works out of the box. No CLI tools required on your machine. Open it → pick an AI provider (DeepSeek / Zhipu / Kimi / MiniMax / OpenAI, etc.) → paste an API Key → start chatting. If you also have `claude` / `codex` CLIs installed, the app auto-detects them and unlocks advanced capabilities like "read/write local files / run commands / generate images".

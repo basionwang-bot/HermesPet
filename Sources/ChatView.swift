@@ -275,6 +275,7 @@ struct ChatView: View {
         switch viewModel.agentMode {
         case .hermes:     return .green
         case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }
@@ -305,7 +306,7 @@ struct ChatView: View {
 
     private var suggestionItems: [(icon: String, text: String, prompt: String)] {
         switch viewModel.agentMode {
-        case .hermes, .directAPI:
+        case .hermes, .directAPI, .openclaw:
             return [
                 ("camera.viewfinder", "分析这张截图", "帮我看看这张截图说的什么意思"),
                 ("doc.text", "总结一段文字", "把下面这段帮我总结一下："),
@@ -650,6 +651,7 @@ struct WelcomeView: View {
         switch mode {
         case .hermes:     return "Hermes 桌宠"
         case .directAPI:  return "在线 AI"
+        case .openclaw:   return "OpenClaw"
         case .claudeCode: return "Claude Code"
         case .codex:      return "Codex"
         }
@@ -661,6 +663,8 @@ struct WelcomeView: View {
             return "随时找我聊天 / 截图分析 / 翻译 / 写作\n语音问问题：按住 ⌘⇧V 说话"
         case .directAPI:
             return "直连第三方 AI 服务商\n只要 API Key 就能聊，零本地依赖"
+        case .openclaw:
+            return "本地 OpenClaw gateway\n零配置接入，自动复用你已配的模型"
         case .claudeCode:
             return "我能改文件、跑命令、读代码\n动手能力最强的 AI"
         case .codex:
@@ -817,6 +821,7 @@ struct ConversationTab: View {
         switch mode {
         case .hermes:     return .green
         case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }

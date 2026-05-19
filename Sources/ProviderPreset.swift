@@ -156,12 +156,67 @@ struct ProviderPreset: Identifiable, Hashable {
     /// 用户已经配过 http://localhost:8642 的话设置面板会识别成这个。
     static let hermesLocal = ProviderPreset(
         id: "hermes-local",
-        displayName: "Hermes Gateway（本地）",
+        displayName: "本地 Gateway",
         baseURL: "http://localhost:8642/v1",
         defaultModel: "hermes-agent",
         altModels: [],
         signupURL: nil
     )
+
+    /// 云端 Hermes Gateway —— 用户已经把 hermes 部署到自己服务器上时用这个。
+    /// baseURL 留空 placeholder，等用户填实际 host；模型名也留空让用户从 /v1/models 拉。
+    static let hermesCloud = ProviderPreset(
+        id: "hermes-cloud",
+        displayName: "云端 Gateway",
+        baseURL: "",
+        defaultModel: "",
+        altModels: [],
+        signupURL: nil
+    )
+
+    /// Hermes 模式的预设列表 —— 给 SettingsView.hermesConfig Picker 用。
+    /// 顺序就是 UI 显示顺序：本地优先（最常见），云端次之，自定义兜底。
+    static let hermesPresets: [ProviderPreset] = [hermesLocal, hermesCloud]
+
+    /// OpenClaw 本地 gateway —— 端口 18789，零配置（HermesPet 自动读 ~/.openclaw/openclaw.json
+    /// 拿 token，用户完全不用填表）。defaultModel "openclaw" 路由到 OpenClaw 配置的默认 agent
+    static let openclawLocal = ProviderPreset(
+        id: "openclaw-local",
+        displayName: "本地 OpenClaw",
+        baseURL: "http://localhost:18789",
+        defaultModel: "openclaw",
+        altModels: ["openclaw/default", "openclaw/main"],
+        signupURL: "https://openclaw.ai"
+    )
+
+    /// OpenClaw 模式的预设列表 —— 暂只一个 local 项（OpenClaw 不像 Hermes 有云端部署的概念）。
+    /// 后续如果用户社区出现"自己 host OpenClaw gateway 在远端"场景再扩
+    static let openclawPresets: [ProviderPreset] = [openclawLocal]
+
+    /// 根据 OpenClaw baseURL 反查预设。
+    /// localhost / 127.0.0.1 → 本地；其他都归"自定义"
+    static func detectOpenClaw(baseURL: String) -> ProviderPreset {
+        let normalized = baseURL.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        if normalized.isEmpty { return openclawLocal }
+        if normalized.contains("localhost") || normalized.contains("127.0.0.1") {
+            return openclawLocal
+        }
+        return custom
+    }
+
+    /// 根据当前已存的 Hermes baseURL 反查预设。
+    /// 空 / localhost / 127.0.0.1 → 本地；其他非空且非自定义匹配项 → 云端；都不是 → 自定义
+    static func detectHermes(baseURL: String) -> ProviderPreset {
+        let normalized = baseURL.trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+        if normalized.isEmpty { return hermesLocal }
+        if normalized.contains("localhost") || normalized.contains("127.0.0.1") {
+            return hermesLocal
+        }
+        // 非本地且填了 URL，归到云端
+        return hermesCloud
+    }
 
     /// 根据当前已存的 baseURL 反查应该选哪个预设（设置面板首次打开时判断当前在用哪家）。
     /// 完全匹配优先；找不到就归到"自定义"，让用户能编辑完整 URL。

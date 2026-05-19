@@ -22,6 +22,8 @@ import SwiftUI
 struct PetHeaderStrip: View {
     @Bindable var viewModel: ChatViewModel
     @State private var paletteStore = PetPaletteStore.shared
+    /// 全局「桌宠动效」开关。quietMode=true → sprite 走静态帧省 CPU
+    @AppStorage("quietMode") private var quietMode: Bool = false
 
     // MARK: - 工具状态机 (跟 DynamicIslandController PillView 同款逻辑)
     @State private var currentToolKind: ToolKind? = nil
@@ -40,7 +42,8 @@ struct PetHeaderStrip: View {
     /// 工作态强度 0~1，控制 strip 整体颜色加深 + sprite 光圈不透明度。
     /// TaskStarted → 1，TaskFinished → 0（用 withAnimation 平滑过渡 0.5s）
     @State private var workingHighlight: Double = 0
-    /// sprite 光圈呼吸 toggle，repeatForever 驱动；idle 时光圈本身是透明的所以看不见
+    /// sprite 光圈呼吸 toggle，repeatForever 驱动；**仅工作态 / permission pending 时启动**
+    /// （v1.2.9 之前永久循环 → 即便 idle 看不见，blur(4) + scaleEffect 仍每帧让 GPU 重算，WindowServer 高负载）
     @State private var spotPulse: Bool = false
 
     // MARK: - Permission 展开态
@@ -68,6 +71,7 @@ struct PetHeaderStrip: View {
         switch mode {
         case .claudeCode: return "Clawd"
         case .directAPI:  return "云朵"
+        case .openclaw:   return "fomo"   // PR-B 上线龙虾 sprite
         case .hermes:     return "小马"
         case .codex:      return "coco"
         }
@@ -165,11 +169,14 @@ struct PetHeaderStrip: View {
             }
         )
         .animation(.spring(response: 0.45, dampingFraction: 0.84), value: inPermissionMode)
-        .onAppear {
-            // 启动 sprite 光圈呼吸动画（永久循环，idle 时光圈透明所以看不见）
-            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
-                spotPulse = true
-            }
+        // 工作 / permission pending 时才启动 spotPulse 呼吸动画（v1.2.9 性能优化）：
+        // 之前永久 repeatForever 即便 idle 看不见（opacity=0），blur(4) + scaleEffect 仍每帧让
+        // WindowServer 重算合成，是 idle 状态 CPU 高负载主因之一
+        .onChange(of: workingHighlight) { _, new in
+            updateSpotPulse(active: (new > 0) || inPermissionMode)
+        }
+        .onChange(of: inPermissionMode) { _, perm in
+            updateSpotPulse(active: perm || (workingHighlight > 0))
         }
         // —— 通知监听：跟 DynamicIslandController PillView 同款 schema ——
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetTaskStarted"))) { _ in
@@ -293,12 +300,16 @@ struct PetHeaderStrip: View {
             ZStack {
                 // 工作中浮现的圆形光圈 —— "桌宠嵌入窗口"的视觉粘合点
                 // permission pending 时颜色切到 systemOrange 表达紧迫感
-                Circle()
-                    .fill(spotColor.opacity(spotOpacity))
-                    .frame(width: Self.spriteHeight * 1.6,
-                           height: Self.spriteHeight * 1.6)
-                    .scaleEffect(spotPulse ? 1.10 : 0.92)
-                    .blur(radius: 4)
+                // v1.2.9：仅工作 / permission pending 时插入 Circle；idle 不挂以省 blur(4) GPU 成本
+                if spotOpacity > 0 {
+                    Circle()
+                        .fill(spotColor.opacity(spotOpacity))
+                        .frame(width: Self.spriteHeight * 1.6,
+                               height: Self.spriteHeight * 1.6)
+                        .scaleEffect(spotPulse ? 1.10 : 0.92)
+                        .blur(radius: 4)
+                        .transition(.opacity)
+                }
                 spriteView
                     .frame(width: Self.spriteHeight * 1.5, height: Self.spriteHeight)
             }
@@ -486,6 +497,23 @@ struct PetHeaderStrip: View {
         return candidate.count > 30 ? (String(candidate.prefix(28)) + "…") : candidate
     }
 
+    /// 启停 sprite 光圈呼吸动画。active=true 时进入 repeatForever；
+    /// active=false 时用普通短动画把 spotPulse 拨回 false 打断循环。
+    /// （SwiftUI repeatForever 没法显式停，只能在 withAnimation 块外覆盖状态来"切断"）
+    private func updateSpotPulse(active: Bool) {
+        if active {
+            // 已经在循环中就不重启（避免 phase 跳）
+            guard spotPulse == false else { return }
+            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                spotPulse = true
+            }
+        } else {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                spotPulse = false
+            }
+        }
+    }
+
     /// 摸摸头：sprite 跳一下，无后续动作
     private func headPat() {
         spriteJumping = true
@@ -498,21 +526,25 @@ struct PetHeaderStrip: View {
     /// 按当前 mode 渲染对应 sprite
     @ViewBuilder
     private var spriteView: some View {
+        let anim = !quietMode
         switch mode {
         case .claudeCode:
             ClawdView(pose: spritePose, height: Self.spriteHeight,
-                      isWalking: spriteIsWorking, palette: palette)
+                      isWalking: spriteIsWorking, palette: palette, animated: anim)
         case .directAPI:
             CloudPetView(pose: spritePose, height: Self.spriteHeight,
                          isWalking: spriteIsWorking, glassesProgress: 0,
-                         palette: palette)
+                         palette: palette, animated: anim)
+        case .openclaw:
+            FomoView(pose: spritePose, height: Self.spriteHeight,
+                     isWalking: spriteIsWorking, palette: palette, animated: anim)
         case .hermes:
             HorseView(pose: spritePose, height: Self.spriteHeight,
-                      isWalking: spriteIsWorking, palette: palette)
+                      isWalking: spriteIsWorking, palette: palette, animated: anim)
         case .codex:
             TerminalView(pose: spritePose, height: Self.spriteHeight,
                          isWalking: spriteIsWorking,
-                         isWorking: spriteIsWorking, palette: palette)
+                         isWorking: spriteIsWorking, palette: palette, animated: anim)
         }
     }
 }
@@ -556,27 +588,41 @@ private extension PermissionDecision {
 
 // MARK: - 右侧 4 只 mini sprite mode 切换器
 
-/// PetHeaderStrip 最右侧的 mode 入口栏：4 只 mini sprite 横排，按 AgentMode.allCases 顺序排
-/// （hermes / directAPI / claudeCode / codex）。点击任何一只 = 新建对应 mode 对话。
+/// PetHeaderStrip 最右侧的 mode 入口栏：mini sprite 横排，**只展示 enabled 的 mode**
+/// （v1.3.6 起新用户首启默认只 .directAPI，其余 mode 在设置里手动开启）。
+/// 点击任何一只 = 新建对应 mode 对话。
 ///
 /// 设计要点：
-/// - 所有 4 只**永远显示**（包括当前 active mode）—— 用户可以"再开一条相同 mode 的对话"做并发
-/// - 当前 active mode 那只下方加 3pt 主色圆点 + 主色 0.18 圆形底色，让用户一眼看出"我现在在哪只"
+/// - 当前 active mode 那只下方加 3pt 主色圆点 + 主色 0.18 圆形底色
 /// - hover 时整只 sprite scale 到 1.22 + 触发 sprite 内部的 isWalking 灵动呼吸
 /// - 点击 = post HermesPetNewConversationWithMode 通知，由 ChatViewModel 接管新建
+/// - 订阅 EnabledModesStore.didChangeNotification，设置里改 toggle 后自动刷新
 struct ModeRailView: View {
     let activeMode: AgentMode
     @Bindable var paletteStore: PetPaletteStore
 
+    /// 重渲染触发器 —— enabledModes 变化时 +1 让 SwiftUI 重读 store
+    @State private var refreshTick: Int = 0
+
+    /// 按 AgentMode.allCases 顺序过滤出当前 enabled 的 mode
+    private var visibleModes: [AgentMode] {
+        let s = EnabledModesStore.shared.enabledModes
+        return AgentMode.allCases.filter { s.contains($0) }
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            ForEach(AgentMode.allCases) { mode in
+            ForEach(visibleModes) { mode in
                 ModeRailButton(
                     mode: mode,
                     isActive: mode == activeMode,
                     palette: paletteStore.palette(for: mode)
                 )
             }
+        }
+        .id(refreshTick)   // store 变化时强制重新计算 visibleModes
+        .onReceive(NotificationCenter.default.publisher(for: EnabledModesStore.didChangeNotification)) { _ in
+            refreshTick &+= 1
         }
     }
 }
@@ -587,6 +633,8 @@ private struct ModeRailButton: View {
     let palette: PetPalette
 
     @State private var isHovering = false
+    /// 全局「桌宠动效」开关。quietMode=true 时 hover 也不启动 60fps
+    @AppStorage("quietMode") private var quietMode: Bool = false
 
     /// 每只 mini sprite 视觉高度
     private static let spriteHeight: CGFloat = 14
@@ -633,24 +681,31 @@ private struct ModeRailButton: View {
         .animation(.spring(response: 0.4, dampingFraction: 0.82), value: isActive)
     }
 
-    /// 渲染对应 mode 的 mini sprite。hover 时启动 sprite 内部的灵动动画（呼吸 / 步态）。
+    /// 渲染对应 mode 的 mini sprite。
+    /// **性能要点（v1.2.9）**：mini sprite 默认走静态帧（animated=false），
+    /// hover 时才启动内部 60fps TimelineView。4 只 mini 不 hover 时 = 0 fps
+    /// （之前 4×60=240 fps 是 v1.2.7 CPU 高负载主因）
     @ViewBuilder
     private var sprite: some View {
+        let anim = isHovering && !quietMode
         switch mode {
         case .claudeCode:
             ClawdView(pose: .rest, height: Self.spriteHeight,
-                      isWalking: isHovering, palette: palette)
+                      isWalking: isHovering, palette: palette, animated: anim)
         case .directAPI:
             CloudPetView(pose: .rest, height: Self.spriteHeight,
                          isWalking: isHovering, glassesProgress: 0,
-                         palette: palette)
+                         palette: palette, animated: anim)
+        case .openclaw:
+            FomoView(pose: .rest, height: Self.spriteHeight,
+                     isWalking: isHovering, palette: palette, animated: anim)
         case .hermes:
             HorseView(pose: .rest, height: Self.spriteHeight,
-                      isWalking: isHovering, palette: palette)
+                      isWalking: isHovering, palette: palette, animated: anim)
         case .codex:
             TerminalView(pose: .rest, height: Self.spriteHeight,
                          isWalking: isHovering,
-                         isWorking: isHovering, palette: palette)
+                         isWorking: isHovering, palette: palette, animated: anim)
         }
     }
 }

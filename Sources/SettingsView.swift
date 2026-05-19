@@ -143,8 +143,32 @@ struct SettingsView: View {
 
     // MARK: - AI 后端
 
+    /// AI 模式总开关 + 检测状态卡片（U1+U2+U3）。
+    /// 5 行 toggle：在线 AI 永久 ON，其他 4 个用户按需开。打开时自动检测本机有没有装对应 CLI/daemon
+    private var aiModeToggles: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("AI 模式")
+                .font(.system(size: 13, weight: .medium))
+            Text("默认只开「在线 AI」。装了其他 AI 后，在这里启用。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 8) {
+                // 显示顺序：在线 AI 永远第一（兜底），然后 OpenClaw / Hermes / Claude Code / Codex
+                ForEach([AgentMode.directAPI, .openclaw, .hermes, .claudeCode, .codex]) { mode in
+                    ModeEnableRow(mode: mode)
+                }
+            }
+        }
+    }
+
     private var backendSection: some View {
         VStack(alignment: .leading, spacing: 18) {
+            // U1: AI 模式总开关 5 行 toggle（新加在最顶部）
+            aiModeToggles
+
+            Divider()
+
             // 配置查看器：选哪个 mode 就显示哪个 mode 的配置项（不切换正在进行的对话）
             VStack(alignment: .leading, spacing: 8) {
                 Text("查看配置")
@@ -174,6 +198,7 @@ struct SettingsView: View {
             switch configViewingMode {
             case .hermes:     hermesConfig
             case .directAPI:  directAPIConfig
+            case .openclaw:   openclawConfig    // U4: Hermes 同款 Gateway 状态卡片 + 高级折叠区
             case .claudeCode: claudeCard
             case .codex:      codexCard
             }
@@ -192,6 +217,20 @@ struct SettingsView: View {
                 viewModel.directAPIResponsePreference = detected
             }
             ensureDirectProviderConfig()
+
+            // 反查 Hermes 当前是哪个预设（H1）
+            let savedHermesID = UserDefaults.standard.string(forKey: "hermesPresetID") ?? ""
+            if savedHermesID == "custom" {
+                selectedHermesPreset = ProviderPreset.custom
+            } else if savedHermesID == "hermes-cloud" {
+                selectedHermesPreset = ProviderPreset.hermesCloud
+            } else if savedHermesID == "hermes-local" {
+                selectedHermesPreset = ProviderPreset.hermesLocal
+            } else {
+                // 首次打开 / 老用户没存过：按 baseURL 自动判断
+                selectedHermesPreset = ProviderPreset.detectHermes(baseURL: viewModel.apiBaseURL)
+                UserDefaults.standard.set(selectedHermesPreset.id, forKey: "hermesPresetID")
+            }
         }
     }
 
@@ -199,49 +238,552 @@ struct SettingsView: View {
     /// 初值在 .onAppear 里根据 viewModel.directAPIBaseURL 反查赋值
     @State private var selectedProvider: ProviderPreset = ProviderPreset.all[0]
 
-    // MARK: - Hermes 配置（本地 Gateway）
+    // MARK: - Hermes 配置（本地 Gateway / 云端 / 自定义）
+
+    /// Hermes 当前选中的预设档位（本地 / 云端 / 自定义）。
+    /// .onAppear 时根据 viewModel.apiBaseURL 反查
+    @State private var selectedHermesPreset: ProviderPreset = ProviderPreset.hermesLocal
+    /// 从 /v1/models 拉到的可用模型列表（H3 模型自动拉取）
+    @State private var hermesAvailableModels: [String] = []
+    @State private var hermesFetchingModels = false
+    @State private var hermesModelFetchError: String?
+    /// 本地档"高级"折叠区是否展开（Key / 模型 默认折叠）
+    @State private var hermesAdvancedExpanded: Bool = false
+    /// 自动启动 hermes gateway 开关（持久化 key 在 HermesGatewayManager.autoStartKey）
+    @AppStorage(HermesGatewayManager.autoStartKey) private var hermesAutoStart: Bool = true
+    /// 1s 一次刷新 Gateway 状态卡片，让 spawn 进度可视
+    @State private var gatewayStatusTick: Int = 0
+
+    // MARK: - OpenClaw 配置（U4：跟 Hermes 同款 Gateway 状态卡片 + 高级折叠区，不再沿用 directAPI 表单）
+    @State private var openclawAvailableAgents: [String] = []
+    @State private var openclawFetchingAgents = false
+    @State private var openclawAgentFetchError: String?
+    @State private var openclawAdvancedExpanded: Bool = false
+    @AppStorage(OpenClawGatewayManager.autoStartKey) private var openclawAutoStart: Bool = true
+    @AppStorage("openclawAgentId") private var openclawAgentId: String = "openclaw"
+    /// 用户手填的 token 覆盖（默认空 = 自动从 ~/.openclaw/openclaw.json 读）
+    @AppStorage("openclawToken") private var openclawTokenOverride: String = ""
+    @State private var showOpenclawToken = false
 
     private var hermesConfig: some View {
         VStack(alignment: .leading, spacing: 14) {
-            settingRow("API 地址") {
-                TextField("http://localhost:8642/v1", text: $viewModel.apiBaseURL)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            settingRow("API 密钥") {
-                HStack(spacing: 4) {
-                    Group {
-                        if showKey { TextField("your-secret-key", text: $viewModel.apiKey) }
-                        else { SecureField("your-secret-key", text: $viewModel.apiKey) }
+            // 预设 Picker：本地 / 云端 / 自定义，跟 directAPI 体验对齐
+            settingRow("部署方式") {
+                Picker(selection: $selectedHermesPreset) {
+                    ForEach(ProviderPreset.hermesPresets) { preset in
+                        Text(preset.displayName).tag(preset)
                     }
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    Divider()
+                    Text(ProviderPreset.custom.displayName).tag(ProviderPreset.custom)
+                } label: { EmptyView() }
+                    .labelsHidden()
+                    .onChange(of: selectedHermesPreset) { _, newPreset in
+                        applyHermesPreset(newPreset)
+                    }
+            }
 
-                    Button {
-                        showKey.toggle()
-                    } label: {
-                        Image(systemName: showKey ? "eye.slash" : "eye")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(showKey ? "隐藏密钥" : "显示密钥")
+            // 本地档：状态卡片 + 高级折叠区；URL/Key/模型默认隐藏（H9 简化）
+            // 云端/自定义档：保留完整输入框
+            if selectedHermesPreset.id == "hermes-local" {
+                hermesGatewayStatusCard
+                hermesLocalAdvancedSection
+            } else {
+                settingRow("API 地址") {
+                    TextField("https://your-gateway.example.com/v1", text: $viewModel.apiBaseURL)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                        .onChange(of: viewModel.apiBaseURL) { _, _ in
+                            hermesAvailableModels = []
+                            hermesModelFetchError = nil
+                        }
                 }
-            }
-            settingRow("模型") {
-                TextField("hermes-agent", text: $viewModel.modelName)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                hermesKeyRow
+                hermesModelRow
+                if let err = hermesModelFetchError {
+                    hermesModelFetchErrorRow(err)
+                }
             }
 
             testConnectionRow
 
+            // 底部提示：按预设档位变化
             HStack(spacing: 6) {
                 Spacer().frame(width: 92)
                 Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(.tertiary)
-                Text("需要先在终端运行 hermes gateway 启动 API Server")
+                Text(hermesHintText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// 本地档：Gateway 运行状态卡片（H9 核心）
+    /// 跟 directAPI 的 opencodeEngineCard 视觉对齐
+    private var hermesGatewayStatusCard: some View {
+        let status = HermesGatewayManager.shared.status
+        let (dotColor, statusText, tone): (Color, String, Color) = {
+            switch status {
+            case .starting:       return (.orange, "连接中…",       .secondary)
+            case .running:        return (.green,  "已连接",         .secondary)
+            case .external:       return (.green,  "已连接",         .secondary)
+            case .binaryMissing:  return (.gray,   "未安装",         .secondary)
+            case .failed:         return (.red,    "连接失败",       .red)
+            case .disabled:       return (.gray,   "已关闭自动连接",  .secondary)
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.green)
+                Text("Hermes")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 7, height: 7)
+                Text(statusText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(tone)
+                    .lineLimit(1)
+                // 重检按钮
+                Button {
+                    Task.detached(priority: .utility) {
+                        await HermesGatewayManager.shared.startIfAvailable()
+                        await MainActor.run { viewModel.checkConnection() }
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderless)
+                .help("重新连接")
+            }
+
+            // 未安装时给安装入口
+            if case .binaryMissing = status {
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("电脑上还没安装 Hermes。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Link("查看安装方法 ›", destination: URL(string: "https://github.com/anomalyco/hermes-agent")!)
+                        .font(.caption2)
+                }
+            }
+
+            Toggle(isOn: $hermesAutoStart) {
+                Text("打开 HermesPet 时自动连接 Hermes")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.green.opacity(0.07))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.green.opacity(0.2), lineWidth: 0.5)
+        )
+        // 1s tick 刷新 status（spawn 中的状态变化通过 @State 重新读 manager）
+        .id(gatewayStatusTick)
+        .onAppear {
+            startGatewayStatusTimer()
+        }
+    }
+
+    /// 本地档：高级折叠区（Key / 模型，默认隐藏；用户需要时点开调）
+    private var hermesLocalAdvancedSection: some View {
+        DisclosureGroup(isExpanded: $hermesAdvancedExpanded) {
+            VStack(alignment: .leading, spacing: 14) {
+                hermesKeyRow
+                hermesModelRow
+                if let err = hermesModelFetchError {
+                    hermesModelFetchErrorRow(err)
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Text("高级（API 密钥 / 模型名）")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: - OpenClaw 配置（U4：跟 Hermes 同款 Gateway 状态卡片 + 高级折叠区）
+
+    /// OpenClaw 设置主视图。零配置（HermesPet 自动读 ~/.openclaw/openclaw.json）—— UI 只展示
+    /// Gateway 运行状态 + 高级折叠区（Token / Agent 覆盖，给想自定义的用户用）
+    private var openclawConfig: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            openclawGatewayStatusCard
+            openclawAdvancedSection
+
+            // 底部提示
+            HStack(spacing: 6) {
+                Spacer().frame(width: 92)
+                Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(.tertiary)
+                Text("OpenClaw 是装在你电脑上的本地 AI，HermesPet 启动时会自动连接。免费、不联网、不需要密钥。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// OpenClaw 连接状态卡片（小白文案：只显"已连接/连接中/未连接"，不显端口、不显技术词）
+    private var openclawGatewayStatusCard: some View {
+        let status = OpenClawGatewayManager.shared.status
+        let (dotColor, statusText, tone): (Color, String, Color) = {
+            switch status {
+            case .starting:          return (.orange, "连接中…",        .secondary)
+            case .running:           return (.green,  "已连接",          .secondary)
+            case .binaryMissing:     return (.gray,   "未连接",          .secondary)
+            case .configMissing:     return (.orange, "需要完成初始化",   .orange)
+            case .endpointDisabled:  return (.orange, "正在自动配置…",    .orange)
+            case .failed:            return (.red,    "连接失败",        .red)
+            case .disabled:          return (.gray,   "已关闭自动连接",   .secondary)
+            }
+        }()
+        let fomoTint = Color(red: 0.706, green: 0.773, blue: 0.910)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(fomoTint)
+                Text("OpenClaw")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 7, height: 7)
+                Text(statusText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(tone)
+                    .lineLimit(1)
+                // 重检按钮
+                Button {
+                    Task.detached(priority: .utility) {
+                        await OpenClawGatewayManager.shared.startIfAvailable()
+                        await MainActor.run { viewModel.checkConnection() }
+                    }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderless)
+                .help("重新连接")
+            }
+
+            // 状态分支：给具体修复指引（小白能懂的语言）
+            switch status {
+            case .binaryMissing:
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("电脑上还没安装 OpenClaw。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("npm install -g openclaw@latest && openclaw onboard --install-daemon", forType: .string)
+                    } label: {
+                        Text("复制安装命令")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            case .configMissing:
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("已安装，但还没完成初始化。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("openclaw onboard --install-daemon", forType: .string)
+                    } label: {
+                        Text("复制初始化命令")
+                            .font(.caption2)
+                    }
+                    .buttonStyle(.borderless)
+                }
+            case .endpointDisabled:
+                HStack(spacing: 4) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                    Text("正在自动配置，可点右上角刷新重试。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            default:
+                EmptyView()
+            }
+
+            Toggle(isOn: $openclawAutoStart) {
+                Text("打开 HermesPet 时自动连接 OpenClaw")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(fomoTint.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(fomoTint.opacity(0.35), lineWidth: 0.5)
+        )
+        .id(gatewayStatusTick)
+        .onAppear {
+            startGatewayStatusTimer()
+        }
+    }
+
+    /// OpenClaw 高级设置（默认折叠 —— 一般用户不用打开）
+    private var openclawAdvancedSection: some View {
+        DisclosureGroup(isExpanded: $openclawAdvancedExpanded) {
+            VStack(alignment: .leading, spacing: 14) {
+                settingRow("密钥（一般不用填）") {
+                    HStack(spacing: 4) {
+                        Group {
+                            if showOpenclawToken {
+                                TextField("留空会自动读取", text: $openclawTokenOverride)
+                            } else {
+                                SecureField("留空会自动读取", text: $openclawTokenOverride)
+                            }
+                        }
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+
+                        Button {
+                            showOpenclawToken.toggle()
+                        } label: {
+                            Image(systemName: showOpenclawToken ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                settingRow("AI 角色") {
+                    HStack(spacing: 6) {
+                        TextField("openclaw", text: $openclawAgentId)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+
+                        if !openclawAvailableAgents.isEmpty {
+                            Menu {
+                                ForEach(openclawAvailableAgents, id: \.self) { name in
+                                    Button(name) { openclawAgentId = name }
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                            .help("从可用列表选")
+                        }
+
+                        Button {
+                            fetchOpenclawAgents()
+                        } label: {
+                            if openclawFetchingAgents {
+                                ProgressView().controlSize(.small).scaleEffect(0.6)
+                            } else {
+                                Text("刷新").font(.caption)
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(openclawFetchingAgents)
+                    }
+                }
+
+                if let err = openclawAgentFetchError {
+                    HStack(spacing: 6) {
+                        Spacer().frame(width: 92)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2).foregroundStyle(.orange)
+                        Text(err).font(.caption2).foregroundStyle(.orange)
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
+            Text("高级设置")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 拉取 OpenClaw agent 列表（GET /v1/models）
+    private func fetchOpenclawAgents() {
+        openclawFetchingAgents = true
+        openclawAgentFetchError = nil
+        Task {
+            do {
+                let client = APIClient(source: .openclaw)
+                let agents = try await client.fetchModels()
+                openclawAvailableAgents = agents
+                openclawFetchingAgents = false
+            } catch {
+                openclawAgentFetchError = "拉取失败：\(error.localizedDescription)"
+                openclawFetchingAgents = false
+            }
+        }
+    }
+
+    /// 拆出 Key 行 + 模型行 + 错误行作为独立组件，本地档高级区 + 云端档都共用
+    private var hermesKeyRow: some View {
+        settingRow("API 密钥（选填）") {
+            HStack(spacing: 4) {
+                Group {
+                    if showKey { TextField("未启用鉴权可留空", text: $viewModel.apiKey) }
+                    else { SecureField("未启用鉴权可留空", text: $viewModel.apiKey) }
+                }
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+
+                Button {
+                    showKey.toggle()
+                } label: {
+                    Image(systemName: showKey ? "eye.slash" : "eye")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(showKey ? "隐藏密钥" : "显示密钥")
+            }
+        }
+    }
+
+    private var hermesModelRow: some View {
+        settingRow("模型") {
+            HStack(spacing: 6) {
+                TextField("hermes-agent", text: $viewModel.modelName)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+
+                if !hermesAvailableModels.isEmpty {
+                    Menu {
+                        ForEach(hermesAvailableModels, id: \.self) { name in
+                            Button(name) { viewModel.modelName = name }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 24)
+                    .help("从可用模型列表选")
+                }
+
+                Button {
+                    fetchHermesModels()
+                } label: {
+                    if hermesFetchingModels {
+                        ProgressView().controlSize(.small).scaleEffect(0.6)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(hermesFetchingModels)
+                .help("从 /v1/models 拉取可用模型")
+            }
+        }
+    }
+
+    private func hermesModelFetchErrorRow(_ err: String) -> some View {
+        HStack(spacing: 6) {
+            Spacer().frame(width: 92)
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 10))
+                .foregroundStyle(.orange)
+            Text(err)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+
+    /// 1s tick 重渲染 Gateway 状态卡片（spawn 进度可视化）
+    private func startGatewayStatusTimer() {
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            // 离开当前 mode 就停（避免后台一直 tick）
+            if selectedHermesPreset.id != "hermes-local" {
+                timer.invalidate()
+                return
+            }
+            gatewayStatusTick &+= 1
+        }
+    }
+
+    /// Hermes 底部说明文字，按预设档位区分
+    private var hermesHintText: String {
+        switch selectedHermesPreset.id {
+        case "hermes-local":
+            return "Hermes 是装在你电脑上的本地 AI，HermesPet 启动时会自动连接。免费、不联网、不需要密钥。"
+        case "hermes-cloud":
+            return "填上你服务器上 Hermes 的地址 + 模型名即可。鉴权方式按你部署时设的。"
+        default:
+            return "任意 OpenAI 兼容服务都能用 —— 自部署 vLLM / Ollama / LM Studio / 中转代理皆可。"
+        }
+    }
+
+    /// 切换 Hermes 预设时回写 baseURL + 模型名
+    private func applyHermesPreset(_ preset: ProviderPreset) {
+        if preset.id == "hermes-local" {
+            // 本地档：强制写默认值，让用户无需手填
+            viewModel.apiBaseURL = preset.baseURL
+            if viewModel.modelName.isEmpty {
+                viewModel.modelName = preset.defaultModel
+            }
+        } else if preset.id == "hermes-cloud" {
+            // 云端档：如果当前还是 localhost，清掉让用户重填
+            if viewModel.apiBaseURL.contains("localhost") || viewModel.apiBaseURL.contains("127.0.0.1") {
+                viewModel.apiBaseURL = ""
+            }
+        }
+        // 持久化用户选的预设档位
+        UserDefaults.standard.set(preset.id, forKey: "hermesPresetID")
+        hermesAvailableModels = []
+        hermesModelFetchError = nil
+        testResult = nil
+    }
+
+    /// 从 baseURL/v1/models 拉模型列表（H3）
+    private func fetchHermesModels() {
+        hermesFetchingModels = true
+        hermesModelFetchError = nil
+        let client = APIClient(source: .hermes)
+        Task {
+            do {
+                let models = try await client.fetchModels()
+                hermesAvailableModels = models
+                if models.isEmpty {
+                    hermesModelFetchError = "服务端 /v1/models 返回空列表"
+                } else if viewModel.modelName.isEmpty || !models.contains(viewModel.modelName) {
+                    // 当前 modelName 不在列表里 → 自动选第一个
+                    viewModel.modelName = models[0]
+                }
+            } catch {
+                hermesModelFetchError = "拉取失败：\(error.localizedDescription)"
+            }
+            hermesFetchingModels = false
         }
     }
 
@@ -249,21 +791,7 @@ struct SettingsView: View {
 
     private var directAPIConfig: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // 顶部一行说明，告诉用户这就是"只用 API Key"的简单模式
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.indigo)
-                Text("选一家服务商 + 填 API Key 就能聊，不依赖任何本地命令行工具")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            // v1.2.0+：底层引擎换成 bundled opencode agent runtime
-            // 让用户知道现在 directAPI 模式不只是 chat completion，还能读写文件 / 跑命令 / 联网
-            opencodeEngineCard
-
-            // 服务商预设 Picker
+            // 服务商预设 Picker（去掉了"opencode 引擎"诊断卡片和重复说明 —— 小白只需要填 Key 就能用）
             settingRow("服务商") {
                 Picker(selection: $selectedProvider) {
                     ForEach(ProviderPreset.all) { preset in
@@ -736,7 +1264,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Label("桌面漫步", systemImage: "figure.walk")
                     .font(.system(size: 13, weight: .medium))
-                Text("从灵动岛跳出，沿菜单栏正下方左右走动。Claude 🦞 / 在线 AI ☁️ / Hermes 🐴 / Codex 💻 各有专属桌宠。")
+                Text("从灵动岛跳出，沿菜单栏正下方左右走动。Claude 🦞 / 在线 AI ☁️ / OpenClaw 🦊 / Hermes 🐴 / Codex 💻 五种桌宠，跟着当前 AI 模式切换。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -753,7 +1281,7 @@ struct SettingsView: View {
                 icon: "infinity",
                 iconColor: petColor,
                 title: "Claude / Hermes / Codex · 自由活动",
-                caption: "Claude / Hermes / Codex 模式下跳过 3 分钟 idle 等待，桌宠一直在屏幕上玩。在线 AI 切过去时云朵默认立刻出来，不受此项影响",
+                caption: "Claude / Hermes / Codex 模式下跳过 3 分钟空闲等待，桌宠一直在屏幕上玩。在线 AI / OpenClaw 模式云朵和 fomo 切过去就立刻出来，不受此项影响",
                 isOn: $viewModel.clawdFreeRoamEnabled,
                 disabled: !viewModel.clawdWalkEnabled
             )
@@ -779,6 +1307,7 @@ struct SettingsView: View {
 
                 paletteRow(label: "Claude · Clawd 🦞", mode: .claudeCode)
                 paletteRow(label: "在线 AI · 云朵 ☁️", mode: .directAPI)
+                paletteRow(label: "OpenClaw · fomo 🦊", mode: .openclaw)
                 paletteRow(label: "Hermes · 小马 🐴", mode: .hermes)
                 paletteRow(label: "Codex · coco 🤖", mode: .codex)
             }
@@ -1052,6 +1581,21 @@ struct SettingsView: View {
 
     @State private var activityTodayStats: [AppDailyStat] = []
     @State private var showClearActivityConfirm = false
+    /// 意图感知（v1.3 Phase 1）—— 总开关 + 最近样本计数（每次打开设置刷一次）
+    @AppStorage("userIntentEnabled") private var userIntentEnabled: Bool = false
+    @State private var userIntentTodayCount: Int = 0
+    @State private var showClearIntentConfirm = false
+
+    /// Wave C4：主出场偏好 —— "auto" / "pet" / "island"
+    @AppStorage("intentChannelPreference") private var intentChannelPreferenceRaw: String = "auto"
+    /// Wave C5：每分钟最多反馈次数 —— 1=安静 / 2=适中 / 4=频繁
+    @AppStorage("intentFeedbackPerMinute") private var intentFeedbackPerMinute: Int = 2
+
+    /// Wave E1：今日观察列表数据。每次打开设置 / 用户操作（删除/拉黑/刷新）后重新拉
+    @State private var intentObservations: [UserIntent] = []
+    @State private var showObservationList: Bool = false
+    /// Wave E2/E3：用户软黑名单（bundle ID 数组）。@State 镜像 + UserDefaults.array(forKey:) 同步
+    @State private var userBlacklist: [String] = []
 
     private var privacySection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1098,7 +1642,8 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     Picker("", selection: $viewModel.morningBriefingBackend) {
-                        ForEach(AgentMode.allCases) { mode in
+                        // M5: 早报后端只能选 enabled 的 mode（选 disabled 的也用不了）
+                        ForEach(AgentMode.allCases.filter { EnabledModesStore.shared.isEnabled($0) }) { mode in
                             Text(mode.label).tag(mode)
                         }
                     }
@@ -1183,8 +1728,410 @@ struct SettingsView: View {
                     Text("会删除所有原始事件、会话块和每日统计。此操作不可撤销。")
                 }
             }
+
+            // —— v1.3 意图感知 ——
+            Divider()
+            userIntentSection
         }
-        .onAppear { refreshActivityStats() }
+        .onAppear {
+            refreshActivityStats()
+            refreshIntentStats()
+            loadBlacklist()
+            loadObservations()
+        }
+    }
+
+    /// 意图感知开关 + 简介 + 今日采样数 + 清空按钮（v1.3 Phase 1）
+    private var userIntentSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            captionToggle(
+                icon: "brain.head.profile",
+                iconColor: .purple,
+                title: "意图感知（实验性）",
+                caption: "按回车 / ⌘S / ⌘C / ⌘V / 切应用 / Spotlight 时静默截当前屏 OCR，记录你在做什么。\n同 app 同窗口 5 分钟只采 1 次。所有 OCR 走本地 Vision，不联网。30 天后自动压缩。",
+                isOn: Binding(
+                    get: { userIntentEnabled },
+                    set: { newVal in
+                        userIntentEnabled = newVal
+                        UserIntentRecorder.shared.setEnabled(newVal)
+                        refreshIntentStats()
+                    }
+                )
+            )
+
+            // 隐私说明卡片 —— Wave E4 扩到 6 条，覆盖"存储 / 网络 / 黑名单 / 单条删 / 反馈可关 / 自动过期"
+            VStack(alignment: .leading, spacing: 6) {
+                privacyTip(icon: "lock.fill", text: "OCR 文本仅本地存储于 ~/.hermespet/activity.sqlite")
+                privacyTip(icon: "wifi.slash", text: "OCR 走本地 Vision Framework，零网络请求，零 token 消耗")
+                privacyTip(icon: "eye.slash.fill", text: "1Password / 微信 / 支付宝等敏感 app 自动跳过")
+                privacyTip(icon: "hand.raised.fill", text: "可逐条删除单次观察 / 可把任意 app 加入黑名单")
+                privacyTip(icon: "speaker.slash.fill", text: "AI 反馈通道可关、可调频率，桌宠永远静默观察")
+                privacyTip(icon: "clock.arrow.circlepath", text: "30 天后 OCR 全文 gzip 压缩 / 180 天后整条删除")
+            }
+            .padding(12)
+            .background(Color.purple.opacity(0.06))
+            .cornerRadius(8)
+
+            // Wave C4：只有功能启用时才显示运行时数据 + 反馈偏好。
+            // 关闭功能时这些 UI 隐藏，避免给"功能关着却显示统计"的错觉
+            if userIntentEnabled {
+                Divider().padding(.vertical, 2)
+
+                // 主出场偏好（Wave C4）
+                HStack {
+                    Label("AI 出场偏好", systemImage: "rectangle.3.group.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: $intentChannelPreferenceRaw) {
+                        Text("自动").tag("auto")
+                        Text("桌宠优先").tag("pet")
+                        Text("灵动岛优先").tag("island")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 240)
+                    .labelsHidden()
+                }
+
+                // 反馈频率（Wave C5）
+                HStack {
+                    Label("反馈频率", systemImage: "speedometer")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: $intentFeedbackPerMinute) {
+                        Text("安静").tag(1)
+                        Text("适中").tag(2)
+                        Text("频繁").tag(4)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 240)
+                    .labelsHidden()
+                }
+
+                // 今日采样数
+                HStack {
+                    Label("今天已采样", systemImage: "camera.viewfinder")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(userIntentTodayCount) 次")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.primary)
+                    Button {
+                        refreshIntentStats()
+                        loadObservations()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                // Wave E1：今日观察折叠列表
+                observationListSection
+
+                // Wave E3：黑名单管理（仅在有自定义黑名单时显示，避免 UI 冗余）
+                if !userBlacklist.isEmpty {
+                    blacklistSection
+                }
+
+                // 清空 + 导出（Wave E5）按钮组
+                HStack {
+                    Spacer()
+                    Button {
+                        exportIntentsToJSON()
+                    } label: {
+                        Label("导出 JSON", systemImage: "square.and.arrow.up")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.bordered)
+                    Button(role: .destructive) {
+                        showClearIntentConfirm = true
+                    } label: {
+                        Label("清空意图记录", systemImage: "trash")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.bordered)
+                    .confirmationDialog(
+                        "确定清空所有意图记录吗？",
+                        isPresented: $showClearIntentConfirm,
+                        titleVisibility: .visible
+                    ) {
+                        Button("清空", role: .destructive) {
+                            ActivityRecorder.shared.queryStore.clearUserIntents()
+                            refreshIntentStats()
+                            loadObservations()
+                        }
+                        Button("取消", role: .cancel) {}
+                    } message: {
+                        Text("会删除所有屏幕 OCR 采样记录。此操作不可撤销。")
+                    }
+                }
+            }
+        }
+    }
+
+    /// 刷新"今日意图采样次数"
+    private func refreshIntentStats() {
+        // 复用最近 24h 查询（够近似今日，省得加一个新 SQL）
+        let intents = ActivityRecorder.shared.queryStore.recentUserIntents(withinMinutes: 24 * 60, limit: 10000)
+        userIntentTodayCount = intents.count
+    }
+
+    // MARK: - Wave E1：今日观察列表
+
+    /// 折叠的观察列表区块（点击标题展开，限高 240pt 内部滚动）
+    private var observationListSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // 标题行：可点击展开 / 收起
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showObservationList.toggle()
+                    if showObservationList { loadObservations() }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showObservationList ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
+                    Label("今日观察", systemImage: "list.bullet.below.rectangle")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if showObservationList && !intentObservations.isEmpty {
+                        Text(observationSummary)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showObservationList {
+                if intentObservations.isEmpty {
+                    Text("今天还没有观察记录")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(intentObservations, id: \.id) { item in
+                                observationRow(item)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(maxHeight: 240)
+                    .background(Color.primary.opacity(0.03))
+                    .cornerRadius(6)
+                }
+            }
+        }
+    }
+
+    /// 单条观察记录（时间 + app 名 + window title + OCR 摘要 + 操作菜单）
+    private func observationRow(_ item: UserIntent) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(observationTime(item))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(item.appName ?? "?")
+                        .font(.system(size: 11, weight: .medium))
+                    if item.isBlacklisted {
+                        Text("· 仅 meta")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                if let title = item.windowTitle, !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                if let ocr = item.ocrText, !ocr.isEmpty {
+                    Text(ocr.prefix(60))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 4)
+            Menu {
+                if let bid = item.appBundleID, !bid.isEmpty,
+                   !userBlacklist.contains(bid) {
+                    Button {
+                        addToBlacklist(bundleID: bid, appName: item.appName)
+                    } label: {
+                        Label("以后别记 \(item.appName ?? bid)", systemImage: "eye.slash")
+                    }
+                }
+                Button(role: .destructive) {
+                    deleteObservation(id: item.id)
+                } label: {
+                    Label("删除这条", systemImage: "trash")
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 22)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.02))
+        .cornerRadius(4)
+    }
+
+    /// "今天 X 次 · 跨 Y 个应用"
+    private var observationSummary: String {
+        let count = intentObservations.count
+        let uniqueApps = Set(intentObservations.compactMap { $0.appBundleID }).count
+        return "\(count) 次 · 跨 \(uniqueApps) 个应用"
+    }
+
+    private func observationTime(_ item: UserIntent) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        return fmt.string(from: item.timestamp)
+    }
+
+    private func loadObservations() {
+        // 取今天的所有意图记录（按 timestamp 倒序）
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let all = ActivityRecorder.shared.queryStore.recentUserIntents(limit: 500)
+        intentObservations = all.filter { $0.timestamp >= startOfDay }
+    }
+
+    private func deleteObservation(id: Int) {
+        ActivityRecorder.shared.queryStore.deleteUserIntent(id: id)
+        loadObservations()
+        refreshIntentStats()
+    }
+
+    // MARK: - Wave E2 + E3：黑名单
+
+    /// 黑名单管理 section（仅有自定义黑名单时显示）
+    private var blacklistSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Label("已屏蔽的应用", systemImage: "eye.slash.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(userBlacklist.count) 个")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            VStack(spacing: 3) {
+                ForEach(userBlacklist, id: \.self) { bundleID in
+                    HStack {
+                        Image(systemName: "app.dashed")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                        Text(bundleID)
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Button {
+                            removeFromBlacklist(bundleID: bundleID)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.03))
+                    .cornerRadius(4)
+                }
+            }
+        }
+    }
+
+    private func loadBlacklist() {
+        userBlacklist = UserDefaults.standard.array(forKey: "userIntentAppBlacklist") as? [String] ?? []
+    }
+
+    private func addToBlacklist(bundleID: String, appName: String?) {
+        var arr = userBlacklist
+        guard !arr.contains(bundleID) else { return }
+        arr.append(bundleID)
+        UserDefaults.standard.set(arr, forKey: "userIntentAppBlacklist")
+        userBlacklist = arr
+        NSLog("[UserIntent] 已加黑名单：\(appName ?? bundleID)")
+    }
+
+    private func removeFromBlacklist(bundleID: String) {
+        let arr = userBlacklist.filter { $0 != bundleID }
+        UserDefaults.standard.set(arr, forKey: "userIntentAppBlacklist")
+        userBlacklist = arr
+    }
+
+    // MARK: - Wave E5：导出 JSON
+
+    private func exportIntentsToJSON() {
+        // 拉今日所有意图记录
+        let startOfDay = Calendar.current.startOfDay(for: Date())
+        let all = ActivityRecorder.shared.queryStore.recentUserIntents(limit: 5000)
+        let today = all.filter { $0.timestamp >= startOfDay }
+
+        // 构造可读 JSON
+        struct ExportRow: Codable {
+            let timestamp: String
+            let trigger: String
+            let app: String?
+            let windowTitle: String?
+            let ocrText: String?
+            let isBlacklisted: Bool
+        }
+        let fmt = ISO8601DateFormatter()
+        let rows = today.map { item in
+            ExportRow(
+                timestamp: fmt.string(from: item.timestamp),
+                trigger: item.triggerType.rawValue,
+                app: item.appName,
+                windowTitle: item.windowTitle,
+                ocrText: item.ocrText,
+                isBlacklisted: item.isBlacklisted
+            )
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(rows) else {
+            NSLog("[UserIntent] 导出 JSON 编码失败")
+            return
+        }
+
+        // NSSavePanel 让用户选保存位置
+        let panel = NSSavePanel()
+        panel.title = "导出今日意图记录"
+        let fileFmt = DateFormatter()
+        fileFmt.dateFormat = "yyyy-MM-dd"
+        panel.nameFieldStringValue = "HermesPet-intents-\(fileFmt.string(from: Date())).json"
+        panel.allowedContentTypes = [.json]
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try data.write(to: url)
+                NSLog("[UserIntent] 已导出到 \(url.path) (\(rows.count) 条)")
+            } catch {
+                NSLog("[UserIntent] 导出失败：\(error.localizedDescription)")
+            }
+        }
     }
 
     private func privacyTip(icon: String, text: String) -> some View {
@@ -1423,11 +2370,83 @@ struct SettingsView: View {
 
             Divider()
 
+            authenticitySection
+
+            Divider()
+
             creditsSection
         }
         .onAppear {
             CrashReporter.shared.scan()
         }
+    }
+
+    /// **官方版本验证 / 防伪段（U8）**
+    /// 读 app 自身的 codesign Team ID，跟原作者已知 Team ID 比对。
+    /// 让用户能识别"我装的是不是从原作者那下载的正版"
+    @ViewBuilder
+    private var authenticitySection: some View {
+        let result = CodeSignVerifier.verify()
+        let (dotColor, headlineColor): (Color, Color) = {
+            switch result {
+            case .officialSignature: return (.green,  .green)
+            case .adHocSignature:    return (.orange, .secondary)
+            case .thirdPartySignature, .unsigned: return (.red, .red)
+            case .unknown:           return (.gray, .secondary)
+            }
+        }()
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(dotColor)
+                    .frame(width: 16)
+                Text("官方版本验证")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Circle().fill(dotColor).frame(width: 8, height: 8)
+                Text(result.shortLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(headlineColor)
+            }
+
+            Text(result.detailText)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // 官方下载源提示 + 跳转按钮
+            HStack(spacing: 6) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.indigo)
+                Text("官方下载源")
+                    .font(.system(size: 11, weight: .medium))
+                Spacer()
+                Link("GitHub Releases", destination: URL(string: CodeSignVerifier.officialReleasesURL)!)
+                    .font(.system(size: 11))
+            }
+
+            // 防伪提醒
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "info.circle")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                Text("HermesPet 由 Basion 独立开发并开源，原作者 GitHub: @basionwang-bot。除官方仓库的 Releases 外，其他渠道（个人转发 / 第三方网盘）的 DMG 不保证安全和正版，建议核对上方签名。")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(dotColor.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(dotColor.opacity(0.18), lineWidth: 0.5)
+        )
     }
 
     /// 问题反馈区 —— 扫描 ~/Library/Logs/DiagnosticReports/ 找 HermesPet 崩溃日志，
@@ -1732,13 +2751,15 @@ struct SettingsView: View {
     private var modeFooterText: String {
         switch configViewingMode {
         case .hermes:
-            return "通过 Hermes API Server 调用大模型，需要自部署 OpenAI 兼容服务"
+            return "Hermes 是装在你电脑上的本地 AI，免费、不联网"
         case .directAPI:
-            return "直连第三方 AI 服务商 —— 只要 API Key 就能用，无需任何本地依赖"
+            return "直接用云端 AI（DeepSeek / 智谱 / Kimi 等），需要填密钥"
+        case .openclaw:
+            return "OpenClaw 是装在你电脑上的本地 AI，免费、不联网"
         case .claudeCode:
-            return "通过本地 claude 命令调用 Claude Code Agent，支持文件读写与命令执行"
+            return "用 Claude Code 帮你改文件、跑命令、读代码"
         case .codex:
-            return "通过本地 codex 命令调用 OpenAI Codex Agent，擅长写代码 + 生成图片"
+            return "用 Codex 帮你写代码 + 生成图片"
         }
     }
 
@@ -1908,4 +2929,220 @@ private final class HotkeyRecorderNSButton: NSButton {
         onCapture?(next)
     }
 
+}
+
+// MARK: - ModeEnableRow（U1+U2+U3）
+
+/// 一行 mode 开关 + 状态副标题 + 检测结果。
+///
+/// - 在线 AI：永久 ON 灰掉，副标题"永久启用 · 兜底 AI"
+/// - 其他 4 个：Toggle 控制 EnabledModesStore + 自动检测本机状态
+/// - 未装时显示"未安装"+ 复制命令按钮
+struct ModeEnableRow: View {
+    let mode: AgentMode
+
+    @State private var isEnabled: Bool = false
+    @State private var statusText: String = "检测中…"
+    @State private var statusColor: Color = .secondary
+    @State private var isDetecting: Bool = false
+    @State private var notInstalled: Bool = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // mini icon
+            Image(systemName: mode.iconName)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 24, height: 24)
+                .foregroundStyle(modeColor)
+                .background(modeColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+
+            // 名称 + 状态副标题
+            VStack(alignment: .leading, spacing: 2) {
+                Text(mode.label).font(.system(size: 13, weight: .medium))
+                HStack(spacing: 4) {
+                    if isDetecting {
+                        ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 10, height: 10)
+                    }
+                    Text(statusText)
+                        .font(.system(size: 11))
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
+                    if notInstalled, let cmd = installCommand {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(cmd, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.clipboard").font(.system(size: 10))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("复制安装命令：\(cmd)")
+                    }
+                }
+            }
+
+            Spacer()
+
+            // Toggle 开关
+            if mode == .directAPI {
+                Toggle("", isOn: .constant(true)).labelsHidden().disabled(true)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { isEnabled },
+                    set: { newValue in
+                        isEnabled = newValue
+                        if newValue {
+                            EnabledModesStore.shared.enable(mode)
+                            detect()
+                        } else {
+                            EnabledModesStore.shared.disable(mode)
+                            statusText = "已关闭"
+                            statusColor = .secondary
+                            notInstalled = false
+                        }
+                        // 上面 statusText 在 setter 闭包里改，但 .onAppear 已经把 statusText 锁到 onAppear 那一刻的值。
+                        // 实际生效路径在 setter 外（每次 toggle 切换都触发 onAppear 重渲）—— 不动逻辑
+                    }
+                )).labelsHidden()
+            }
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(isEnabled ? 0.6 : 0.3))
+        )
+        .onAppear {
+            isEnabled = EnabledModesStore.shared.isEnabled(mode)
+            if mode == .directAPI {
+                statusText = "总是开启"
+                statusColor = .green
+            } else if isEnabled {
+                detect()
+            } else {
+                statusText = "未启用"
+                statusColor = .secondary
+            }
+        }
+    }
+
+    /// mode 主色（跟其它 UI 一致）
+    private var modeColor: Color {
+        switch mode {
+        case .hermes:     return .green
+        case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
+        case .claudeCode: return .orange
+        case .codex:      return .cyan
+        }
+    }
+
+    /// 安装命令（用户没装 CLI/daemon 时点复制按钮拿到）
+    private var installCommand: String? {
+        switch mode {
+        case .directAPI: return nil   // 永远可用
+        case .openclaw:  return "npm install -g openclaw@latest && openclaw onboard --install-daemon"
+        case .hermes:    return "pip install hermes-agent"
+        case .claudeCode: return "npm install -g @anthropic-ai/claude-code"
+        case .codex:     return "npm install -g @openai/codex"
+        }
+    }
+
+    /// 触发检测：根据 mode 调对应的检测器（小白文案：只用"已连接 / 连接中 / 未安装"）
+    private func detect() {
+        isDetecting = true
+        notInstalled = false
+        Task { @MainActor in
+            switch mode {
+            case .directAPI:
+                statusText = "总是开启"
+                statusColor = .green
+            case .openclaw:
+                if OpenClawGatewayManager.shared.status == .binaryMissing ||
+                   OpenClawGatewayManager.shared.status == .starting {
+                    Task.detached { await OpenClawGatewayManager.shared.startIfAvailable() }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                }
+                renderOpenClawStatus()
+            case .hermes:
+                if HermesGatewayManager.shared.status == .binaryMissing {
+                    statusText = "未安装"
+                    statusColor = .orange
+                    notInstalled = true
+                } else {
+                    Task.detached { await HermesGatewayManager.shared.startIfAvailable() }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    renderHermesStatus()
+                }
+            case .claudeCode:
+                let ok = await CLIAvailability.claudeAvailable()
+                if ok {
+                    statusText = "已就绪"
+                    statusColor = .green
+                } else {
+                    statusText = "未安装"
+                    statusColor = .orange
+                    notInstalled = true
+                }
+            case .codex:
+                let ok = await CLIAvailability.codexAvailable()
+                if ok {
+                    statusText = "已就绪"
+                    statusColor = .green
+                } else {
+                    statusText = "未安装"
+                    statusColor = .orange
+                    notInstalled = true
+                }
+            }
+            isDetecting = false
+        }
+    }
+
+    private func renderOpenClawStatus() {
+        switch OpenClawGatewayManager.shared.status {
+        case .running:
+            statusText = "已连接"
+            statusColor = .green
+        case .starting:
+            statusText = "连接中…"
+            statusColor = .secondary
+        case .binaryMissing:
+            statusText = "未安装"
+            statusColor = .orange
+            notInstalled = true
+        case .configMissing:
+            statusText = "需要完成初始化"
+            statusColor = .orange
+        case .endpointDisabled:
+            statusText = "正在自动配置…"
+            statusColor = .orange
+        case .failed:
+            statusText = "连接失败"
+            statusColor = .red
+        case .disabled:
+            statusText = "已关闭自动连接"
+            statusColor = .secondary
+        }
+    }
+
+    private func renderHermesStatus() {
+        switch HermesGatewayManager.shared.status {
+        case .running, .external:
+            statusText = "已连接"
+            statusColor = .green
+        case .starting:
+            statusText = "连接中…"
+            statusColor = .secondary
+        case .binaryMissing:
+            statusText = "未安装"
+            statusColor = .orange
+            notInstalled = true
+        case .failed:
+            statusText = "连接失败"
+            statusColor = .red
+        case .disabled:
+            statusText = "已关闭自动连接"
+            statusColor = .secondary
+        }
+    }
 }

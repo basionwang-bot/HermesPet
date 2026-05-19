@@ -497,6 +497,7 @@ struct PinCardView: View {
         switch pin.mode {
         case .hermes:     return .green
         case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }
@@ -506,6 +507,7 @@ struct PinCardView: View {
         switch pin.mode {
         case .hermes:     return "sparkle"
         case .directAPI:  return "cloud.fill"
+        case .openclaw:   return "bolt.circle.fill"
         case .claudeCode: return "terminal.fill"
         case .codex:      return "wand.and.stars"
         }

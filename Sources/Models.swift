@@ -307,10 +307,13 @@ let kMaxConversations = 8
 /// - **Hermes Gateway**：用户自托管的 OpenAI 兼容 API Server（localhost）
 /// - **Direct API**：直连第三方服务商（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 等），只要 API Key 就能用 ——
 ///   给"没装任何 CLI 的朋友"分发场景做的"零依赖"档
+/// - **OpenClaw**：npm 装的 OpenAI 兼容 gateway（373k stars，"fomo 龙虾"），自动读 ~/.openclaw/openclaw.json
+///   零配置接入，model 字段是 agent id（"openclaw" / "openclaw/default"）
 /// - **Claude Code CLI** / **OpenAI Codex CLI**：本地子进程，能读写文件 / 跑命令 / 生图
 enum AgentMode: String, Codable, CaseIterable, Identifiable {
     case hermes
     case directAPI  = "direct_api"
+    case openclaw   = "openclaw"
     case claudeCode = "claude_code"
     case codex      = "codex"
 
@@ -320,6 +323,7 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .hermes:     return "Hermes"
         case .directAPI:  return "在线 AI"
+        case .openclaw:   return "OpenClaw"
         case .claudeCode: return "Claude Code"
         case .codex:      return "Codex"
         }
@@ -329,6 +333,7 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
         switch self {
         case .hermes:     return "sparkle"
         case .directAPI:  return "cloud.fill"
+        case .openclaw:   return "bolt.circle.fill"
         case .claudeCode: return "terminal.fill"
         case .codex:      return "wand.and.stars"
         }

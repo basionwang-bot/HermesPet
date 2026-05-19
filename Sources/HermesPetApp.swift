@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionWindowController: PermissionWindowController?
     /// 任务回复摘要卡片控制器（v1.2.7-dev）—— 聊天窗关着时 task 完成 → 灵动岛下方弹摘要
     private var responseSummaryController: ResponseSummaryWindowController?
+    /// 意图建议卡片控制器（v1.3 Phase 2）—— 识别到"重复 / 报错"等 pattern 时弹建议
+    private var intentSuggestionController: IntentSuggestionWindowController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 配置迁移：把老版本的 UserDefaults 字段升级到当前 schema。
@@ -55,6 +57,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                       OpenCodeServerManager.shared.serverURL?.absoluteString ?? "?")
             } catch {
                 NSLog("[OpenCode] server start failed: %@", "\(error)")
+            }
+        }
+
+        // Hermes 模式的本地运行时：检测用户机器上是否装了 hermes，装了就自动 spawn
+        // `hermes gateway run` 子进程，免去用户打开终端启服务的麻烦。没装则什么都不做（设置面板会显示
+        // "未找到 hermes 命令"提示用户）。8642 端口已被占用（用户终端手起 / launchd service）会自动避让。
+        Task.detached(priority: .utility) {
+            await HermesGatewayManager.shared.startIfAvailable()
+            await MainActor.run { [weak self] in
+                // U5: gateway ready → 自动启用 .hermes mode（除非用户曾经手动关过）
+                let status = HermesGatewayManager.shared.status
+                if case .running = status {
+                    EnabledModesStore.shared.autoEnableIfNotExplicitlyDisabled(.hermes)
+                } else if case .external = status {
+                    EnabledModesStore.shared.autoEnableIfNotExplicitlyDisabled(.hermes)
+                }
+                self?.viewModel?.checkConnection()
+            }
+        }
+
+        // OpenClaw 模式的本地运行时：检测用户机器是否装了 openclaw（npm 全局装）。
+        // 装了就自动读 ~/.openclaw/openclaw.json 拿 token / port，自动 enable chatCompletions endpoint
+        // （OpenClaw 安全默认 disable，HermesPet 静默改 config + 重启 daemon），然后拉起 daemon。
+        // 没装则什么都不做（设置面板会显示"未装 openclaw 命令"+ 一键安装命令复制按钮）。
+        Task.detached(priority: .utility) {
+            await OpenClawGatewayManager.shared.startIfAvailable()
+            await MainActor.run { [weak self] in
+                // U5: daemon ready → 自动启用 .openclaw mode（除非用户曾经手动关过）
+                if case .running = OpenClawGatewayManager.shared.status {
+                    EnabledModesStore.shared.autoEnableIfNotExplicitlyDisabled(.openclaw)
+                }
+                self?.viewModel?.checkConnection()
+            }
+        }
+
+        // U5: Claude Code / Codex CLI 自动探测 —— 装了就自动启用对应 mode
+        Task.detached(priority: .utility) {
+            let hasClaude = await CLIAvailability.claudeAvailable()
+            let hasCodex  = await CLIAvailability.codexAvailable()
+            await MainActor.run {
+                if hasClaude { EnabledModesStore.shared.autoEnableIfNotExplicitlyDisabled(.claudeCode) }
+                if hasCodex  { EnabledModesStore.shared.autoEnableIfNotExplicitlyDisabled(.codex) }
             }
         }
 
@@ -216,6 +260,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ActivityRecorder.shared.start()
         }
 
+        // v1.3 意图感知 —— 按回车 / ⌘S / ⌘C / ⌘V / app 切换 / spotlight 时静默采样屏幕 OCR
+        // 默认 false（隐私优先），用户在设置里主动开启。共享 ActivityRecorder 的 SQLite handle
+        UserIntentRecorder.shared.start(viewModel: vm, store: ActivityRecorder.shared.queryStore)
+
+        // Phase 2 反向唤醒：detector attach + 灵动岛建议卡片 window + 路由管理
+        IntentPatternDetector.shared.attach(store: ActivityRecorder.shared.queryStore)
+        intentSuggestionController = IntentSuggestionWindowController()
+        IntentNotificationManager.shared.start(
+            viewModel: vm,
+            store: ActivityRecorder.shared.queryStore
+        )
+
         // 每日早报 —— 检查今天有没有生成过，没有就在 3s 后用 morningBriefingBackend 生成一份
         MorningBriefingService.shared.generateIfNeeded(viewModel: vm)
 
@@ -242,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ReasoningProxy.shared.stop()
         // 优雅 terminate opencode server（让它有机会 flush SQLite）
         OpenCodeServerManager.shared.terminate()
+        // 我们 spawn 的 hermes gateway 也一起停（外部管理的会自动跳过，详见 HermesGatewayManager.terminate()）
+        HermesGatewayManager.shared.terminate()
         let count = SubprocessRegistry.shared.runningCount
         if count > 0 {
             print("[Lifecycle] 退出时清理 \(count) 个未结束的子进程")

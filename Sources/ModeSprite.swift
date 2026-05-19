@@ -11,25 +11,39 @@ struct ModeSpriteView: View {
     /// 是否正在"工作中" —— 播放各自的动画
     let isWorking: Bool
     let size: CGFloat
+    /// 是否启用内部 sprite 的 TimelineView 重绘。
+    /// 默认读 `quietMode` UserDefaults —— 用户在设置里关「桌宠动效」时全局静音。
+    /// 调用方可显式覆盖（如 mini sprite 传 `isHovering` 让 hover 才动）
+    var animated: Bool? = nil
 
     /// 全局调色板存储 —— @Observable，用户改色后此 View 自动 invalidate 重渲染
     @State private var paletteStore = PetPaletteStore.shared
+    /// 全局「桌宠动效」开关。reverse 语义：quietMode=true 表示用户**关**了动效
+    @AppStorage("quietMode") private var quietMode: Bool = false
+
+    /// 最终 animated 值：显式传 → 用显式；否则按 quietMode 倒推
+    private var effectiveAnimated: Bool { animated ?? !quietMode }
 
     var body: some View {
         let palette = paletteStore.palette(for: mode)
+        let anim = effectiveAnimated
         switch mode {
         case .claudeCode:
             // Clawd 是 3:1 宽矮比例的像素精灵，让它用自己的 aspect ratio，不强行套正方形
-            ClaudeKnotSprite(isWorking: isWorking, size: size, palette: palette)
+            ClaudeKnotSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
         case .hermes:
-            HermesHorseSprite(isWorking: isWorking, size: size, palette: palette)
+            HermesHorseSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
                 .frame(width: size + 4, height: size + 4)
         case .directAPI:
             // 在线 AI 跑 opencode agent runtime，视觉用云朵小精灵区别于 Hermes 羽毛
-            CloudPetIslandSprite(isWorking: isWorking, size: size, palette: palette)
+            CloudPetIslandSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
+                .frame(width: size + 4, height: size + 4)
+        case .openclaw:
+            // PR-B：fomo 九尾狐专属 sprite（银白 / 异色瞳 / 大狐耳 + 蓬松尾巴）
+            FomoIslandSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
                 .frame(width: size + 4, height: size + 4)
         case .codex:
-            CodexTerminalSprite(isWorking: isWorking, size: size, palette: palette)
+            CodexTerminalSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
                 .frame(width: size + 4, height: size + 4)
         }
     }
@@ -91,6 +105,10 @@ struct ClawdView: View {
     var followMouse: Bool = false
     /// 调色板 —— 主色 + 派生高光/阴影。默认 Anthropic 官方橙；用户调色后从 PaletteStore 传入
     var palette: PetPalette = .clawdDefault
+    /// 是否启用 TimelineView 30fps 重绘。
+    /// `false` 时画**一张静态帧**（now=0 → 呼吸/眨眼/走路相位都归零、不读鼠标位置）。
+    /// 用户在设置里关「桌宠动效」、或 mini sprite 未 hover 时传 false 以省 CPU。
+    var animated: Bool = true
 
     private static let viewBoxW: CGFloat = 15
     private static let viewBoxH: CGFloat = 10
@@ -115,9 +133,18 @@ struct ClawdView: View {
     private static let shadow   = ClawdRect(x: 3,  y: 9, w: 9, h: 1)
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/60.0)) { timeline in
-            Canvas(rendersAsynchronously: false) { ctx, size in
-                draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+        Group {
+            if animated {
+                TimelineView(.animation(minimumInterval: 1.0/30.0)) { timeline in
+                    Canvas(rendersAsynchronously: false) { ctx, size in
+                        draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+                    }
+                }
+            } else {
+                // 静态帧：now=0 让所有动画相位归零；followMouse 在 draw 里被 `animated` AND 掉
+                Canvas(rendersAsynchronously: false) { ctx, size in
+                    draw(ctx: ctx, size: size, now: 0)
+                }
             }
         }
         .frame(width: height * Self.viewBoxW / Self.viewBoxH, height: height)
@@ -160,7 +187,8 @@ struct ClawdView: View {
             case .lookRight: return ( 2, 0)
             case .armsUp:    return ( 0, 0)
             case .rest:
-                guard followMouse else { return (0, 0) }
+                // animated=false 时不读鼠标 —— 静态帧时眼睛回到中央
+                guard followMouse, animated else { return (0, 0) }
                 return Self.continuousMouseEyeOffset()
             }
         }()
@@ -452,6 +480,8 @@ struct ClaudeKnotSprite: View {
     let size: CGFloat
     /// 调色板 —— 默认 Anthropic 官方橙，用户自定义后由调用方传入
     var palette: PetPalette = .clawdDefault
+    /// 是否启用内部 ClawdView 的 30fps 动画。false 时 Clawd 画静态帧
+    var animated: Bool = true
 
     @State private var pose: ClawdPose = .rest
     @State private var workingTask: Task<Void, Never>?
@@ -476,7 +506,8 @@ struct ClaudeKnotSprite: View {
             // 工作时 pose 在循环切换工具姿势，庆祝时 armsUp，都不希望被鼠标跟踪覆盖
             ClawdView(pose: pose, height: clawdHeight,
                       followMouse: !isWorking && celebrateTask == nil,
-                      palette: palette)
+                      palette: palette,
+                      animated: animated)
 
             // 工作时手里挥着工具在右上角；工具种类跟着 Claude tool_use 实时切换
             if isWorking {
@@ -736,6 +767,8 @@ struct HermesHorseSprite: View {
     let size: CGFloat
     /// 调色板 —— 默认金黄，用户自定义后由调用方传入
     var palette: PetPalette = .horseDefault
+    /// 是否启用内部 HorseView 的 30fps 动画。false 时画静态帧
+    var animated: Bool = true
 
     @State private var pose: ClawdPose = .rest
     @State private var workingTask: Task<Void, Never>?
@@ -748,7 +781,7 @@ struct HermesHorseSprite: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            HorseView(pose: pose, height: horseHeight, isWalking: false, palette: palette)
+            HorseView(pose: pose, height: horseHeight, isWalking: false, palette: palette, animated: animated)
             if isWorking {
                 ToolOverlay(kind: currentTool)
                     .offset(x: 3, y: -2)
@@ -931,7 +964,7 @@ struct HermesHorseSprite: View {
 /// row 9:          ░░░░░░░░░░░░░░░░░░░                  ← 阴影
 /// ```
 ///
-/// 动画（TimelineView 60fps 自驱）：
+/// 动画（TimelineView 30fps 自驱）：
 /// 1. **呼吸** 3.2s loop ±2% 横纵反向
 /// 2. **眨眼** 5s 间隔，最后 200ms 闭眼
 /// 3. **走路 trot** 0.8s/loop：4 条腿对角抬放 + 身体轻微 bob
@@ -946,6 +979,8 @@ struct HorseView: View {
     var isWalking: Bool = false
     /// 调色板 —— 主色 + 派生高光/阴影；鬃毛 / 翅膀 / 蹄子 保持默认（保留小马辨识度）
     var palette: PetPalette = .horseDefault
+    /// 是否启用 TimelineView 30fps 重绘。false 时画静态帧（now=0 相位归零）
+    var animated: Bool = true
 
     // 默认色（palette 不变时跟原版完全一致）—— 鬃毛 / 翅膀 / 蹄子 不参与调色保留视觉特征
     private static let maneColor       = Color(red: 217.0/255, green: 178.0/255, blue: 102.0/255)  // #D9B266 深 amber 金
@@ -959,9 +994,17 @@ struct HorseView: View {
     private static let centerY: CGFloat = 5
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/60.0)) { timeline in
-            Canvas(rendersAsynchronously: false) { ctx, size in
-                draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+        Group {
+            if animated {
+                TimelineView(.animation(minimumInterval: 1.0/30.0)) { timeline in
+                    Canvas(rendersAsynchronously: false) { ctx, size in
+                        draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+                    }
+                }
+            } else {
+                Canvas(rendersAsynchronously: false) { ctx, size in
+                    draw(ctx: ctx, size: size, now: 0)
+                }
             }
         }
         .frame(width: height * Self.viewBoxW / Self.viewBoxH, height: height)
@@ -1206,6 +1249,8 @@ struct CodexTerminalSprite: View {
     let size: CGFloat
     /// 调色板 —— 默认深空蓝，用户自定义后由调用方传入
     var palette: PetPalette = .terminalDefault
+    /// 是否启用内部 TerminalView 的 30fps 动画。false 时画静态帧
+    var animated: Bool = true
 
     @State private var pose: ClawdPose = .rest
     @State private var workingTask: Task<Void, Never>?
@@ -1219,7 +1264,7 @@ struct CodexTerminalSprite: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             TerminalView(pose: pose, height: terminalHeight, isWalking: false,
-                         isWorking: isWorking, palette: palette)
+                         isWorking: isWorking, palette: palette, animated: animated)
             if isWorking {
                 ToolOverlay(kind: currentTool)
                     .offset(x: 3, y: -2)
@@ -1354,7 +1399,7 @@ struct CodexTerminalSprite: View {
 /// row 9:             ░░░░░░░░░░░░                  ← 阴影光圈
 /// ```
 ///
-/// 动画（TimelineView 60fps 自驱）：
+/// 动画（TimelineView 30fps 自驱）：
 /// 1. **悬浮浮动** 1.8s loop：idle ±0.25pt / walking ±0.5pt —— 永远漂浮不踏地
 /// 2. **火焰脉冲** 高频抖动 ±0.3pt + 宽度 ±0.12pt，3 层叠色 cyan→white→orange
 /// 3. **呼吸** 3.2s loop ±1.5%
@@ -1372,6 +1417,8 @@ struct TerminalView: View {
     var isWorking: Bool = false
     /// 调色板 —— 主色 + 派生高光/阴影；屏幕黑 / 眼白 / 嘴 / LED / 火焰保持默认（保留 Codex 辨识度）
     var palette: PetPalette = .terminalDefault
+    /// 是否启用 TimelineView 30fps 重绘。false 时画静态帧（now=0 相位归零、不读鼠标）
+    var animated: Bool = true
 
     // 不参与调色的默认色（保留 Codex 视觉特征）
     private static let screenColor     = Color(red: 10.0/255,  green: 15.0/255,  blue: 31.0/255)   // #0A0F1F 头部黑屏
@@ -1388,9 +1435,17 @@ struct TerminalView: View {
     private static let centerY: CGFloat = 5
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/60.0)) { timeline in
-            Canvas(rendersAsynchronously: false) { ctx, size in
-                draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+        Group {
+            if animated {
+                TimelineView(.animation(minimumInterval: 1.0/30.0)) { timeline in
+                    Canvas(rendersAsynchronously: false) { ctx, size in
+                        draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+                    }
+                }
+            } else {
+                Canvas(rendersAsynchronously: false) { ctx, size in
+                    draw(ctx: ctx, size: size, now: 0)
+                }
             }
         }
         .frame(width: height * Self.viewBoxW / Self.viewBoxH, height: height)
@@ -1443,6 +1498,8 @@ struct TerminalView: View {
             case .lookRight: return ( 0.32, 0)
             case .armsUp:    return (0, -0.08)
             case .rest:
+                // animated=false 时不读鼠标 —— 静态帧眼睛回到中央
+                guard animated else { return (0, 0) }
                 return Self.continuousMouseEyeOffset()
             }
         }()
@@ -1644,6 +1701,8 @@ struct CloudPetIslandSprite: View {
     let size: CGFloat
     /// 调色板 —— 默认 indigo，用户自定义后由调用方传入
     var palette: PetPalette = .cloudDefault
+    /// 是否启用内部 CloudPetView 的 30fps 动画。false 时画静态帧
+    var animated: Bool = true
 
     @State private var pose: ClawdPose = .rest
     @State private var workingTask: Task<Void, Never>?
@@ -1658,7 +1717,8 @@ struct CloudPetIslandSprite: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             CloudPetView(pose: pose, height: cloudHeight, isWalking: false,
-                         glassesProgress: glassesProgress, palette: palette)
+                         glassesProgress: glassesProgress, palette: palette,
+                         animated: animated)
             if isWorking {
                 ToolOverlay(kind: currentTool)
                     .offset(x: 3, y: -2)
@@ -1689,24 +1749,25 @@ struct CloudPetIslandSprite: View {
         glassesHideTask?.cancel()
         glassesHideTask = Task { @MainActor in
             // 戴上动画：0 → 1，约 1.4s（用户要求看清"掏眼镜→戴上"的整个过程），easeOutBack 略弹
-            let onFrames = 84   // 60fps × 1.4s
+            // 30fps 协调 —— 跟 TimelineView 频率对齐，省一半 state-push 开销
+            let onFrames = 42
             for i in 1...onFrames {
                 if Task.isCancelled { return }
                 let t = Double(i) / Double(onFrames)
                 glassesProgress = easeOutBack(t)
-                try? await Task.sleep(nanoseconds: 16_666_666)
+                try? await Task.sleep(nanoseconds: 33_333_333)
             }
             glassesProgress = 1
             // 保持戴着
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             if Task.isCancelled { return }
-            // 摘下动画：1 → 0，0.6s ease-in 慢慢消失
-            let offFrames = 36
+            // 摘下动画：1 → 0，0.6s ease-in 慢慢消失（30fps × 0.6s = 18 frames）
+            let offFrames = 18
             for i in 1...offFrames {
                 if Task.isCancelled { return }
                 let t = 1 - Double(i) / Double(offFrames)
                 glassesProgress = t * t   // ease-in
-                try? await Task.sleep(nanoseconds: 16_666_666)
+                try? await Task.sleep(nanoseconds: 33_333_333)
             }
             glassesProgress = 0
         }
@@ -1772,6 +1833,8 @@ struct CloudPetView: View {
     var glassesProgress: Double = 0
     /// 调色板 —— 主色 + 派生高光/阴影。默认 indigo
     var palette: PetPalette = .cloudDefault
+    /// 是否启用 TimelineView 30fps 重绘。false 时画静态帧（now=0 相位归零）
+    var animated: Bool = true
 
     private static let viewBoxW: CGFloat = 14
     private static let viewBoxH: CGFloat = 10
@@ -1779,9 +1842,17 @@ struct CloudPetView: View {
     private static let centerY: CGFloat = 5
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/30.0)) { timeline in
-            Canvas(rendersAsynchronously: false) { ctx, size in
-                draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+        Group {
+            if animated {
+                TimelineView(.animation(minimumInterval: 1.0/30.0)) { timeline in
+                    Canvas(rendersAsynchronously: false) { ctx, size in
+                        draw(ctx: ctx, size: size, now: timeline.date.timeIntervalSinceReferenceDate)
+                    }
+                }
+            } else {
+                Canvas(rendersAsynchronously: false) { ctx, size in
+                    draw(ctx: ctx, size: size, now: 0)
+                }
             }
         }
         .frame(width: height * Self.viewBoxW / Self.viewBoxH, height: height)

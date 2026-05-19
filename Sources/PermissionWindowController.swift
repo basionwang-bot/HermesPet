@@ -17,6 +17,13 @@ import SwiftUI
 @MainActor
 final class PermissionWindowController {
 
+    /// 单例引用 —— 给 IntentFeedbackBudget / 其他需要"避让 permission 卡片"的组件查询用。
+    /// 跟 ResponseSummaryWindowController.shared / IntentSuggestionWindowController.shared 同款
+    static weak var shared: PermissionWindowController?
+
+    /// 卡片当前是否显示中（permission 或 question） —— IntentFeedbackBudget 用
+    var isShowing: Bool { viewState.isShowingCard }
+
     private let window: NSWindow
     private let hosting: NSHostingView<PermissionWindowRoot>
 
@@ -83,6 +90,7 @@ final class PermissionWindowController {
         win.contentView = host
         self.hosting = host
 
+        Self.shared = self
         positionUnderIsland()
 
         // 监听灵动岛 geometry 变化（屏幕切换 / 缩放 / 不同机型刘海宽度）→ 重新定位。

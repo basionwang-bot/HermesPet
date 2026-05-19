@@ -320,6 +320,9 @@ final class ChatViewModel {
 
     private let apiClient = APIClient(source: .hermes)
     private let directClient = APIClient(source: .direct)
+    /// OpenClaw 走 OpenAI 兼容 chat completions（端口 18789）。Bearer token 由 OpenClawGatewayManager
+    /// 从 ~/.openclaw/openclaw.json 自动读取并缓存，APIClient 内部直接拿（零填表体验）
+    private let openClawClient = APIClient(source: .openclaw)
     private let claudeClient = ClaudeCodeClient()
     private let codexClient = CodexClient()
     private let storage = StorageManager.shared
@@ -515,29 +518,79 @@ final class ChatViewModel {
         }
     }
 
+    /// 当前是否处于"掉线快速重试"节奏（H5）
+    /// connected 时 30s 一次，disconnected 时切到 10s 一次，恢复后自动切回 30s
+    private var fastRetryActive: Bool = false
+
     private func startStatusPolling() {
         checkConnection()
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        scheduleStatusTimer(fast: false)
+    }
+
+    /// 按当前连接状态调度状态轮询定时器（H5 后台自动重试）
+    /// - fast = true → 10s 一次；fast = false → 30s 一次
+    private func scheduleStatusTimer(fast: Bool) {
+        statusTimer?.invalidate()
+        let interval: TimeInterval = fast ? 10 : 30
+        fastRetryActive = fast
+        statusTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkConnection()
             }
         }
     }
 
+    /// connection 状态变化后回调：disconnected 时启用快速重试，connected 时回慢节奏 + 灵动岛短提示
+    /// 在每个 mode 的 checkConnection 异步分支末尾调用
+    private func handleConnectionStateChange() {
+        let isDisconnected: Bool
+        if case .disconnected = connectionStatus { isDisconnected = true } else { isDisconnected = false }
+
+        if isDisconnected && !fastRetryActive {
+            // 刚掉线 → 切快速重试
+            scheduleStatusTimer(fast: true)
+        } else if !isDisconnected && fastRetryActive {
+            // 恢复连接 → 切回慢节奏 + 灵动岛恢复提示
+            scheduleStatusTimer(fast: false)
+            NotificationCenter.default.post(
+                name: .init("HermesPetIslandTransientLabel"),
+                object: nil,
+                userInfo: [
+                    "text": agentMode == .hermes ? "已恢复" : "已连接",
+                    "duration": 2.0
+                ]
+            )
+        }
+    }
+
     func checkConnection() {
         switch agentMode {
         case .hermes:
-            guard !apiKey.isEmpty else {
-                connectionStatus = .disconnected("未配置密钥")
+            // 自托管 Hermes 大概率无鉴权，apiKey 空也允许尝试连接（H2）
+            // baseURL 至少要有值，否则压根没法 ping
+            guard !apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                connectionStatus = .disconnected("未配置 API 地址")
                 return
             }
             Task {
                 do {
                     let ok = try await apiClient.checkHealth()
-                    connectionStatus = ok ? .connected : .disconnected("API 未响应")
+                    if ok {
+                        connectionStatus = .connected
+                    } else {
+                        // 区分本地 vs 云端给清晰原因
+                        let isLocal = apiBaseURL.contains("localhost") || apiBaseURL.contains("127.0.0.1")
+                        connectionStatus = .disconnected(isLocal ? "本地 Gateway 未运行" : "Gateway 无响应")
+                    }
                 } catch {
-                    connectionStatus = .disconnected(error.localizedDescription)
+                    let isLocal = apiBaseURL.contains("localhost") || apiBaseURL.contains("127.0.0.1")
+                    let reason: String = {
+                        if isLocal { return "本地 Gateway 未运行（终端跑 hermes gateway）" }
+                        return error.localizedDescription
+                    }()
+                    connectionStatus = .disconnected(reason)
                 }
+                handleConnectionStateChange()
             }
         case .directAPI:
             // v1.2.0+：所有在线 AI 都走 opencode（含 DeepSeek，agent 能力优先于稳定性）
@@ -567,6 +620,33 @@ final class ChatViewModel {
                         }
                     }
                 }
+            }
+        case .openclaw:
+            // OC6: 走 openClawClient.checkHealth() —— APIClient .openclaw 分流先 /health 再 /models
+            // OpenClawGatewayManager 启动时自动 enable chatCompletions endpoint，所以 /models 也通
+            Task {
+                do {
+                    let ok = try await openClawClient.checkHealth()
+                    if ok {
+                        connectionStatus = .connected
+                    } else {
+                        connectionStatus = .disconnected("OpenClaw daemon 无响应")
+                    }
+                } catch {
+                    // 区分常见原因：binary 没装 vs daemon 没起
+                    let reason: String = {
+                        switch OpenClawGatewayManager.shared.status {
+                        case .binaryMissing:   return "未安装 openclaw 命令"
+                        case .configMissing:   return "未运行 openclaw onboard"
+                        case .endpointDisabled: return "chatCompletions endpoint 未启用"
+                        case .disabled:        return "已在设置中关闭自动启动"
+                        case .failed(let m):   return m
+                        default:               return error.localizedDescription
+                        }
+                    }()
+                    connectionStatus = .disconnected(reason)
+                }
+                handleConnectionStateChange()
             }
         case .claudeCode:
             Task {
@@ -604,9 +684,9 @@ final class ChatViewModel {
             return
         }
 
-        // Hermes 模式：必须有 apiKey
-        if agentMode == .hermes && apiKey.isEmpty {
-            errorMessage = "请先在设置中配置 Hermes API 密钥"
+        // Hermes 模式：至少要填 API 地址（自托管经常无鉴权，apiKey 空也允许）
+        if agentMode == .hermes && apiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            errorMessage = "请先在设置中配置 Hermes API 地址"
             showSettings = true
             return
         }
@@ -775,6 +855,9 @@ final class ChatViewModel {
                 messages: messages,
                 conversationID: "quick-ask"
             )
+        case .openclaw:
+            // OC4: 走 openClawClient，APIClient 内部按 .openclaw source 分流 baseURL/token
+            return openClawClient.streamCompletion(messages: messages)
         case .claudeCode: return claudeClient.streamCompletion(messages: messages)
         case .codex:      return codexClient.streamCompletion(messages: messages)
         }
@@ -919,6 +1002,9 @@ final class ChatViewModel {
                 switch mode {
                 case .hermes:
                     stream = apiClient.streamCompletion(messages: apiMessages)
+                case .openclaw:
+                    // OC4: 走 openClawClient，APIClient 内部按 .openclaw source 分流 baseURL/token
+                    stream = openClawClient.streamCompletion(messages: apiMessages)
                 case .directAPI:
                     // 在线 AI 走 bundled opencode agent runtime（v1.2.0+）：能读写文件、跑命令、联网。
                     // 每个对话独立 directory + sessionID，由 OpenCodeClient 内部管理。
@@ -1085,7 +1171,9 @@ final class ChatViewModel {
     private func autoTitleIfNeeded(forConversation id: String, fromUserText text: String) {
         guard let idx = conversations.firstIndex(where: { $0.id == id }) else { return }
         let current = conversations[idx].title
-        let isDefaultTitle = current.hasPrefix("对话 ")
+        // 默认 title 的两种形态：旧版 "对话 N" / 新版 "新对话"（v1.2.x 之后默认改名了）
+        // 之前只判 "对话 " 前缀导致新对话 title 永远不会被首条消息覆盖，这里补上 "新对话"
+        let isDefaultTitle = current.hasPrefix("对话 ") || current == "新对话"
         guard isDefaultTitle else { return }
         // 已经有用户消息（不是首条）就不再覆盖
         let priorUserCount = conversations[idx].messages.filter { $0.role == .user }.count
@@ -1339,7 +1427,12 @@ final class ChatViewModel {
     @discardableResult
     func newConversation(mode: AgentMode? = nil) -> Bool {
         guard conversations.count < kMaxConversations else { return false }
-        let resolved = mode ?? lastUsedMode
+        var resolved = mode ?? lastUsedMode
+        // M4: 守护切到 disabled mode —— 回退到 .directAPI（永远在 enabled 集合里）+ 提示用户去设置开启
+        if !EnabledModesStore.shared.isEnabled(resolved) {
+            errorMessage = "「\(resolved.label)」模式未启用，已切到在线 AI。可在设置 → AI 模式里开启"
+            resolved = .directAPI
+        }
         let conv = Conversation(
             title: "新对话",
             messages: [ChatMessage(
@@ -1605,26 +1698,36 @@ final class ChatViewModel {
         Task { @MainActor in
             let candidates: [AgentMode]
             switch agentMode {
-            case .hermes:     candidates = [.directAPI, .claudeCode, .codex, .hermes]
-            case .directAPI:  candidates = [.claudeCode, .codex, .hermes, .directAPI]
-            case .claudeCode: candidates = [.codex, .hermes, .directAPI]
-            case .codex:      candidates = [.hermes, .directAPI]
+            case .hermes:     candidates = [.directAPI, .openclaw, .claudeCode, .codex, .hermes]
+            case .directAPI:  candidates = [.openclaw, .claudeCode, .codex, .hermes, .directAPI]
+            case .openclaw:   candidates = [.claudeCode, .codex, .hermes, .directAPI, .openclaw]
+            case .claudeCode: candidates = [.codex, .hermes, .directAPI, .openclaw]
+            case .codex:      candidates = [.hermes, .directAPI, .openclaw]
             }
-            for next in candidates {
+            // M4: 过滤掉用户在设置里未启用的 mode；候选只在 enabled 集合内找下一档
+            let enabledSet = EnabledModesStore.shared.enabledModes
+            for next in candidates where enabledSet.contains(next) {
                 if await isModeUsable(next) {
                     agentMode = next
                     Haptic.tap(.alignment)
                     return
                 }
             }
-            // 一圈下来没找到能用的（理论上至少 hermes / directAPI 永远可切）—— 兜底保持原状
+            // 一圈下来没找到能用的（理论上 .directAPI 永远在 enabled 里）—— 兜底保持原状
             Haptic.tap(.alignment)
         }
     }
 
     /// 显式跳到某个 mode（顶部头部分段控件用）。CLI 缺失会 toast + 拒绝。
+    /// M4: 也会先检 EnabledModesStore，disabled mode 直接 toast 拒绝（理论上 UI 已经过滤了，
+    /// 但作为防御兜底防止其他通知触发 disabled mode 的切换）
     func setAgentMode(_ mode: AgentMode) {
         Task { @MainActor in
+            // 先检 enabled，再检 CLI 可用性
+            guard EnabledModesStore.shared.isEnabled(mode) else {
+                errorMessage = "「\(mode.label)」模式未启用，可在设置 → AI 模式里开启"
+                return
+            }
             if await isModeUsable(mode) {
                 agentMode = mode
                 Haptic.tap(.alignment)
@@ -1637,7 +1740,7 @@ final class ChatViewModel {
     /// - claudeCode / codex 必须有对应 CLI；缺失就 toast 提示让用户切到「在线 AI」，并返回 false
     private func isModeUsable(_ mode: AgentMode) async -> Bool {
         switch mode {
-        case .hermes, .directAPI:
+        case .hermes, .directAPI, .openclaw:
             return true
         case .claudeCode:
             if await CLIAvailability.claudeAvailable() { return true }
@@ -1933,10 +2036,14 @@ final class ChatViewModel {
 
     /// 拖入文档时调用 —— 不读内容，只保存路径，发送时让 AI 用 Read 工具自己访问。
     /// **v1.2.0+ 在线 AI 走 opencode agent runtime 有 Read 工具，可以读本地文件**，
-    /// 跟 Claude Code / Codex 一样开放。只有 Hermes 模式还是纯 HTTP chat completion，拒绝。
+    /// 跟 Claude Code / Codex 一样开放。Hermes / OpenClaw 模式还是纯 HTTP chat completion，拒绝。
     func attachDocumentPath(_ url: URL) {
         if agentMode == .hermes {
             errorMessage = "Hermes 模式无法读取本地文件，请切到 Claude Code / Codex / 在线 AI 再拖入"
+            return
+        }
+        if agentMode == .openclaw {
+            errorMessage = "OpenClaw 模式（HTTP API）无法读取本地文件，请切到 Claude Code / Codex / 在线 AI 再拖入"
             return
         }
         // 去重：同一文件已在队列里就不重复加

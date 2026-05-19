@@ -26,6 +26,20 @@
 
 ---
 
+> ## 🛡️ 认准官方下载源
+>
+> HermesPet 由 **[Basion (@basionwang-bot)](https://github.com/basionwang-bot)** 独立开发并以开源形式提供。
+>
+> **唯一官方下载源**：[github.com/basionwang-bot/HermesPet/releases](https://github.com/basionwang-bot/HermesPet/releases)
+>
+> 近期发现有第三方把本项目转发到个人网盘 / 二手平台 / 其他网站后冒充原作者作品。**所有官方渠道之外的 DMG 均不保证安全和正版**，请认准上方 GitHub Releases 页下载。
+>
+> 装好之后可在 App 内 **设置 → 关于 → 官方版本验证** 查看 codesign 签名校验结果（正版会显示原作者 Team ID `R34KL4X4D9`）。
+>
+> 如发现盗用或冒名行为，欢迎在 [GitHub Issues](https://github.com/basionwang-bot/HermesPet/issues) 反馈。
+
+---
+
 HermesPet 是一个常驻在 MacBook **顶部刘海下方**的 AI 聊天客户端 + 桌面伴侣。
 
 **最重要的一点**：装上就能用，不需要在你电脑上装任何命令行工具。打开 → 选个 AI 服务商（DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 等）→ 粘贴 API Key → 开聊。如果你额外装了 `claude` / `codex` CLI，App 会自动检测出来并解锁"读写本地文件 / 跑命令 / 生图"这些高级能力。

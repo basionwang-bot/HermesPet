@@ -79,4 +79,46 @@ enum ScreenCapture {
             return .failed(msg)
         }
     }
+
+    /// 截鼠标当前所在屏 → 直接返回 CGImage（UserIntentRecorder 给 Vision OCR 用，省一次 PNG 编解码）
+    /// 优先级：鼠标所在屏 > NSScreen.main > 屏幕数组第一个
+    /// 失败返回 nil；权限缺失也直接 nil，OCR 这种静默场景不弹权限框（让聊天截图那条路径触发授权）
+    static func captureMouseScreenAsCGImage() async -> CGImage? {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            return nil
+        }
+
+        // 找鼠标所在的 NSScreen → 转 displayID
+        let mouseLoc = NSEvent.mouseLocation
+        let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLoc) })
+            ?? NSScreen.main
+        let targetDisplayID: CGDirectDisplayID = {
+            if let dict = mouseScreen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
+                return dict
+            }
+            return CGMainDisplayID()
+        }()
+        guard let display = content.displays.first(where: { $0.displayID == targetDisplayID })
+                ?? content.displays.first else {
+            return nil
+        }
+
+        // 排除自己的窗口（避免聊天窗 / 桌宠出现在截图里影响 OCR）
+        let myBundleID = Bundle.main.bundleIdentifier
+        let myWindows = content.windows.filter { $0.owningApplication?.bundleIdentifier == myBundleID }
+
+        let filter = SCContentFilter(display: display, excludingWindows: myWindows)
+
+        let scale = mouseScreen?.backingScaleFactor ?? 2.0
+        let config = SCStreamConfiguration()
+        config.width = Int(CGFloat(display.width) * scale)
+        config.height = Int(CGFloat(display.height) * scale)
+        config.showsCursor = false
+        config.capturesAudio = false
+
+        return try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+    }
 }

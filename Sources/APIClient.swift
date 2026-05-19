@@ -25,35 +25,44 @@ final class APIClient: @unchecked Sendable {
         case hermes
         /// 直连第三方：无 sensible default URL（由 SettingsView ProviderPreset Picker 帮用户选）
         case direct
+        /// OpenClaw：默认 localhost:18789，model 是 agent id（"openclaw" / "openclaw/default"），
+        /// Bearer token 从 ~/.openclaw/openclaw.json 自动读（用户不填表），HermesPet 启动时由
+        /// OpenClawGatewayManager 解析并缓存
+        case openclaw
 
         var baseURLKey: String {
             switch self {
-            case .hermes: return "apiBaseURL"
-            case .direct: return "directAPIBaseURL"
+            case .hermes:   return "apiBaseURL"
+            case .direct:   return "directAPIBaseURL"
+            case .openclaw: return "openclawBaseURL"
             }
         }
         var apiKeyKey: String {
             switch self {
-            case .hermes: return "apiKey"
-            case .direct: return "directAPIKey"
+            case .hermes:   return "apiKey"
+            case .direct:   return "directAPIKey"
+            case .openclaw: return "openclawToken"   // 兜底；优先从 OpenClawGatewayManager.currentToken 读
             }
         }
         var modelNameKey: String {
             switch self {
-            case .hermes: return "modelName"
-            case .direct: return "directAPIModel"
+            case .hermes:   return "modelName"
+            case .direct:   return "directAPIModel"
+            case .openclaw: return "openclawAgentId"
             }
         }
         var defaultBaseURL: String {
             switch self {
-            case .hermes: return "http://localhost:8642/v1"
-            case .direct: return ""   // 没默认 —— UI 强制让用户选预设
+            case .hermes:   return "http://localhost:8642/v1"
+            case .direct:   return ""   // 没默认 —— UI 强制让用户选预设
+            case .openclaw: return "http://localhost:18789/v1"   // OpenClaw gateway 默认端口 + OpenAI 兼容路径
             }
         }
         var defaultModel: String {
             switch self {
-            case .hermes: return "hermes-agent"
-            case .direct: return ""   // 同上
+            case .hermes:   return "hermes-agent"
+            case .direct:   return ""   // 同上
+            case .openclaw: return "openclaw"   // 路由到 OpenClaw 配置的默认 agent
             }
         }
     }
@@ -72,6 +81,14 @@ final class APIClient: @unchecked Sendable {
             当前模式：Hermes
             当前后端：Hermes Gateway / OpenAI 兼容 API
             当前模型：\(modelName)
+            你可以称自己为 HermesPet 助手。不要自称 Claude、Claude Code 或 Codex。
+            """
+        case .openclaw:
+            identityBlock = """
+            当前模式：OpenClaw
+            当前后端：OpenClaw Gateway（npm 装的本地 agent 系统，端口 18789）
+            当前 agent：\(modelName)
+            你运行在 HermesPet 的「OpenClaw」模式，通过 OpenClaw 的 OpenAI 兼容 chatCompletions 端点路由到用户配置的 agent。
             你可以称自己为 HermesPet 助手。不要自称 Claude、Claude Code 或 Codex。
             """
         case .direct:
@@ -120,6 +137,11 @@ final class APIClient: @unchecked Sendable {
     private var apiKey: String {
         switch source {
         case .hermes:
+            return UserDefaults.standard.string(forKey: source.apiKeyKey) ?? ""
+        case .openclaw:
+            // OpenClaw: 优先用 OpenClawGatewayManager 从 ~/.openclaw/openclaw.json 解析出的 token
+            // （零配置体验关键 —— 用户不用填 Key）。fallback 到 UserDefaults 让高级用户能覆盖
+            if let t = OpenClawGatewayManager.shared.currentToken, !t.isEmpty { return t }
             return UserDefaults.standard.string(forKey: source.apiKeyKey) ?? ""
         case .direct:
             let providerID = UserDefaults.standard.string(forKey: "directAPIProviderID") ?? ""
@@ -281,30 +303,73 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: - Health Check
 
-    /// 健康检查 —— 两种 source 走不同 endpoint：
-    /// - `.hermes`：访问 `<host>/health`（Hermes Gateway 自定义的健康端点）
+    /// 健康检查 —— 三种 source 走不同 endpoint：
+    /// - `.hermes`：先访问 `<host>/health`（Hermes Gateway 自定义端点），失败回退试 `<baseURL>/models`
+    ///   （云端部署经常没开 /health，回退到 OpenAI 标准 /models 才能正确判断连通性）
     /// - `.direct`：访问 `<baseURL>/models`（OpenAI 标准端点，DeepSeek / 智谱 / Kimi / MiniMax / OpenAI 都支持）
+    /// - `.openclaw`：跟 `.hermes` 同款（OpenClaw gateway 自带 /health，开 endpoint 后 /models 也可用）
     func checkHealth() async throws -> Bool {
-        let url: URL
         switch source {
-        case .hermes:
-            url = try makeHealthURL()
+        case .hermes, .openclaw:
+            // 先试 /health
+            if let healthURL = try? makeHealthURL() {
+                var request = URLRequest(url: healthURL)
+                authorize(&request)
+                request.timeoutInterval = 5
+                if let (_, response) = try? await session.data(for: request),
+                   let code = (response as? HTTPURLResponse)?.statusCode,
+                   code == 200 {
+                    return true
+                }
+            }
+            // /health 没开 → 回退到 OpenAI 标准 /models
+            let modelsURL = try makeURL(path: "models")
+            var modelsReq = URLRequest(url: modelsURL)
+            authorize(&modelsReq)
+            modelsReq.timeoutInterval = 5
+            let (_, response) = try await session.data(for: modelsReq)
+            guard let code = (response as? HTTPURLResponse)?.statusCode else { return false }
+            // 200 表示通；401/403 表示连通但需要 key（自托管也可能开严格鉴权）
+            return code == 200 || code == 401 || code == 403
         case .direct:
             // baseURL 已经是 .../v1，直接拼 /models 即可拿到模型列表
             // 注：智谱 GLM 的 GET /models 不开放（403），但 401 / 403 都说明"连通了但 key 有问题"
             // 这里把 200/401/403 都算"通"，纯网络不通才算 disconnected
-            url = try makeURL(path: "models")
-        }
-        var request = URLRequest(url: url)
-        authorize(&request)
-        request.timeoutInterval = 5
-
-        let (_, response) = try await session.data(for: request)
-        guard let code = (response as? HTTPURLResponse)?.statusCode else { return false }
-        if source == .direct {
+            let url = try makeURL(path: "models")
+            var request = URLRequest(url: url)
+            authorize(&request)
+            request.timeoutInterval = 5
+            let (_, response) = try await session.data(for: request)
+            guard let code = (response as? HTTPURLResponse)?.statusCode else { return false }
             return code == 200 || code == 401 || code == 403
         }
-        return code == 200
+    }
+
+    /// 从 `<baseURL>/models` 拉可用模型列表（H3）
+    /// OpenAI 兼容服务标准响应：`{"data": [{"id": "model-name", ...}, ...], "object": "list"}`
+    func fetchModels() async throws -> [String] {
+        let url = try makeURL(path: "models")
+        var request = URLRequest(url: url)
+        authorize(&request)
+        request.timeoutInterval = 8
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResp = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        if httpResp.statusCode == 401 || httpResp.statusCode == 403 {
+            throw APIError.httpError(statusCode: httpResp.statusCode, body: "需要鉴权（请填写 API 密钥）")
+        }
+        guard (200..<300).contains(httpResp.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw APIError.httpError(statusCode: httpResp.statusCode, body: String(body.prefix(120)))
+        }
+        struct ModelsResponse: Decodable {
+            struct Item: Decodable { let id: String }
+            let data: [Item]
+        }
+        let parsed = try JSONDecoder().decode(ModelsResponse.self, from: data)
+        return parsed.data.map(\.id).sorted()
     }
 
     private func makeHealthURL() throws -> URL {

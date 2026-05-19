@@ -134,6 +134,31 @@ final class ActivityStore: @unchecked Sendable {
                     VALUES('delete', old.id, old.content);
             END
         """)
+
+        // user_intents: 屏幕意图采样（v1.3 用户意图感知功能）
+        // 事件触发器（回车 / ⌘S / ⌘C / ⌘V / app 切换 / 窗口标题变化 / Spotlight）
+        // 同 app+window_title 在 5min 内只采一次（去重靠 (app_bundle_id, window_title, timestamp) 节流）
+        // 30 天后 ocr_text 字段移到 ocr_text_compressed（gzip BLOB），原文清空
+        // 隐私敏感 app（1Password / 银行 / 微信私聊）命中 is_blacklisted=1，只记 meta 不存 ocr
+        exec("""
+            CREATE TABLE IF NOT EXISTS user_intents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                trigger_type TEXT NOT NULL,
+                app_bundle_id TEXT,
+                app_name TEXT,
+                window_title TEXT,
+                safari_url TEXT,
+                ocr_text TEXT,
+                ocr_text_compressed BLOB,
+                screen_hash TEXT,
+                followed_up INTEGER DEFAULT 0,
+                is_blacklisted INTEGER DEFAULT 0
+            )
+        """)
+        exec("CREATE INDEX IF NOT EXISTS idx_intents_time ON user_intents(timestamp)")
+        exec("CREATE INDEX IF NOT EXISTS idx_intents_app ON user_intents(app_bundle_id, window_title)")
+        exec("CREATE INDEX IF NOT EXISTS idx_intents_hash ON user_intents(screen_hash)")
     }
 
     // MARK: - 写入
@@ -280,6 +305,168 @@ final class ActivityStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - 用户意图采样（v1.3 意图感知功能）
+
+    /// 写一条意图采样记录。OCR 文本可空（黑名单 app 只记 meta）。
+    /// 节流由 UserIntentRecorder 在调用前判断（查 lastIntent 时间），这里不再去重。
+    func insertUserIntent(_ intent: UserIntent) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            let sql = """
+                INSERT INTO user_intents
+                (timestamp, trigger_type, app_bundle_id, app_name, window_title,
+                 safari_url, ocr_text, screen_hash, is_blacklisted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, intent.timestamp.timeIntervalSince1970)
+            sqlite3_bind_text(stmt, 2, intent.triggerType.rawValue, -1, Self.SQLITE_TRANSIENT)
+            self.bindOptionalText(stmt, 3, intent.appBundleID)
+            self.bindOptionalText(stmt, 4, intent.appName)
+            self.bindOptionalText(stmt, 5, intent.windowTitle)
+            self.bindOptionalText(stmt, 6, intent.safariURL)
+            self.bindOptionalText(stmt, 7, intent.ocrText)
+            self.bindOptionalText(stmt, 8, intent.screenHash)
+            sqlite3_bind_int(stmt, 9, intent.isBlacklisted ? 1 : 0)
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// 查最近 N 分钟内的所有意图记录（按时间倒序）
+    func recentUserIntents(withinMinutes minutes: Int, limit: Int = 100) -> [UserIntent] {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return [] }
+            let cutoff = Date().addingTimeInterval(-Double(minutes) * 60).timeIntervalSince1970
+            let sql = """
+                SELECT id, timestamp, trigger_type, app_bundle_id, app_name, window_title,
+                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted
+                FROM user_intents
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, cutoff)
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+            return self.readIntents(stmt: stmt)
+        }
+    }
+
+    /// Wave A3：当日（本地凌晨 0:00 至今）user_intents 总条数。
+    /// 用 COUNT(*) 而非加载完整行避免大量 IO；灵动岛 hoverCard 的"今天 X 次" caption 直接读这个。
+    func todayIntentCount() -> Int {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return 0 }
+            // 本地凌晨 0:00 时间戳
+            let startOfDay = Calendar.current.startOfDay(for: Date()).timeIntervalSince1970
+            let sql = "SELECT COUNT(*) FROM user_intents WHERE timestamp >= ?"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_double(stmt, 1, startOfDay)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+            return Int(sqlite3_column_int64(stmt, 0))
+        }
+    }
+
+    /// 查同一 app + window_title 最近一次采样时间 —— UserIntentRecorder 用它做 5min 节流
+    func lastIntentTimestamp(appBundleID: String?, windowTitle: String?) -> Date? {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return nil }
+            let sql = """
+                SELECT timestamp FROM user_intents
+                WHERE app_bundle_id IS ? AND window_title IS ?
+                ORDER BY timestamp DESC LIMIT 1
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            self.bindOptionalText(stmt, 1, appBundleID)
+            self.bindOptionalText(stmt, 2, windowTitle)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return Date(timeIntervalSince1970: sqlite3_column_double(stmt, 0))
+        }
+    }
+
+    /// 标记某条意图记录已被桌宠主动回应过（防止重复打扰）
+    func markIntentFollowedUp(_ intentID: Int) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "UPDATE user_intents SET followed_up = 1 WHERE id = ?",
+                                     -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, Int64(intentID))
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// 把 30 天前的 ocr_text 字段 gzip 压缩到 ocr_text_compressed，原文清 NULL 省空间
+    /// 真要分析时用 readIntentText 解压。每次 maintenance 调一次。
+    func compressOldIntents(olderThanDays days: Int = 30) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            let cutoff = Date().addingTimeInterval(-Double(days) * 86400).timeIntervalSince1970
+
+            // 找需要压缩的行（有 ocr_text 但还没压过 + 早于 cutoff）
+            let selectSQL = """
+                SELECT id, ocr_text FROM user_intents
+                WHERE timestamp < ? AND ocr_text IS NOT NULL AND ocr_text_compressed IS NULL
+                LIMIT 500
+            """
+            var selStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, selectSQL, -1, &selStmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(selStmt) }
+            sqlite3_bind_double(selStmt, 1, cutoff)
+
+            var toCompress: [(id: Int, text: String)] = []
+            while sqlite3_step(selStmt) == SQLITE_ROW {
+                let id = Int(sqlite3_column_int64(selStmt, 0))
+                if let text = self.textColumn(selStmt, 1) {
+                    toCompress.append((id, text))
+                }
+            }
+            guard !toCompress.isEmpty else { return }
+
+            // 批量压缩 + 写回
+            let updateSQL = "UPDATE user_intents SET ocr_text_compressed = ?, ocr_text = NULL WHERE id = ?"
+            for (id, text) in toCompress {
+                guard let data = text.data(using: .utf8),
+                      let gz = try? (data as NSData).compressed(using: .zlib) else { continue }
+                var upStmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, updateSQL, -1, &upStmt, nil) == SQLITE_OK else { continue }
+                sqlite3_bind_blob(upStmt, 1, gz.bytes, Int32(gz.length), Self.SQLITE_TRANSIENT)
+                sqlite3_bind_int64(upStmt, 2, Int64(id))
+                sqlite3_step(upStmt)
+                sqlite3_finalize(upStmt)
+            }
+        }
+    }
+
+    /// 读取一条记录的 OCR 全文 —— 自动从 ocr_text 或 ocr_text_compressed 取
+    func readIntentText(_ intentID: Int) -> String? {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return nil }
+            let sql = "SELECT ocr_text, ocr_text_compressed FROM user_intents WHERE id = ?"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, Int64(intentID))
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            if let txt = self.textColumn(stmt, 0) { return txt }
+            // 压缩字段：BLOB → gunzip
+            guard let blobPtr = sqlite3_column_blob(stmt, 1) else { return nil }
+            let blobLen = Int(sqlite3_column_bytes(stmt, 1))
+            let data = Data(bytes: blobPtr, count: blobLen)
+            guard let dec = try? (data as NSData).decompressed(using: .zlib) else { return nil }
+            return String(data: dec as Data, encoding: .utf8)
+        }
+    }
+
     // MARK: - 每日聚合（把 sessions 卷成 app_usage_stats）
 
     /// 把指定日期的所有 sessions 聚合到 app_usage_stats（增量，旧统计 REPLACE）
@@ -422,7 +609,48 @@ final class ActivityStore: @unchecked Sendable {
             self?.exec("DELETE FROM activity_sessions")
             self?.exec("DELETE FROM app_usage_stats")
             self?.exec("DELETE FROM user_questions")
+            self?.exec("DELETE FROM user_intents")
             self?.exec("VACUUM")
+        }
+    }
+
+    /// 清空意图记录（设置里"清空意图记录"按钮单独清这块）
+    func clearUserIntents() {
+        queue.sync { [weak self] in
+            self?.exec("DELETE FROM user_intents")
+        }
+    }
+
+    /// Wave E1：删单条意图记录（用户在"今日观察"列表点 × 触发）
+    func deleteUserIntent(id: Int) {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            let sql = "DELETE FROM user_intents WHERE id = ?"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, Int64(id))
+            _ = sqlite3_step(stmt)
+        }
+    }
+
+    /// Wave E1：取最近 N 条意图记录（不限时间，给"今日观察"用 —— 调用方按 timestamp 过滤）。
+    /// 跟 recentUserIntents 区别：那个按"最近 X 分钟"，这个按"最近 N 条"。
+    func recentUserIntents(limit: Int) -> [UserIntent] {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return [] }
+            let sql = """
+                SELECT id, timestamp, trigger_type, app_bundle_id, app_name, window_title,
+                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted
+                FROM user_intents
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            return self.readIntents(stmt: stmt)
         }
     }
 
@@ -437,6 +665,8 @@ final class ActivityStore: @unchecked Sendable {
     /// 所以只在阈值之上才跑，平时靠 incremental autovacuum）
     func performMaintenance(sessionsRetentionDays: Int = 90,
                             userQuestionsRetentionDays: Int = 90,
+                            userIntentsRetentionDays: Int = 180,
+                            intentsCompressionDays: Int = 30,
                             statsRetentionDays: Int = 365,
                             sizeThresholdMB: Int = 50) {
         queue.async { [weak self] in
@@ -445,6 +675,7 @@ final class ActivityStore: @unchecked Sendable {
             let now = Date().timeIntervalSince1970
             let sessionCutoff = now - Double(sessionsRetentionDays) * 86400
             let questionCutoff = now - Double(userQuestionsRetentionDays) * 86400
+            let intentCutoff = now - Double(userIntentsRetentionDays) * 86400
             let statsCutoffDate: String = {
                 let date = Date().addingTimeInterval(-Double(statsRetentionDays) * 86400)
                 let f = DateFormatter()
@@ -457,6 +688,7 @@ final class ActivityStore: @unchecked Sendable {
             self.deleteWhere(table: "activity_events", column: "timestamp", lessThan: eventCutoff)
             self.deleteWhere(table: "activity_sessions", column: "end_time", lessThan: sessionCutoff)
             self.deleteWhere(table: "user_questions", column: "timestamp", lessThan: questionCutoff)
+            self.deleteWhere(table: "user_intents", column: "timestamp", lessThan: intentCutoff)
             // app_usage_stats 用 date 字段（TEXT 类型 yyyy-MM-dd），按字符串比较
             var stmt: OpaquePointer?
             if sqlite3_prepare_v2(db, "DELETE FROM app_usage_stats WHERE date < ?",
@@ -465,6 +697,40 @@ final class ActivityStore: @unchecked Sendable {
                 sqlite3_step(stmt)
             }
             sqlite3_finalize(stmt)
+
+            // 30 天前的意图记录 OCR 文本压缩到 BLOB，原文清 NULL
+            // 这里直接内联做（compressOldIntents 是 async 队列调用，避免嵌套 async 死锁）
+            let compressCutoff = now - Double(intentsCompressionDays) * 86400
+            let compressSelectSQL = """
+                SELECT id, ocr_text FROM user_intents
+                WHERE timestamp < ? AND ocr_text IS NOT NULL AND ocr_text_compressed IS NULL
+                LIMIT 500
+            """
+            var compStmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, compressSelectSQL, -1, &compStmt, nil) == SQLITE_OK {
+                sqlite3_bind_double(compStmt, 1, compressCutoff)
+                var pending: [(id: Int, text: String)] = []
+                while sqlite3_step(compStmt) == SQLITE_ROW {
+                    let id = Int(sqlite3_column_int64(compStmt, 0))
+                    if let text = self.textColumn(compStmt, 1) {
+                        pending.append((id, text))
+                    }
+                }
+                sqlite3_finalize(compStmt)
+                for (id, text) in pending {
+                    guard let data = text.data(using: .utf8),
+                          let gz = try? (data as NSData).compressed(using: .zlib) else { continue }
+                    var upStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "UPDATE user_intents SET ocr_text_compressed = ?, ocr_text = NULL WHERE id = ?", -1, &upStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_blob(upStmt, 1, gz.bytes, Int32(gz.length), Self.SQLITE_TRANSIENT)
+                        sqlite3_bind_int64(upStmt, 2, Int64(id))
+                        sqlite3_step(upStmt)
+                    }
+                    sqlite3_finalize(upStmt)
+                }
+            } else {
+                sqlite3_finalize(compStmt)
+            }
 
             // WAL checkpoint(TRUNCATE)：把 WAL 文件清空（数据已合并回主 db）
             self.exec("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -530,6 +796,27 @@ final class ActivityStore: @unchecked Sendable {
                 mouseClicks: Int(sqlite3_column_int64(stmt, 8)),
                 pasteboardChanges: Int(sqlite3_column_int64(stmt, 9)),
                 isExcluded: sqlite3_column_int(stmt, 10) != 0
+            ))
+        }
+        return out
+    }
+
+    private func readIntents(stmt: OpaquePointer?) -> [UserIntent] {
+        var out: [UserIntent] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let triggerRaw = textColumn(stmt, 2) ?? ""
+            out.append(UserIntent(
+                timestamp: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+                triggerType: UserIntent.TriggerType(rawValue: triggerRaw) ?? .returnKey,
+                appBundleID: textColumn(stmt, 3),
+                appName: textColumn(stmt, 4),
+                windowTitle: textColumn(stmt, 5),
+                safariURL: textColumn(stmt, 6),
+                ocrText: textColumn(stmt, 7),
+                screenHash: textColumn(stmt, 8),
+                isBlacklisted: sqlite3_column_int(stmt, 10) != 0,
+                id: Int(sqlite3_column_int64(stmt, 0)),
+                followedUp: sqlite3_column_int(stmt, 9) != 0
             ))
         }
         return out
@@ -659,4 +946,66 @@ struct UserQuestion: Identifiable {
     let charCount: Int
     let hasImages: Bool
     let hasDocuments: Bool
+}
+
+/// 用户意图采样记录（v1.3 意图感知）—— 每次事件触发器命中后存一条
+struct UserIntent: Identifiable {
+    /// 触发器类型 —— 决定了"这一刻为啥要采"
+    enum TriggerType: String {
+        /// 按下回车键（提交输入）—— 用户原始想法的核心触发器
+        case returnKey      = "return"
+        /// ⌘S 保存文件 —— 完成一段产出
+        case saveShortcut   = "save"
+        /// ⌘C 复制 —— 用户认为某段内容值得保留
+        case copyShortcut   = "copy"
+        /// ⌘V 粘贴 —— 用户在跨任务搬运内容
+        case pasteShortcut  = "paste"
+        /// NSWorkspace app 切换 —— 注意力转移
+        case appSwitch      = "app_switch"
+        /// 同一 app 窗口标题变化 —— 任务粒度变化（换文件/换 tab）
+        case windowChange   = "window_change"
+        /// ⌘Space / ⌘⇧Space —— 用户在查工具
+        case spotlight      = "spotlight"
+    }
+
+    let id: Int
+    let timestamp: Date
+    let triggerType: TriggerType
+    let appBundleID: String?
+    let appName: String?
+    let windowTitle: String?
+    /// 仅 Safari 时取 URL（用 AppleScript / Accessibility 拿）
+    let safariURL: String?
+    /// 屏幕 OCR 全文 —— 30 天后移到压缩字段，这里读出来可能是 nil
+    let ocrText: String?
+    /// OCR 内容 sha256 前 16 位 —— Phase 2 模式识别用：相同 hash 多次出现 = "在重复某件事"
+    let screenHash: String?
+    /// 桌宠是否已经基于这条主动 follow up（防止重复打扰，Phase 3 用）
+    let followedUp: Bool
+    /// 是否命中隐私黑名单（命中时不存 ocr_text，只存 meta）
+    let isBlacklisted: Bool
+
+    init(timestamp: Date = Date(),
+         triggerType: TriggerType,
+         appBundleID: String?,
+         appName: String?,
+         windowTitle: String?,
+         safariURL: String? = nil,
+         ocrText: String?,
+         screenHash: String?,
+         isBlacklisted: Bool = false,
+         id: Int = 0,
+         followedUp: Bool = false) {
+        self.id = id
+        self.timestamp = timestamp
+        self.triggerType = triggerType
+        self.appBundleID = appBundleID
+        self.appName = appName
+        self.windowTitle = windowTitle
+        self.safariURL = safariURL
+        self.ocrText = ocrText
+        self.screenHash = screenHash
+        self.followedUp = followedUp
+        self.isBlacklisted = isBlacklisted
+    }
 }

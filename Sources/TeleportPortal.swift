@@ -28,7 +28,10 @@ struct TeleportPortalView: View {
     @State private var rotation: Double = 0
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0/30.0, paused: false)) { context in
+        // 性能优化：传送门收起来时（openness 接近 0）停掉 TimelineView。
+        // 之前 paused: false 让 Canvas 永远 30fps 跑 sin/cos/Path，即使 .opacity(0) 视觉不可见。
+        // 桌宠没在传送时整天空跑动画占 CPU。openness 阈值用 0.01 给 spring 动画收尾留余量。
+        TimelineView(.animation(minimumInterval: 1.0/30.0, paused: state.openness < 0.01)) { context in
             Canvas { ctx, size in
                 drawPortal(in: &ctx, size: size, t: context.date.timeIntervalSinceReferenceDate)
             }

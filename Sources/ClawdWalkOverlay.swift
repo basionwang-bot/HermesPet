@@ -123,6 +123,10 @@ final class ClawdWalkController {
     private var glassesPendingUntil: Date? = nil
     private var glassesEvalTask: Task<Void, Never>? = nil
 
+    // MARK: - Wave A1 实时存在感
+    /// 上次触发 glance 的时间，1s 内只触发一次（防止用户连按回车桌宠抽搐）
+    private var lastGlanceAt: Date? = nil
+
     // MARK: - 灵动岛避让 + 传送门
     /// 灵动岛物理水平占用范围两侧再各 buffer 30pt 形成"避让带" —— 桌宠普通漫步不进，必须穿越时走传送门
     private static let notchAvoidBuffer: CGFloat = 30
@@ -160,6 +164,7 @@ final class ClawdWalkController {
     private func petVisual(for mode: AgentMode) -> PetVisualKind {
         switch mode {
         case .directAPI:  return .cloud
+        case .openclaw:   return .fox     // PR-B: fomo 九尾狐
         case .hermes:     return .horse
         case .codex:      return .terminal
         case .claudeCode: return .clawd
@@ -272,6 +277,41 @@ final class ClawdWalkController {
         nc.addObserver(forName: .init("HermesPetScreenParamsChanged"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.handleScreenParamsChanged() }
         }
+
+        // Wave A1 实时存在感：UserIntentRecorder 每次落库一条意图就广播这个通知。
+        // 桌宠收到后做 0.4s 的"瞥一眼"动画（rotation 摆头 + 白色 flash），1s 内去重。
+        nc.addObserver(forName: .init("HermesPetIntentRecorded"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.handleIntentRecorded() }
+        }
+    }
+
+    /// Wave A1：UserIntentRecorder 落库后调，触发桌宠"瞥一眼"
+    /// - 桌宠没显示 / 正在被拖动 / 正在吃文件时跳过（忙时不打扰）
+    /// - quietMode 开启时跳过（尊重用户的安静偏好）
+    /// - 1s 内多次触发只动一次（连按回车防抽搐）
+    private func handleIntentRecorded() {
+        guard isShown else { return }
+        guard !state.isBeingDragged, !state.isEating else { return }
+        let quiet = UserDefaults.standard.bool(forKey: "quietMode")
+        guard !quiet else { return }
+        if let last = lastGlanceAt, Date().timeIntervalSince(last) < 1.0 { return }
+        lastGlanceAt = Date()
+
+        // 通知 SwiftUI View 做 rotation + flash 动画
+        state.glancePulse &+= 1
+
+        // Clawd 是像素图，额外切 pose 让眼睛看一下（其他 sprite 没有 pose，靠 rotation 表达）
+        if state.visual == .clawd, state.pose == .rest {
+            let lookRight = Bool.random()
+            setPoseLookingAt(worldRight: lookRight)
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                // 仅当 pose 还是 look 系列时才回 rest，避免覆盖中途用户 hover / 任务态切换
+                if state.pose == .lookLeft || state.pose == .lookRight {
+                    state.pose = .rest
+                }
+            }
+        }
     }
 
     /// 屏幕参数变化处理：把桌宠重新摆到新屏的合法位置（walkY 重算 + positionX clamp 到屏内）
@@ -296,17 +336,20 @@ final class ClawdWalkController {
     private func shouldShow() -> Bool {
         guard let vm = viewModel else { return false }
         guard vm.clawdWalkEnabled else { return false }
-        guard vm.agentMode == .claudeCode || vm.agentMode == .directAPI || vm.agentMode == .hermes || vm.agentMode == .codex else { return false }
+        // 5 个 mode 都允许桌面漫步（.openclaw 加在内，对应 fomo 九尾狐 PR-B）
+        guard vm.agentMode == .claudeCode || vm.agentMode == .directAPI ||
+              vm.agentMode == .openclaw || vm.agentMode == .hermes ||
+              vm.agentMode == .codex else { return false }
         // 戴眼镜动画期间强制保持显示 —— 用户能看完整个"掏眼镜→戴上→保持→摘下"流程，
         // 之后再按常规规则判定是否回家（vision 切换后通常 streaming 仍在跑会回家）
         if let pending = glassesPendingUntil, pending > Date() { return true }
         // streaming 时永远不出来（不管哪种模式），避免抢灵动岛进度的注意力
         if vm.conversations.contains(where: { $0.isStreaming }) { return false }
-        // directAPI 在线 AI 模式：宠物直接到桌面，不等 idle（云朵小精灵主动陪伴）
-        if vm.agentMode == .directAPI { return true }
+        // HTTP API 类 mode：宠物直接到桌面，不等 idle（云朵 / fomo 都属于主动陪伴系）
+        if vm.agentMode == .directAPI || vm.agentMode == .openclaw { return true }
         // 自由活动模式：放行
         if vm.clawdFreeRoamEnabled { return true }
-        // 普通模式（Claude / Hermes）：必须 idle 3min 才出来
+        // 普通模式（Claude / Hermes / Codex）：必须 idle 3min 才出来
         return IdleStateTracker.shared.isSleeping
     }
 
@@ -418,6 +461,7 @@ final class ClawdWalkController {
         })
 
         isShown = true
+        state.spriteAnimated = true   // 桌宠显示 → sprite 内部 TimelineView 启动
         startWalkTimer()
     }
 
@@ -464,8 +508,12 @@ final class ClawdWalkController {
                 NSRect(x: backX, y: islandTopY, width: windowSize.width, height: windowSize.height),
                 display: true
             )
-        }, completionHandler: { [weak win] in
-            Task { @MainActor in win?.orderOut(nil) }
+        }, completionHandler: { [weak win, weak state] in
+            Task { @MainActor in
+                win?.orderOut(nil)
+                // orderOut 完成后才关 sprite 动画 —— 不然飞回灵动岛途中桌宠会瞬间僵硬
+                state?.spriteAnimated = false
+            }
         })
     }
 
@@ -565,6 +613,7 @@ final class ClawdWalkController {
         switch lastMode {
         case .hermes:     return .green
         case .directAPI:  return .indigo
+        case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
         }
@@ -1175,6 +1224,7 @@ final class ClawdWalkController {
         switch state.visual {
         case .clawd:    persona = "Clawd 🦞"
         case .cloud:    persona = "云朵小精灵 ☁️"
+        case .fox:      persona = "九尾狐 fomo 🦊"
         case .horse:    persona = "金黄小马 🐴"
         case .terminal: persona = "终端小精灵 💻"
         }
@@ -1198,6 +1248,9 @@ final class ClawdWalkController {
         case .cloud:
             folderQuotes = ["飘过看看~", "里面有啥?", "云遮着了", "好奇好奇", "藏着什么?"]
             fileQuotes   = ["飘着瞧瞧~", "新东西?", "嗯～", "看看名字", "挺有意思"]
+        case .fox:
+            folderQuotes = ["嗯…有点东西", "里面藏什么", "嗅嗅~", "月光照过", "九尾扫过~"]
+            fileQuotes   = ["这名字…", "好奇好奇", "嗯～看看", "瞄一眼", "新的耶"]
         case .horse:
             folderQuotes = ["哒哒~ 这个", "里面装啥?", "嗅一嗅~", "挺有趣", "进去看看?"]
             fileQuotes   = ["哒哒哒~", "新东西!", "嗅嗅看", "瞄一眼", "听过这名"]
@@ -1323,6 +1376,18 @@ final class ClawdWalkController {
         state.bubbleVisible = true
         bubbleWindow?.orderFront(nil)
         bubbleHideAt = Date().addingTimeInterval(duration)
+    }
+
+    // MARK: - Wave B 外部接口（IntentInstantFeedback 调用）
+
+    /// 桌宠当前是否在屏幕上展示（IntentInstantFeedback 路由用：visible 走气泡，hidden 走灵动岛）
+    var isPresentingVisible: Bool { isShown }
+
+    /// 给桌宠头顶冒一句"当下感知"短气泡（B 阶段反馈通道）。
+    /// 文字应该已经过 IntentCopyWriter 截断到 12 字以内
+    func showIntentBubble(text: String, duration: TimeInterval = 2.5) {
+        guard isShown else { return }
+        showBubble(text: text, duration: duration)
     }
 
     /// 撞墙时 30% 概率冒一句"哎呀"
@@ -1510,6 +1575,7 @@ final class ClawdWalkController {
         state.pose = .rest
         state.bubbleVisible = false
         state.bubbleText = ""
+        state.spriteAnimated = false   // 隐藏 = 关 sprite 内部 TimelineView
         nextBubbleAt = nil
         bubbleHideAt = nil
         patrol = nil
@@ -1567,6 +1633,17 @@ final class ClawdWalkState {
     /// 当前要渲染哪一种像素宠物。Controller 根据 agentMode 设置：
     /// claudeCode → .clawd（橙色螃蟹）；directAPI → .cloud（indigo 云朵）
     var visual: PetVisualKind = .clawd
+
+    /// sprite TimelineView 是否启用 —— 桌宠在屏幕外 / orderOut 后仍占 SwiftUI 子树，
+    /// 不关掉的话 ClawdView/HorseView/CloudPetView/TerminalView 内部 60fps TimelineView
+    /// 会一直跑空转（v1.2.9 CPU 高负载主因之一：sample 抓到隐藏 NSWindow 的 sprite 还在 draw）。
+    /// Controller 在 show 时置 true，stopAndHide 完成 orderOut 后置 false。
+    var spriteAnimated: Bool = false
+
+    /// Wave A1 实时存在感：每次 UserIntentRecorder 落库一条意图就 +1，
+    /// ClawdWalkView 监听数值变化触发"瞥一眼"动画（rotation 摆头 + 白色 flash）。
+    /// 用 Int 而非 Bool / Date 是为了让 .onChange 准确捕获每次触发（同值不触发）
+    var glancePulse: Int = 0
 }
 
 /// 桌面漫步支持的像素宠物视觉。
@@ -1577,6 +1654,7 @@ final class ClawdWalkState {
 enum PetVisualKind {
     case clawd
     case cloud
+    case fox        // OpenClaw mode 的 fomo 九尾狐
     case horse
     case terminal
 }
@@ -1663,6 +1741,13 @@ struct ClawdWalkView: View {
     @State private var glassesProgress: Double = 0
     @State private var glassesHideTask: Task<Void, Never>?
 
+    // MARK: - Wave A1 glance 动画
+    /// 瞥一眼时短暂摆头的旋转角（0 → 6° → 0），由 state.glancePulse 变化触发
+    @State private var glanceRotation: Double = 0
+    /// 瞥一眼时身上闪一下的白色 alpha（0 → 0.28 → 0），用 plusLighter 混合给"灯一闪"的感觉
+    @State private var glanceFlash: Double = 0
+    @State private var glanceTask: Task<Void, Never>?
+
     /// 全局调色板存储 —— @Observable，用户改色后此 View 自动 invalidate 重渲染
     @State private var paletteStore = PetPaletteStore.shared
 
@@ -1677,6 +1762,7 @@ struct ClawdWalkView: View {
         switch state.visual {
         case .clawd:    return paletteStore.palette(for: .claudeCode)
         case .cloud:    return paletteStore.palette(for: .directAPI)
+        case .fox:      return paletteStore.palette(for: .openclaw)
         case .horse:    return paletteStore.palette(for: .hermes)
         case .terminal: return paletteStore.palette(for: .codex)
         }
@@ -1688,26 +1774,33 @@ struct ClawdWalkView: View {
             // 保证 walk/jump/drag/facing 等手势行为视觉一致。
             Group {
                 let palette = currentPalette
+                // 桌宠隐藏时（orderOut 后 spriteAnimated=false），sprite 切静态帧，
+                // sprite 内部 TimelineView 不再 60fps 空转
+                let anim = state.spriteAnimated
                 switch state.visual {
                 case .clawd:
                     // 把 state.isWalking 传给 ClawdView，让它内部播放官方走路动画
                     // （4 腿对角交替、身体 bob、手臂上下摆 —— 这些是 SVG 原版 keyframe，
                     // 不再用 SwiftUI 外层 bobOffset 重复模拟）
                     ClawdView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
-                              palette: palette)
+                              palette: palette, animated: anim)
                 case .cloud:
                     CloudPetView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
-                                 glassesProgress: glassesProgress, palette: palette)
+                                 glassesProgress: glassesProgress, palette: palette, animated: anim)
+                case .fox:
+                    // OpenClaw mode 的 fomo 九尾狐桌宠（PR-B）
+                    FomoView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
+                             palette: palette, animated: anim)
                 case .horse:
                     // 金黄小马 —— trot 步态 + 鬃毛尾巴飘动由 HorseView 内部自驱
                     HorseView(pose: state.pose, height: clawdHeight, isWalking: state.isWalking,
-                              palette: palette)
+                              palette: palette, animated: anim)
                 case .terminal:
                     // 终端窗口 —— 光标闪烁 + 代码行抖动由 TerminalView 内部自驱
                     // isWorking 暂时跟 isWalking 联动（漫步态 = 在敲码氛围）
                     TerminalView(pose: state.pose, height: clawdHeight,
                                  isWalking: state.isWalking, isWorking: state.isWalking,
-                                 palette: palette)
+                                 palette: palette, animated: anim)
                 }
             }
             // 朝向 + 吃东西时的整体缩放（鼓胀 / 缩小消失）合到一个 scaleEffect
@@ -1721,6 +1814,14 @@ struct ClawdWalkView: View {
             .animation(.easeInOut(duration: 0.18), value: state.facingRight)
             .animation(.spring(response: 0.28, dampingFraction: 0.6), value: state.eatScale)
             .animation(.spring(response: 0.25, dampingFraction: 0.6), value: state.isBeingDragged)
+            // Wave A1 glance：摆头 + 白色闪一下，由 state.glancePulse 触发
+            .rotationEffect(.degrees(glanceRotation), anchor: .bottom)
+            .overlay(
+                Rectangle()
+                    .fill(Color.white.opacity(glanceFlash))
+                    .blendMode(.plusLighter)
+                    .allowsHitTesting(false)
+            )
             .contentShape(Rectangle())   // 透明 padding 不接收点击
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1775,7 +1876,34 @@ struct ClawdWalkView: View {
                 glassesProgress = 0
             }
         }
-        .onDisappear { glassesHideTask?.cancel() }
+        // Wave A1：当 controller 把 state.glancePulse +1 时触发 0.4s 摆头 + flash
+        .onChange(of: state.glancePulse) { _, _ in
+            triggerGlanceAnimation()
+        }
+        .onDisappear {
+            glassesHideTask?.cancel()
+            glanceTask?.cancel()
+        }
+    }
+
+    /// Wave A1：桌宠"瞥一眼"动画 —— 摆头 6° + 身上一闪，总时长约 0.4s
+    /// 用 spring 让回弹有弹性；flash 用 plusLighter 不抢眼但能感觉到"动了一下"
+    private func triggerGlanceAnimation() {
+        glanceTask?.cancel()
+        // 起势：摆头 + flash 同时拉起
+        withAnimation(.spring(response: 0.18, dampingFraction: 0.55)) {
+            glanceRotation = 6
+            glanceFlash = 0.28
+        }
+        glanceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            if Task.isCancelled { return }
+            // 回弹：摆头 + flash 一起回 0
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.85)) {
+                glanceRotation = 0
+                glanceFlash = 0
+            }
+        }
     }
 }
 

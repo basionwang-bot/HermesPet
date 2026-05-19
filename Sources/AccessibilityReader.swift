@@ -120,6 +120,25 @@ enum AccessibilityReader {
     static var frontmostApp: NSRunningApplication? {
         NSWorkspace.shared.frontmostApplication
     }
+
+    /// 前台 app 的活动窗口标题（无 Accessibility 权限 / app 没暴露窗口时返回 nil）。
+    /// UserIntentRecorder 用它给意图记录打标签 —— "在 Xcode 写 ChatView.swift 时按了回车"。
+    static func frontWindowTitle() -> String? {
+        guard isTrusted, let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedWindow: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp,
+                                            kAXFocusedWindowAttribute as CFString,
+                                            &focusedWindow) == .success,
+              let window = focusedWindow else { return nil }
+        var titleValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(window as! AXUIElement,
+                                            kAXTitleAttribute as CFString,
+                                            &titleValue) == .success,
+              let title = titleValue as? String,
+              !title.isEmpty else { return nil }
+        return title
+    }
 }
 
 /// 模拟键盘事件 —— 用 CGEvent 把指定文本通过 ⌘V 粘贴到当前 focused app。

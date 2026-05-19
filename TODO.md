@@ -646,3 +646,219 @@ PR 作者 simpledavid，3 个独立 commit 塞一个 PR（3011+ 行）。本地 
 
 > 最后更新：2026-05-17（v1.3 Permission UI Phase 1/2/3 全部完成：在线 AI + Claude CLI HTTP hook + Codex CLI command hook + Question 卡片，3 个 mode 全覆盖）
 > 2026-05-17 工程质量轮：13 条 Swift 6 isolation 警告全清零（PermissionHookServer / PermissionWindowController / CanvasService 共 20 条 → 0）；截图改事件驱动告别 250ms 硬编码；ActivityStore 加 performMaintenance 解决 20MB+ sqlite 膨胀
+
+---
+
+## [P0-v1.3.5 智能感知精雕] 用户意图反馈调优（2026-05-19）
+
+> **背景**：v1.3 Phase 1/2 已经把"静默收集 + pattern detector + 弹卡"链路跑通了。但实战测试发现两个核心问题：
+> 1. **延后笨** —— detector 是"事后归纳型"（攒到 3 次重复才说话），用户问题往往 5min 前已解决，桌宠 5min 后才插嘴 = 显笨
+> 2. **冷酷感** —— 全程静默观察 + 偶尔弹卡 = 像监工不像伙伴；用户感知不到"AI 在场"
+>
+> 解决思路：把反馈拆成**三层频率**（实时存在感 / 当下感知 / 总结归纳），把现有"事后归纳"的 detector 降级到第 3 层，新建一批"单次命中即反馈"的 detector 作为第 2 层主菜单。桌宠 + 灵动岛**双通道协作**，不绑定单一出场角色。
+>
+> **关键原则**：
+> - 反馈一定要**新鲜**（事件发生后 60s 内，过期不发）
+> - 反馈一定要**带具体名词**（OCR 提不到名词的，直接不发，宁可少不可滥）
+> - 反馈一定要**有抑制**（打字时不打扰、permission/summary 显示中不打扰、5min 内同关键词不重复）
+> - 桌宠通道感性、灵动岛通道理性，**同一事件不双通道齐发**
+
+### v1.3 Phase 1 已完成（静默收集）✅
+- [x] ActivityStore 加 user_intents 表（screen_hash / ocr_text / app_bundle_id / window_title / trigger_type / timestamp / compressed_ocr blob / followed_up / is_blacklisted）
+- [x] UserIntentRecorder.swift —— 监听 Enter / ⌘S / ⌘C / ⌘V / 切 app / 切窗口，截屏 + Vision OCR，5min 同 app+window 节流，硬黑名单（1Password / Bitwarden / WeChat / QQ / Alipay），跳过 HermesPet 自身
+- [x] AccessibilityReader.frontWindowTitle() —— AXUIElement 读焦点窗口标题
+- [x] ScreenCapture.captureMouseScreenAsCGImage() —— 鼠标所在屏 CGImage 用于 OCR
+- [x] HermesPetApp 启动注入 + SettingsView userIntentSection（开关 / 今日条数 / 隐私文案 / 一键清空）
+- [x] ActivityStore.performMaintenance 加 intents 保留 180 天 + 30 天后 gzip 压缩 OCR 文本
+
+### v1.3 Phase 2 已完成（pattern 反向唤醒）✅
+- [x] IntentPatternDetector.swift —— 重复屏幕 (60min ≥3 次同 hash) + 报错命中 (关键词词典) 两个 detector，1h 自然冷却 + 24h 拒绝冷却
+- [x] IntentSuggestionWindowController.swift —— 独立 NSWindow 紧贴灵动岛下方，140pt 高，8s 自动消失，知道了 / 看看吧 双按钮，决策 #6 修复（pure opacity transition 避免 NSHostingView transform invalidation 崩溃）
+- [x] IntentNotificationManager.swift —— detector.onDetected → 路由到 SuggestionWindow，接受 → vm.inputText 预填 + 打开聊天 + 标 followedUp，拒绝/超时 → markRejected 加 24h 冷却
+
+---
+
+### Wave A：实时存在感（最便宜的胜利，先做这一波看效果）
+
+> 让用户**每次回车/⌘C/⌘S/⌘V 都知道"AI 在看"**，但不打扰、不分析。0.3-0.5s 的微反馈。
+> 目标：从"完全静默"升级到"诚实地表示存在"。
+> 这一波纯前端动画，零 AI 调用，零数据存储改动，做完应该一眼能感受到差别。
+
+- [ ] **A1. 桌宠"瞥一眼"动画** —— 在 LifeSignsModifier.swift 加 `glance(direction)` token，0.4s 头/眼向触发位置偏转 + 弹回。所有 4 个 sprite（Clawd / Coco / Hermes 羽毛 / 云朵）实现各自的 glance 表达（Clawd 眼睛转 / 羽毛抖一下 / 云朵眼镜闪一下 / Coco 字符闪一下）。UserIntentRecorder 每次落库成功后 post `HermesPetIntentRecorded` 通知（带 trigger 类型），ClawdWalkOverlay 收到通知触发 glance。**节流：连续触发 1s 内只 glance 一次**
+- [ ] **A2. 灵动岛"扫光"微反馈** —— PillView 收到 `HermesPetIntentRecorded` 通知时，NotchShape 顶部 0.3s 一道 mode 主色横向 shimmer（从左到右扫过），blendMode .plusLighter，几乎察觉不到但能感受到"动了一下"。idle / hover 状态都生效，permission/summary 显示中静默
+- [ ] **A3. 灵动岛 hover tooltip 显示"今日观察次数"** —— hover 后 1s 显示一行 caption "今天观察了 X 次"，让用户知道系统在工作（透明感地基）。数据从 ActivityStore.recentUserIntents 当日 count 拿，AppStorage 缓存 30s 不每次查 sqlite
+- [ ] **A4. quietMode 全覆盖** —— 桌宠瞥眼 + 灵动岛扫光都要尊重 `@AppStorage("quietMode")`，开静默模式时跳过这些动画（跟 v1.2.x 现有的 quietMode 行为一致）
+
+---
+
+### Wave B：单次命中 detector（核心智能感来源，最关键的一波）
+
+> 把当前 detector 从"攒 3 次"改成"**当下事件就判断**"。新增 3 个**不依赖历史**的 detector，全部在事件发生后 < 1s 内给出反馈。
+> 这一波做完，"延后笨"问题应该消失 80%。
+
+- [ ] **B1. `copied_error_text` detector** —— UserIntentRecorder 现有 ⌘C 监听点扩展：抓 NSPasteboard.string 看是否符合 stack trace 风格（含 `at /` `line:` `func.` `Thread:` `Traceback` 行首多空白等启发式规则）+ 长度在 30-2000 字之间。命中后 0.5s 内冒泡。**关键**：不依赖 OCR，直接读剪贴板原文 → 反馈最快
+- [ ] **B2. `window_title_signal` detector** —— UserIntentRecorder 切 app/切窗口时读 AX title，title 含 `error|exception|崩溃|stack overflow|debugger|crash|Stack Overflow` → 立即灵动岛弹临时标签 1.5s（"看到你在查报错"）。**比 OCR 快 10 倍**（不用截屏）
+- [ ] **B3. `screen_keyword_hit` detector** —— OCR 完成后**当下这一次**就含关键词 → 立即反馈，不等累积。新规则：① 关键词必须出现在屏幕中央 60% 区域（VNRecognizedTextObservation.boundingBox 检查）② 关键词上下文必须包含**具体名词**（用简单 NLP：含连字符 / 驼峰 / 文件扩展名 / 引号包裹的 token）③ 同一关键词 5min 内不重复
+- [ ] **B4. 抑制规则集** —— 新建 `IntentFeedbackBudget` 类管理"该不该反馈"：
+  - 用户最近 10s 在打字（监听 NSEvent.keyDown 频率）→ 静默
+  - PermissionWindow / ResponseSummary / IntentSuggestion 任一显示中 → 静默
+  - 触发事件距今 > 60s → 静默（新鲜度门槛）
+  - 每分钟反馈 ≤ 2 次（防轰炸）
+  - quietMode 开启 → 全静默
+- [ ] **B5. 把现有 repeated_screen detector 从实时弹改成静默归档** —— IntentPatternDetector.checkRepeatedScreen 继续跑，但**不再调 onDetected 立即弹**，改成写入 `~/.hermespet/patterns_archive.json`，等 MorningBriefingService 拉取或用户主动问"今天我都干啥了"才出现。错误关键词类的也保留 archive 一份用于早简
+
+---
+
+### Wave C：双通道反馈分工（桌宠 + 灵动岛协作）
+
+> 让桌宠和灵动岛**各做各擅长的**，不打架、不重复。用户能感觉到两者是"同一个大脑的两只手"。
+
+- [ ] **C1. 反馈路由器** —— 新建 `IntentFeedbackRouter` 替代当前 IntentNotificationManager 的单一弹卡逻辑。按 (反馈分量 × 桌宠可见性) 二维路由：
+  - 实时存在感 + 桌宠 visible → 桌宠 glance
+  - 实时存在感 + 桌宠 hidden → 灵动岛 shimmer
+  - 当下感知（短）+ 桌宠 visible → ClawdBubbleOverlay 头顶 1 行气泡 2.5s 自动消（不点不打开聊天）
+  - 当下感知（短）+ 桌宠 hidden → 灵动岛 idle 区临时标签 2.5s
+  - 当下感知（需互动）+ 桌宠 visible → 桌宠气泡 + 点击展开聊天（接现有 vm.inputText 预填路径）
+  - 当下感知（需互动）+ 桌宠 hidden → 现有 IntentSuggestionWindowController 卡片（兜底）
+  - **绝不双通道齐发**：路由决定走桌宠就完全跳过灵动岛
+- [ ] **C2. ClawdBubbleOverlay 接 detector 命中** —— ClawdBubbleOverlay 已经有头顶气泡 UI（决策卡片 / 嗅文件短评），扩展新增 `intentBubble(text, durationSec, onTap)` 入口；onTap 时触发 vm.inputText 预填 + 打开聊天的行为（跟 IntentSuggestionWindowController accept 一致）
+- [ ] **C3. 灵动岛"临时标签"形态** —— PillView 新增 `transientLabel(text, durationSec)` 形态：idle 圆点旁边浮一段短文字（≤ 8 字）2.5s 后自动收回。**不让灵动岛 NSWindow setFrame**（决策 #1），在现有 280×74 内做 SwiftUI 内部 .frame 切换 + 文字 .transition(.opacity)
+- [ ] **C4. 主通道偏好开关** —— SettingsView 加 "AI 出场偏好" 三选 Picker（桌宠优先 / 灵动岛优先 / 自动按可见性）。AppStorage `intentChannelPreference`。Router 读这个偏好覆盖默认规则
+- [ ] **C5. 副通道音量调节** —— 同设置里再加 "AI 出场频率" 滑杆（频繁 / 适中 / 安静），映射到 IntentFeedbackBudget 的"每分钟 ≤ N 次"上限（频繁 4 / 适中 2 / 安静 0.5）
+
+---
+
+### Wave D：反馈文案精雕
+
+> 现在文案是干巴巴的"看到报错了 / 你回来 3 次"。改成有具体名词、有桌宠人设、有长度纪律。
+
+- [ ] **D1. 文案生成器抽出** —— 把现在 IntentPatternDetector 里的 `makeRepeatedPrompt` / `makeErrorPrompt` 拆出来到 `IntentCopyWriter.swift`，按 (pattern.kind × agentMode) 二维返回模板池。每组至少 3 个模板，命中后随机选 1 个
+- [ ] **D2. "无具体名词不发" 硬规则** —— IntentCopyWriter 加 `extractNoun(from ocr)` 启发式：找 quoted string / camelCase / snake_case / 含扩展名的 token / Title Case 短语。**找不到名词的 candidate 直接 return nil，路由器跳过这条反馈**。宁可一天 0 次也不发废话
+- [ ] **D3. 桌宠人设模板池**：
+  - **Hermes 羽毛**：客气体（"注意到 `xxx` 了" / "你在 `yyy` 上停留有一会儿了"）
+  - **在线 AI 云朵**：软乎体（"咦，`xxx` 这个…" / "我看到 `yyy` 了哎"）
+  - **Claude 螃蟹 Clawd**：横向幽默（"横眼看到 `xxx`" / "嗯？这个 `yyy` 之前见过"）
+  - **Codex 终端 Coco**：直接体（"`xxx` ← 看到了" / "→ `yyy`?"）
+- [ ] **D4. 长度天花板执行**：
+  - 桌宠气泡 ≤ 12 字（超长截断 + 省略号，不换行）
+  - 灵动岛标签 ≤ 8 字
+  - IntentSuggestion 卡片标题 ≤ 14 字 / 副标题 ≤ 24 字
+  - 用 `String.prefix(n)` + 结尾换 "…" 统一实现 `truncated(_ limit: Int)` String 扩展
+- [ ] **D5. 测试套件** —— 写一组 IntentCopyWriter 单元测试（XCTest 或 Playground 都行）：喂常见 OCR 样本（崩溃栈 / 编辑器界面 / 文档页 / 报错弹窗），检查输出文案符合"带名词 + 长度 + 人设"三条规则
+
+---
+
+### Wave E：透明信任地基
+
+> 用户敢全天开着这个功能的前提：知道收集了什么、能随时清掉、能按 app 选择性关。
+> 这一波是"打底"，不直接增智能感，但不做的话用户会因为不放心而关掉总开关。
+
+- [ ] **E1. SettingsView 新增"今日观察"折叠面板** —— 隐私分组下加可折叠列表，按时间倒序展示当日所有 user_intents 条目：
+  - 每条显示：时间 HH:mm / app icon + 名称 / window title / OCR 前 60 字预览
+  - hover 右侧出现 × 删除按钮（删单条）
+  - 点击展开看 OCR 全文（NSScrollView）
+  - 列表头一行 "今天观察了 X 次 · 跨 Y 个应用"
+- [ ] **E2. 一键加 app 黑名单** —— "今日观察"每条记录右键菜单 / hover 浮出"以后别记这个 app" 按钮，加到 `userIntentAppBlacklist` UserDefaults 数组（跟现有硬黑名单合并）。UserIntentRecorder 启动检查 + 每次 trigger 前检查
+- [ ] **E3. 黑名单管理 UI** —— SettingsView 隐私分组加 "已屏蔽的 app" 列表（显示 bundle ID + 来源（硬编码 / 用户添加） + 移除按钮）。硬编码黑名单不可移除（敏感 app 强保护）
+- [ ] **E4. 隐私文案补强** —— 现有 "本地存储 / 不上网 / 30 天压缩"4 行扩展到 6 行，加 "可逐条删除 / 可加 app 黑名单 / 反馈通道可关 / OCR 用 Vision Framework 本地跑，不上传任何画面" —— 把所有隐私保证说全
+- [ ] **E5. 一键导出 + 一键清空** —— 现有"清空"按钮旁加"导出 JSON"按钮：导出当日 / 本周 / 全部 user_intents 到用户选的目录（让用户自己审查数据 = 终极信任）
+
+---
+
+### Wave F：调优 + 反馈学习（最后做，等前面 5 波数据攒够再调）
+
+> 让系统**从用户反馈中学**：高接受率的 detector 加权，低接受率的降权。这一波依赖前面 5 波跑一段时间攒数据。
+
+- [ ] **F1. ActivityStore 加 intent_feedback 表** —— 每次反馈出场记一条：(intent_id, detector_kind, channel, accepted/dismissed/ignored, timestamp)。"看看吧"= accepted，"知道了"/超时 = dismissed，根本没看到（被抑制规则跳过）= ignored
+- [ ] **F2. 接受率统计** —— ActivityStore.feedbackStats(detectorKind:windowDays:) 返回 (acceptCount, dismissCount, ignoreCount)。SettingsView 隐私分组加可视化（每个 detector 一行：✅ X 次 · ❌ Y 次 · 接受率 Z%）
+- [ ] **F3. 低接受率 detector 自动降权** —— 单日接受率 < 10% 且总反馈 ≥ 5 次的 detector，自动延长冷却到 6h（默认 1h）；< 5% 接收率连续 3 天 → 自动停用并提示用户"我注意到 X 类型的提示你都不太需要，先停了，你可以在设置里重开"
+- [ ] **F4. 早简集成 + AI 总结（每天 1 次 AI 调用）** —— MorningBriefingService 拉昨天 user_intents + patterns_archive + intent_feedback，**调当前 mode 的 API**生成 2-3 行总结："昨天你在 ChatView 反复调 padding 最后停在 16pt / 上午报错最多的是 NSException / 你拒绝了 3 次截屏类提示，我已经降权"。这是**整个系统唯一的 AI 调用**，1 天 1 次成本可控
+- [ ] **F5. "你训练的桌宠"统计页** —— SettingsView 隐私分组底部加只读统计："这周 AI 出场 X 次，你接受了 Y 次 / 已学到避开 Z 个 app / 已学到 W 个无效提示类型"。让用户感受到"我在训练它"
+
+---
+
+### 实施波次约定
+
+> **每做完一波我们一起测真实效果再决定下一波**，避免一口气堆完发现根上有问题白做。
+
+- 顺序：**A → B → C → D → E → F**（按"立即提升智能感"排序）
+- A 是最便宜的胜利，先快速看到"AI 在场"感
+- B 是核心智能感来源，做完应该明显感觉"不延后了"
+- C 把出场角色拓宽到双通道
+- D 把每条反馈打磨到"它真的懂我"
+- E 是信任地基，没它前面智能感越强用户越怕
+- F 是调优层，依赖前面 5 波跑一段时间
+
+每波结束后：编译 + install + 真机测 + 用户反馈 → 决定下一波要不要继续 / 要不要调整。
+
+> 这件事做好，HermesPet 从"装着 AI 的桌宠"升级成"长期陪你工作的伙伴"，灵魂上一个维度。
+
+---
+
+> 最后更新：2026-05-19（v1.3.5 智能感知精雕路线图规划完成，从 Wave A 开始动手）
+
+---
+
+## [P0-v1.3.6 多 mode 拓展] OpenClaw 接入 + 默认隐藏 mode 架构（2026-05-19）
+
+> **背景**：用户提出三个方向 ——（1）接入 OpenClaw（npm install 的 OpenAI 兼容 gateway，373k stars，跟 Hermes 协议几乎一致）；（2）新用户安装后默认**只开启在线 AI** 一个 mode，其他 4 个 mode（Hermes / OpenClaw / Claude Code / Codex）在设置里手动开启 + 自动检测本机是否装好；（3）OpenClaw 接入要像 Hermes 一样**零配置**（自动读 `~/.openclaw/openclaw.json` 里的 token + port、自动 enable chatCompletions endpoint、自动 spawn daemon）。
+>
+> **协议验证已完成**（2026-05-19）：openclaw 2026.5.18 已装本机，daemon 跑 launchd 端口 18789。/v1/models /v1/chat/completions（非流式 + SSE 流式）全部实测通过，返回标准 OpenAI 格式。chatCompletions endpoint 默认 disable，已帮用户在 `~/.openclaw/openclaw.json` 加上 `gateway.http.endpoints.chatCompletions.enabled = true` + 重启 daemon。默认底层模型 deepseek/deepseek-v4-flash。
+
+### PR-A：默认隐藏架构 + OpenClaw 零配置接入（18 项 · 先做）
+
+#### 第 1 期：默认隐藏架构（5 项）
+
+- [x] **M1. AgentMode 加 `.openclaw` case** —— `Sources/Models.swift` `AgentMode` enum 加新 case，grep 全仓 `case \.hermes` 一次性补齐 switch 语句（10+ 文件：ChatView / ChatComponents / DynamicIslandController / MarkdownRenderer / ModeSprite / PinCardOverlay / QuickAskWindow / SettingsView / ChatViewModel / Models）
+- [x] **M2. EnabledModesStore（新文件）** —— 新建 `Sources/EnabledModesStore.swift`：`@MainActor @Observable` singleton，持 `enabledModes: Set<AgentMode>`，UserDefaults 持久化（key=`enabledModes`，存 raw value array）。提供 `enable(_:) / disable(_:) / isEnabled(_:) -> Bool`，在线 AI 永远 enabled 不能 disable
+- [x] **M3. 老用户迁移逻辑** —— EnabledModesStore init 时检测 UserDefaults：(a) 无 `enabledModes` key + 有 `~/.hermespet/conversations.json` → 老用户 → 默认 `[.directAPI, .hermes, .claudeCode, .codex]` 保留旧行为；(b) 无 `enabledModes` key + 无 conversations.json → 全新用户 → 默认 `[.directAPI]`；(c) 有 key → 直接 load。一次性写完后下次读直接走持久化路径
+- [x] **M4. ChatViewModel 守护切换到 disabled mode** —— `agentMode` didSet / `newConversation(forcedMode:)` 加判定：目标 mode 不在 `EnabledModesStore.shared.enabledModes` 时回退到 `.directAPI` + `errorMessage = "该模式未启用，已切到在线 AI。可在设置里开启"`
+- [x] **M5. 所有 mode 切换 UI 过滤** —— 4 处只渲染 enabled mode：(a) `PetHeaderStrip` 右侧 ModeRailView 4 sprite → 改成动态 enabled mode 数；(b) 灵动岛 hover 展开的 mode chip 列表；(c) ChatView 欢迎页"换模式"推荐卡片；(d) `ConversationPills` 加 tab 时的 mode picker
+
+#### 第 2 期：OpenClaw 零配置接入（7 项）
+
+- [x] **OC1. OpenClawGatewayManager（新文件，~250 行）** —— 类比 `HermesGatewayManager`，新建 `Sources/OpenClawGatewayManager.swift`：`@unchecked Sendable` singleton + NSLock state。功能：(a) `startIfAvailable()` 探测 `which openclaw` → 没装则 status=binaryMissing 返回；(b) 读 `~/.openclaw/openclaw.json` 拿 `gateway.auth.token` + `gateway.port`（默认 18789）+ `gateway.http.endpoints.chatCompletions.enabled`；(c) 没 enable → 自动改 json 加 `chatCompletions.enabled=true` + `openclaw daemon restart`（用 Process spawn）；(d) ping `/health` → 200 = status=external/running；(e) 失败 spawn `openclaw daemon start` 自启；(f) 注册到 `SubprocessRegistry`；(g) `Status` enum: starting / running / external / binaryMissing / configMissing / endpointDisabled / failed / disabled
+- [x] **OC2. ProviderPreset 加 OpenClaw preset** —— `Sources/ProviderPreset.swift`：加 `openclawLocal` preset（displayName "本地 OpenClaw"、baseURL 默认 `http://localhost:18789`、registerURL `https://openclaw.ai`、placeholder "openclaw"），保留"自定义"路径
+- [x] **OC3. APIClient.ConfigSource 加 `.openclaw`** —— `Sources/APIClient.swift`：`ConfigSource` enum 加 case，`baseURLForRequest` / `authHeader` / `modelForRequest` 按 source 分流。OpenClaw 走 `Authorization: Bearer <token from OpenClawGatewayManager>`
+- [x] **OC4. ChatViewModel 加 openclaw config + APIClient 实例** —— UserDefaults key `openclawAgentId`（默认 "openclaw"），ChatViewModel 持第 3 个 `APIClient` 实例。`sendMessage` 按 agentMode 分流到对应 client（.hermes / .directAPI / .openclaw 三路径都走 OpenAI HTTP）
+- [x] **OC5. fetchModels() `.openclaw` 模式拿 agent 列表** —— `APIClient.fetchModels()` 已经按 source 分流，OpenClaw 返回的是 agent id（"openclaw" / "openclaw/default" / "openclaw/main"），下拉直接选 agent，不像 directAPI 选具体模型
+- [x] **OC6. checkHealth() `.openclaw` 走 /health** —— 已实测返回 `{"ok":true,"status":"live"}`。失败 fallback `/v1/models`（401/403 也算连通，跟 directAPI 一致）
+- [x] **OC7. 拒绝拖入文档** —— `attachDocumentPath` 在 `.openclaw` 模式下走跟 `.hermes / .directAPI` 一样的 errorMessage 路径（HTTP API 读不到本地）
+
+#### 第 4 期：设置页 mode 管理 UI（3 项）
+
+- [x] **U1. SettingsView 重构"AI 模式"段** —— 现 mode 选择 segmented Picker → 改成 5 行 toggle 列表，每行 mini sprite + 模式名 + 开关 + 状态卡片。在线 AI 永远 ON 灰掉不可改。布局参考 iOS 设置页风格（左 icon + 中文字 + 右开关 + 副标题状态）
+- [x] **U2. 各 mode toggle 打开时调检测器** —— openclaw → `OpenClawGatewayManager.detect()`；hermes → 复用 `HermesGatewayManager.detect()`；claude/codex → 复用 `CLIAvailability.probe()`。检测中显"检测中..."loader，失败显"✗ 未安装"+ "查看安装"链接，成功显"✓ 状态文本"
+- [x] **U3. 未装时给"查看安装"+ 一键复制命令** —— OpenClaw `npm install -g openclaw@latest && openclaw onboard --install-daemon`，Hermes `pip install hermes-agent`，claude/codex 各自官方 URL。按钮点了复制到剪贴板 + 提示"已复制，请粘贴到终端运行"
+
+#### 第 5 期：验证（3 项）
+
+- [x] **V1. 编译 + install 验证全套 PR-A** —— `./build.sh 2>&1 | grep -E "error:|warning:|Build complete"` → `xattr -cr ~/Desktop/HermesPet/HermesPet.app && ./install.sh`
+- [ ] **V2. 实测全新用户首启** —— 清 UserDefaults 模拟：`defaults delete com.basionwang.HermesPet`（或重命名 `~/.hermespet/conversations.json` 模拟），启动 app → 应只见在线 AI mode → 设置里逐个开启 OpenClaw/Hermes/Claude/Codex 看检测状态
+- [ ] **V3. 实测 OpenClaw 零配置首连** —— 设置里开 OpenClaw toggle → HermesPet 自动 enable chatCompletions endpoint + 启 daemon（如果未跑）→ 切到 OpenClaw 对话 → 发"你好" → 看到流式回复（连贯流不卡顿）
+
+### PR-B：fomo 九尾狐 sprite（6 项 · 已完成 2026-05-19）
+
+> 用户提供的参考形象：像素艺术九尾狐少女，银发 + 异色瞳 + 大狐耳 + 蓬松尾巴 + 中式长袍。主色定为月光银白 #B4C5E8（参考图主体调）。chibi 极简化（灵动岛 22pt 装不下原图细节）。
+
+- [x] **B1. PetPalette 加 fomoPalette** —— `PetPalette.fomoDefault = #B4C5E8`，`PetPaletteStore.fomoPalette` 独立属性 + Codable Stored 加 fomo 字段（向后兼容老 JSON）
+- [x] **B2. 8 处 mode 主色 #FF6B47 → #B4C5E8** —— PR-A 占位橙红全替换成月光银白
+- [x] **B3. 新建 FomoSprite.swift** —— Canvas 自绘 viewBox 18×14 chibi 九尾狐：白色狐耳（粉色内耳）+ 银白头部圆形 + 异色瞳（左蓝 #4A6FE0 / 右绿 #5DD697）+ 大蓬松尾巴（摆动）+ 白袍 + 深蓝腰带。动画：breathe 3.2s / blink 4.5s / walk 0.9s bob + 尾巴摆 / armsUp 抬头 + 月牙符文（sprite≥18pt 时绘）。配 `FomoIslandSprite` wrapper 灵动岛 工作时 offset -1pt
+- [x] **B4. 5 处 sprite 接入 FomoView** —— ModeSprite / IntentSuggestion miniSprite / PetHeaderStrip spriteView + sprite / ResponseSummary miniSprite / ClawdWalkOverlay（PetVisualKind 加 .fox case，桌面漫步用 FomoView）
+- [x] **B5. petName "Molty" → "fomo"** —— 3 处 petName 全改 + ClawdWalkOverlay sniffPrompt persona "九尾狐 fomo 🦊" + localFallbackQuote 加 fox 文案池（"嗯…有点东西"/"九尾扫过~"）
+- [x] **B6. 编译 + install 验证** —— Build complete + 装到 /Applications + app 正常运行
+
+### 实施顺序约定
+
+按"基础架构 → 接入核心 → UI 整合 → 验证"递进，单期内子任务可并行：
+
+1. **第 1 期完成后立即编译** —— 确认 `.openclaw` case 跑通 switch + 默认 `[.directAPI]` 不破坏老用户
+2. **第 2 期完成后 curl 实测** —— 直接发 chat completions 看流式 OK 再写 UI
+3. **第 4 期完成后 install 实测** —— 全新用户路径 + 已装 OpenClaw 路径 都过一遍
+4. **PR-A 整体验收通过** + 用户使用 1-2 天没暴露问题 → 再开 PR-B（专属 sprite）
+
+> 这版结束后 HermesPet 支持 5 个 AI mode（在线 AI / OpenClaw / Hermes / Claude Code / Codex），新用户首启**只见在线 AI** 零配置可用，进阶用户在设置里按需开启其他 mode + 自动检测 + 零填表零配置体验。
+
+---
+
+> 最后更新：2026-05-19（v1.3.6 OpenClaw 接入 + 默认隐藏 mode 架构规划完成）
