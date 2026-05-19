@@ -26,17 +26,37 @@
 
 ---
 
-> ## 🛡️ 认准官方下载源
+> ## 🛡️ 官方声明 · 认准唯一正版来源
 >
-> HermesPet 由 **[Basion (@basionwang-bot)](https://github.com/basionwang-bot)** 独立开发并以开源形式提供。
+> HermesPet 由 **[Basion Wang (@basionwang-bot)](https://github.com/basionwang-bot)** 从 2024 年 10 月起独立设计、开发并持续维护至今。所有代码提交记录、版本发布历史均可在本仓库中验证。
 >
-> **唯一官方下载源**：[github.com/basionwang-bot/HermesPet/releases](https://github.com/basionwang-bot/HermesPet/releases)
+> ### ⚠️ 防剽窃警告
 >
-> 近期发现有第三方把本项目转发到个人网盘 / 二手平台 / 其他网站后冒充原作者作品。**所有官方渠道之外的 DMG 均不保证安全和正版**，请认准上方 GitHub Releases 页下载。
+> 近期发现多起第三方将本项目**复制后改名发布、声称自己是原作者、在网盘/二手平台/其他网站分发修改版**的行为。**所有官方渠道之外的版本均不保证安全和正版**，可能被植入恶意代码或后门。
 >
-> 装好之后可在 App 内 **设置 → 关于 → 官方版本验证** 查看 codesign 签名校验结果（正版会显示原作者 Team ID `R34KL4X4D9`）。
+> ### ✅ 官方渠道一览
 >
-> 如发现盗用或冒名行为，欢迎在 [GitHub Issues](https://github.com/basionwang-bot/HermesPet/issues) 反馈。
+> | 渠道 | 地址 | 用途 |
+> |---|---|---|
+> | 🌐 官方网站 | [hermespet.cc](https://hermespet.cc) | 产品介绍、版本信息 |
+> | 📦 官方仓库 | [github.com/basionwang-bot/HermesPet](https://github.com/basionwang-bot/HermesPet) | 源码、Issues、讨论 |
+> | 📥 官方下载 | [GitHub Releases](https://github.com/basionwang-bot/HermesPet/releases) | **唯一安全下载源** |
+> | 📧 联系作者 | [basionwang@gmail.com](mailto:basionwang@gmail.com) | 商业合作、举报 |
+>
+> ### 🔐 如何验证正版
+>
+> 1. **仅从 GitHub Releases 下载 DMG**
+> 2. 安装后打开 **设置 → 关于 → 官方版本验证**
+> 3. 正版会显示原作者 Team ID：**`R34KL4X4D9`**
+> 4. 如果验证失败，请立即删除并从官方渠道重新下载
+>
+> ### 📢 举报盗用
+>
+> 如发现盗用或冒名行为，请通过以下方式举报：
+> - [GitHub Issues（选择"盗用举报"模板）](https://github.com/basionwang-bot/HermesPet/issues/new?template=plagiarism_report.md)
+> - 邮件：[basionwang@gmail.com](mailto:basionwang@gmail.com)
+>
+> 我们会采取包括 **DMCA Takedown** 在内的法律手段维护项目权益。
 
 ---
 
@@ -403,6 +423,15 @@ HermesPet 还是个一个人维护的开源项目，每一个 issue / PR / star 
 
 [Apache License 2.0](./LICENSE)
 
+本项目采用 Apache License 2.0 开源协议。使用本项目代码时，您**必须**：
+
+- 保留原始版权声明和许可证文件
+- 保留 [NOTICE](./NOTICE) 文件中的归属信息
+- 明确标注对原始代码的修改
+- 不得使用 HermesPet 的名称、商标或 Logo 来暗示与原项目的关联或背书
+
+详见 [NOTICE](./NOTICE) · [品牌使用指南](./BRAND_GUIDELINES.md) · [贡献指南](./CONTRIBUTING.md)
+
 ---
 
 ## ⭐ Star History
@@ -414,5 +443,11 @@ HermesPet 还是个一个人维护的开源项目，每一个 issue / PR / star 
 <div align="center">
 
 Made with ✦ on a MacBook · 桌面 AI 应当鲜活
+
+---
+
+© 2024–2025 [Basion Wang](https://github.com/basionwang-bot). All rights reserved.
+
+HermesPet 是 Basion Wang 的原创作品。未经授权的复制、修改或分发行为将被追究法律责任。
 
 </div>
