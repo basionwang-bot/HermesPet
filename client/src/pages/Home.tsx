@@ -74,13 +74,14 @@ const islandStates: [string, string][] = [
 const engineKeys = ["direct", "hermes", "claude", "codex"] as const;
 
 const timelineEvents = [
-  { date: "2024.10", title: "项目启动", desc: "开始构思 macOS 原生 AI 桌面伴侣的概念" },
-  { date: "2024.12", title: "v1.0 发布", desc: "首个可用版本，支持 Claude Code 集成和灵动岛" },
-  { date: "2025.01", title: "v1.1 多引擎", desc: "加入 Hermes Gateway 和在线 AI 模式" },
-  { date: "2025.03", title: "v1.2 桌宠系统", desc: "5 只像素桌宠上线，每个 mode 专属伴侣" },
-  { date: "2025.04", title: "v1.2.4 权限 UI", desc: "工具权限确认系统，AI 不替你做主" },
-  { date: "2025.05", title: "v1.2.7 传送门", desc: "桌宠跨灵动岛传送门动画，4 只迷你精灵" },
-  { date: "2025.05", title: "v1.2.9 OpenClaw", desc: "OpenClaw 接入 + fomo 桌宠 + 官方版本验证" },
+  { date: "2026.01", title: "项目构思", desc: "开始构思 macOS 原生 AI 桌面伴侣的概念" },
+  { date: "2026.02", title: "v1.0 发布", desc: "首个可用版本，支持 Claude Code 集成和灵动岛" },
+  { date: "2026.03", title: "v1.1 多引擎", desc: "加入 Hermes Gateway 和在线 AI 模式" },
+  { date: "2026.03", title: "v1.2 桌宠系统", desc: "5 只像素桌宠上线，每个 mode 专属伴侣" },
+  { date: "2026.04", title: "v1.2.4 权限 UI", desc: "工具权限确认系统，AI 不替你做主" },
+  { date: "2026.05", title: "v1.2.7 传送门", desc: "桌宠跨灵动岛传送门动画，4 只迷你精灵" },
+  { date: "2026.05", title: "抖音百万播放", desc: "抖音发布视频，超百万人观看，项目引爆关注" },
+  { date: "2026.05", title: "v1.2.9 OpenClaw", desc: "OpenClaw 接入 + fomo 桌宠 + 官方版本验证" },
   { date: "即将到来", title: "Windows 版", desc: "Windows 版本开发中，即将上线" },
 ];
 
