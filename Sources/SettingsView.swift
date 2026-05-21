@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Carbon
 import UniformTypeIdentifiers
 
@@ -28,6 +29,7 @@ struct SettingsView: View {
     @State private var configViewingMode: AgentMode = .hermes
     /// 全局调色板存储 —— ColorPicker 改色后通过它更新 + 持久化
     @State private var paletteStore = PetPaletteStore.shared
+    @State private var profileStore = ProfileSettingsStore.shared
 
     enum Category: String, CaseIterable, Identifiable {
         case backend, pet, sound, privacy, system, about
@@ -1260,6 +1262,10 @@ struct SettingsView: View {
 
             Divider()
 
+            chatIdentitySection
+
+            Divider()
+
             // 桌面漫步统一区 —— 覆盖四种桌宠（每个 mode 一种形象）
             VStack(alignment: .leading, spacing: 6) {
                 Label("桌面漫步", systemImage: "figure.walk")
@@ -1361,6 +1367,143 @@ struct SettingsView: View {
             .padding(12)
             .background(Color.secondary.opacity(0.06))
             .cornerRadius(8)
+        }
+    }
+
+    private var chatIdentitySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("聊天身份", systemImage: "person.crop.circle")
+                .font(.system(size: 13, weight: .medium))
+            Text("只影响聊天消息里的头像和显示名，不改变 AI 后端连接和模式名称。")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+
+            profileUserRow
+
+            Divider()
+
+            ForEach([AgentMode.hermes, .directAPI, .claudeCode, .codex, .openclaw]) { mode in
+                profileModeRow(mode)
+            }
+        }
+        .padding(12)
+        .background(Color.secondary.opacity(0.06))
+        .cornerRadius(8)
+    }
+
+    private var profileUserRow: some View {
+        HStack(spacing: 10) {
+            profileAvatar(
+                image: profileStore.avatarImage(for: .user),
+                fallbackSystemName: "person.fill",
+                tint: .blue
+            )
+            VStack(alignment: .leading, spacing: 5) {
+                Text("我的全局身份")
+                    .font(.system(size: 12, weight: .medium))
+                TextField(
+                    "你",
+                    text: Binding(
+                        get: { profileStore.userDisplayName },
+                        set: { profileStore.updateUserDisplayName($0) }
+                    )
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .frame(maxWidth: 190)
+            }
+
+            Spacer()
+            avatarButtons(for: .user)
+        }
+    }
+
+    private func profileModeRow(_ mode: AgentMode) -> some View {
+        HStack(spacing: 10) {
+            profileAvatar(
+                image: profileStore.avatarImage(for: .mode(mode)),
+                fallbackSystemName: mode.iconName,
+                tint: paletteStore.palette(for: mode).primary
+            )
+            VStack(alignment: .leading, spacing: 5) {
+                Text(mode.label)
+                    .font(.system(size: 12, weight: .medium))
+                if mode.allowsCustomDisplayName {
+                    TextField(
+                        mode.label,
+                        text: Binding(
+                            get: { profileStore.customDisplayName(for: mode) },
+                            set: { profileStore.updateDisplayName($0, for: mode) }
+                        )
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12))
+                    .frame(maxWidth: 190)
+                } else {
+                    Text("仅可更换头像")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+            avatarButtons(for: .mode(mode))
+        }
+    }
+
+    private func profileAvatar(image: NSImage?, fallbackSystemName: String, tint: Color) -> some View {
+        ZStack {
+            Circle()
+                .fill(tint.opacity(0.16))
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 34, height: 34)
+                    .clipShape(Circle())
+            } else {
+                Image(systemName: fallbackSystemName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+        }
+        .frame(width: 34, height: 34)
+        .overlay(Circle().stroke(.primary.opacity(0.08), lineWidth: 0.5))
+    }
+
+    private func avatarButtons(for target: ProfileAvatarTarget) -> some View {
+        HStack(spacing: 6) {
+            Button("选择头像") {
+                pickProfileAvatar(for: target)
+            }
+            .font(.system(size: 11))
+            .buttonStyle(.borderless)
+
+            Button("重置") {
+                profileStore.resetAvatar(for: target)
+            }
+            .font(.system(size: 11))
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @MainActor
+    private func pickProfileAvatar(for target: ProfileAvatarTarget) {
+        let panel = NSOpenPanel()
+        panel.title = "选择头像"
+        panel.prompt = "选择"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.image]
+
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                try profileStore.setAvatar(from: url, for: target)
+            } catch {
+                viewModel.errorMessage = "头像保存失败：\(error.localizedDescription)"
+            }
         }
     }
 

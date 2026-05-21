@@ -26,6 +26,7 @@ struct MessageBubbleView: View {
     @State private var didCopy = false
     @State private var didPin = false
     @State private var pinShake = false
+    @State private var profileStore = ProfileSettingsStore.shared
 
     /// 字号缩放（由 ChatView 经 Environment 注入）—— 应用到正文 Text / Markdown / 代码块
     @Environment(\.chatFontScale) private var fontScale: Double
@@ -58,7 +59,7 @@ struct MessageBubbleView: View {
     /// assistant 头像图标（hermes 用兔子，claude 用终端）
     private var assistantIcon: String { agentMode.iconName }
     /// assistant 显示名（"Hermes" / "Claude Code"）
-    private var assistantLabel: String { agentMode.label }
+    private var assistantLabel: String { profileStore.resolvedAssistantDisplayName(for: agentMode) }
     /// assistant 主题色
     private var assistantTint: Color {
         switch agentMode {
@@ -117,18 +118,28 @@ struct MessageBubbleView: View {
     // MARK: - Avatar
 
     private var avatarView: some View {
-        ZStack {
-            Circle()
-                .fill(isUser ? Color.blue.opacity(0.2) : assistantTint.opacity(0.2))
-                .frame(width: 28, height: 28)
-            Image(systemName: isUser ? "person.fill" : assistantIcon)
-                .font(.caption)
-                .foregroundStyle(isUser ? .blue : assistantTint)
+        let target: ProfileAvatarTarget = isUser ? .user : .mode(agentMode)
+        return ZStack {
+            if let image = profileStore.avatarImage(for: target) {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 28, height: 28)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.55), lineWidth: 0.5))
+            } else {
+                Circle()
+                    .fill(isUser ? Color.blue.opacity(0.2) : assistantTint.opacity(0.2))
+                    .frame(width: 28, height: 28)
+                Image(systemName: isUser ? "person.fill" : assistantIcon)
+                    .font(.caption)
+                    .foregroundStyle(isUser ? .blue : assistantTint)
+            }
         }
     }
 
     private var roleLabel: some View {
-        Text(isUser ? "你" : assistantLabel)
+        Text(isUser ? profileStore.resolvedUserDisplayName() : assistantLabel)
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
