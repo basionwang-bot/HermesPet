@@ -1,0 +1,163 @@
+{
+  "version": 2,
+  "providers": [
+    {
+      "id": "deepseek",
+      "displayName": "DeepSeek",
+      "baseURL": "https://api.deepseek.com/v1",
+      "defaultModel": "deepseek-v4-pro",
+      "altModels": ["deepseek-v4-flash"],
+      "signupURL": "https://platform.deepseek.com/api_keys",
+      "fastModel": "deepseek-v4-flash",
+      "balancedModel": "deepseek-v4-pro",
+      "deepModel": "deepseek-v4-pro",
+      "visionModel": null
+    },
+    {
+      "id": "zhipu",
+      "displayName": "智谱 GLM",
+      "baseURL": "https://open.bigmodel.cn/api/paas/v4",
+      "defaultModel": "glm-5",
+      "altModels": ["glm-5.1", "glm-5-turbo"],
+      "signupURL": "https://open.bigmodel.cn/usercenter/apikeys",
+      "fastModel": "glm-5-turbo",
+      "balancedModel": "glm-5",
+      "deepModel": "glm-5.1",
+      "visionModel": "glm-4v-plus"
+    },
+    {
+      "id": "moonshot",
+      "displayName": "Moonshot Kimi",
+      "baseURL": "https://api.moonshot.cn/v1",
+      "defaultModel": "kimi-k2.6",
+      "altModels": ["kimi-k2.5", "kimi-k2"],
+      "signupURL": "https://platform.moonshot.cn/console/api-keys",
+      "fastModel": "kimi-k2",
+      "balancedModel": "kimi-k2.5",
+      "deepModel": "kimi-k2.6",
+      "visionModel": "moonshot-v1-128k-vision-preview"
+    },
+    {
+      "id": "minimax",
+      "displayName": "MiniMax",
+      "baseURL": "https://api.minimaxi.com/v1",
+      "defaultModel": "MiniMax-M2.7",
+      "altModels": ["MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed"],
+      "signupURL": "https://platform.minimaxi.com/",
+      "fastModel": "MiniMax-M2.7-highspeed",
+      "balancedModel": "MiniMax-M2.7",
+      "deepModel": "MiniMax-M2.7",
+      "visionModel": null
+    },
+    {
+      "id": "openai",
+      "displayName": "OpenAI",
+      "baseURL": "https://api.openai.com/v1",
+      "defaultModel": "gpt-5.4",
+      "altModels": ["gpt-5.5", "gpt-5.4-mini"],
+      "signupURL": "https://platform.openai.com/api-keys",
+      "fastModel": "gpt-5.4-mini",
+      "balancedModel": "gpt-5.4",
+      "deepModel": "gpt-5.5",
+      "visionModel": "gpt-4o"
+    },
+
+    {
+      "id": "qwen",
+      "displayName": "通义千问",
+      "baseURL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "defaultModel": "qwen-plus",
+      "altModels": ["qwen-max", "qwen-flash", "qwen-turbo"],
+      "signupURL": "https://bailian.console.aliyun.com/",
+      "fastModel": "qwen-flash",
+      "balancedModel": "qwen-plus",
+      "deepModel": "qwen-max",
+      "visionModel": "qwen-vl-max"
+    },
+    {
+      "id": "doubao",
+      "displayName": "豆包",
+      "baseURL": "https://ark.cn-beijing.volces.com/api/v3",
+      "defaultModel": "doubao-seed-2-0-pro-260215",
+      "altModels": ["doubao-seed-2-0-lite-260215"],
+      "signupURL": "https://console.volcengine.com/ark",
+      "fastModel": "doubao-seed-2-0-lite-260215",
+      "balancedModel": "doubao-seed-2-0-pro-260215",
+      "deepModel": "doubao-seed-2-0-pro-260215",
+      "visionModel": "doubao-seed-2-0-pro-260215"
+    },
+    {
+      "id": "hunyuan",
+      "displayName": "腾讯混元",
+      "baseURL": "https://api.hunyuan.cloud.tencent.com/v1",
+      "defaultModel": "hunyuan-turbos-latest",
+      "altModels": ["hunyuan-t1-latest", "hunyuan-standard"],
+      "signupURL": "https://console.cloud.tencent.com/hunyuan",
+      "fastModel": "hunyuan-turbos-latest",
+      "balancedModel": "hunyuan-turbos-latest",
+      "deepModel": "hunyuan-t1-latest",
+      "visionModel": "hunyuan-vision"
+    },
+    {
+      "id": "mimo",
+      "displayName": "小米 MiMo",
+      "baseURL": "https://api.xiaomimimo.com/v1",
+      "defaultModel": "mimo-v2.5-pro",
+      "altModels": ["mimo-v2.5"],
+      "signupURL": "https://platform.xiaomimimo.com/",
+      "fastModel": "mimo-v2.5",
+      "balancedModel": "mimo-v2.5-pro",
+      "deepModel": "mimo-v2.5-pro",
+      "visionModel": "mimo-v2-omni"
+    },
+    {
+      "id": "ernie",
+      "displayName": "百度文心",
+      "baseURL": "https://qianfan.baidubce.com/v2",
+      "defaultModel": "ernie-4.5-turbo-128k",
+      "altModels": ["ernie-x1-turbo-32k", "ernie-3.5-8k"],
+      "signupURL": "https://console.bce.baidu.com/iam/#/iam/apikey/list",
+      "fastModel": "ernie-3.5-8k",
+      "balancedModel": "ernie-4.5-turbo-128k",
+      "deepModel": "ernie-x1-turbo-32k",
+      "visionModel": null
+    },
+
+    {
+      "id": "gemini",
+      "displayName": "Google Gemini",
+      "baseURL": "https://generativelanguage.googleapis.com/v1beta/openai/",
+      "defaultModel": "gemini-3.5-flash",
+      "altModels": ["gemini-2.5-pro", "gemini-3.1-flash-lite"],
+      "signupURL": "https://aistudio.google.com/apikey",
+      "fastModel": "gemini-3.5-flash",
+      "balancedModel": "gemini-3.5-flash",
+      "deepModel": "gemini-2.5-pro",
+      "visionModel": "gemini-3.5-flash"
+    },
+    {
+      "id": "grok",
+      "displayName": "xAI Grok",
+      "baseURL": "https://api.x.ai/v1",
+      "defaultModel": "grok-4.3",
+      "altModels": [],
+      "signupURL": "https://console.x.ai/",
+      "fastModel": "grok-4.3",
+      "balancedModel": "grok-4.3",
+      "deepModel": "grok-4.3",
+      "visionModel": "grok-4.3"
+    },
+    {
+      "id": "mistral",
+      "displayName": "Mistral",
+      "baseURL": "https://api.mistral.ai/v1",
+      "defaultModel": "mistral-large-latest",
+      "altModels": ["mistral-medium-latest", "mistral-small-latest"],
+      "signupURL": "https://console.mistral.ai/api-keys",
+      "fastModel": "mistral-small-latest",
+      "balancedModel": "mistral-medium-latest",
+      "deepModel": "mistral-large-latest",
+      "visionModel": "pixtral-large-latest"
+    }
+  ]
+}
