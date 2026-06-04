@@ -11,6 +11,10 @@ import Foundation
 /// 3. 有新版 → `hasUpdate = true`，触发 UI 通知（设置面板 + 菜单栏小红点）
 /// 4. 用户点「下载并安装」→ 后台 download DMG 到 ~/Downloads → `hdiutil attach` 挂载
 ///    → `open <volumePath>` 让 Finder 弹出已挂载的 DMG 窗口 → 用户拖到 Applications
+///
+/// **403 韧性（issue #94）**：GitHub 未认证 API 限额 60 次/小时（全局 IP），易被耗尽。
+/// 三层防御：① ETag 条件请求（304 不扣配额）② 本地缓存兜底（403 时用上次结果）
+/// ③ 403/429 指数退避重试（最多 1 次，延迟 10s）
 @MainActor
 @Observable
 final class UpdateChecker {
@@ -52,12 +56,30 @@ final class UpdateChecker {
     private static let owner = "basionwang-bot"
     private static let repo = "HermesPet"
     private static let checkInterval: TimeInterval = 24 * 60 * 60   // 24h
+    /// 403/429 重试延迟（秒）—— 不激进，避免雪崩
+    private static let retryDelay: TimeInterval = 10
 
     private var periodicTask: Task<Void, Never>?
+
+    // MARK: - 缓存（issue #94：403 时用上次成功的结果兜底）
+
+    /// 上次 GitHub API 返回的 ETag，用于条件请求（If-None-Match）。
+    /// 304 Not Modified 不扣 Rate Limit 配额 —— 这是对抗 60 次/小时限制最有效的武器。
+    private var cachedETag: String?
+    /// 缓存目录：`~/Library/Caches/HermesPet/`（跟项目其他缓存共用，见 StorageManager）
+    private static var cacheDir: URL {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return dir.appendingPathComponent("HermesPet", isDirectory: true)
+    }
+    private static var cacheFileURL: URL { cacheDir.appendingPathComponent("update-check-cache.json") }
+    private static var etagFileURL: URL { cacheDir.appendingPathComponent("update-check-etag.txt") }
 
     private init() {
         let info = Bundle.main.infoDictionary
         self.currentVersion = (info?["CFBundleShortVersionString"] as? String) ?? "0.0.0"
+        // 启动时加载上次缓存的 ETag（304 条件请求用）和检查结果（403 兜底用）
+        loadCache()
     }
 
     // MARK: - 启动调度
@@ -86,23 +108,15 @@ final class UpdateChecker {
             lastCheckedAt = Date()
         }
 
-        let urlString = "https://api.github.com/repos/\(Self.owner)/\(Self.repo)/releases/latest"
-        guard let url = URL(string: urlString) else { return }
-
-        var req = URLRequest(url: url, timeoutInterval: 15)
-        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        req.setValue("HermesPet/\(currentVersion)", forHTTPHeaderField: "User-Agent")
-
-        do {
-            let (data, response) = try await URLSession.shared.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                lastError = "GitHub 返回 HTTP \(code)"
-                return
+        // 首次请求（带 ETag 条件请求，304 不扣配额）
+        if await performCheckRequest(retryOnRateLimit: true) {
+            saveCache()
+        } else if lastError != nil {
+            // 请求失败 → 尝试从缓存恢复（issue #94：403 时用上次结果兜底）
+            if restoreFromCache() {
+                // 缓存恢复成功，把错误降级为 info 级提示
+                lastError = "\(lastError ?? "")（已使用上次缓存的检查结果）"
             }
-            try parseRelease(data: data)
-        } catch {
-            lastError = "检查失败：\(error.localizedDescription)"
         }
 
         if !silently, !hasUpdate {
@@ -122,6 +136,81 @@ final class UpdateChecker {
                     "silently": silently
                 ]
             )
+        }
+    }
+
+    /// 执行单次 GitHub API 请求（含 ETag 条件请求 + 403/429 重试）。
+    /// 返回 true = 成功获取了有效结果（200 或 304 + 缓存）。
+    private func performCheckRequest(retryOnRateLimit: Bool) async -> Bool {
+        let urlString = "https://api.github.com/repos/\(Self.owner)/\(Self.repo)/releases/latest"
+        guard let url = URL(string: urlString) else { return false }
+
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("HermesPet/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        req.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        // ETag 条件请求：如果服务端资源没变，返回 304 不扣 Rate Limit
+        if let etag = cachedETag {
+            req.setValue(etag, forHTTPHeaderField: "If-None-Match")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                lastError = "网络错误：无法解析响应"
+                return false
+            }
+
+            switch http.statusCode {
+            case 200:
+                // 成功 —— 保存 ETag + 解析结果
+                if let newETag = http.value(forHTTPHeaderField: "ETag") {
+                    cachedETag = newETag
+                    saveETag()
+                }
+                do {
+                    try parseRelease(data: data)
+                    return lastError == nil
+                } catch {
+                    return false
+                }
+
+            case 304:
+                // Not Modified —— 资源没变，用内存中的上次结果即可，不扣配额
+                return latestVersion != nil
+
+            case 403, 429:
+                // Rate Limit 超限 —— 解析 X-RateLimit 头给用户有意义的提示
+                let remaining = http.value(forHTTPHeaderField: "X-RateLimit-Remaining") ?? "?"
+                let resetEpoch = http.value(forHTTPHeaderField: "X-RateLimit-Reset")
+                let resetMsg: String
+                if let epoch = resetEpoch, let ts = Double(epoch) {
+                    let resetDate = Date(timeIntervalSince1970: ts)
+                    let mins = Int(resetDate.timeIntervalSinceNow / 60) + 1
+                    resetMsg = "约 \(max(mins, 1)) 分钟后恢复"
+                } else {
+                    resetMsg = "请稍后重试"
+                }
+                let rateLimitError = "GitHub API 请求超限（remaining=\(remaining)），\(resetMsg)"
+
+                // 重试一次（指数退避）
+                if retryOnRateLimit {
+                    try? await Task.sleep(nanoseconds: UInt64(Self.retryDelay * 1_000_000_000))
+                    lastError = nil
+                    if await performCheckRequest(retryOnRateLimit: false) {
+                        return true
+                    }
+                }
+                lastError = rateLimitError
+                return false
+
+            default:
+                lastError = "GitHub 返回 HTTP \(http.statusCode)"
+                return false
+            }
+        } catch {
+            lastError = "检查失败：\(error.localizedDescription)"
+            return false
         }
     }
 
@@ -154,6 +243,60 @@ final class UpdateChecker {
         if latestDownloadURL == nil {
             lastError = "未在 release 中找到 DMG 资产"
         }
+    }
+
+    // MARK: - 缓存持久化（issue #94：403 离线兜底）
+
+    /// 把当前检查结果（latestVersion / latestDownloadURL / latestNotes）写到磁盘。
+    /// 每次 200 成功解析后调用。
+    private func saveCache() {
+        guard let version = latestVersion else { return }
+        let cache: [String: String] = [
+            "version": version,
+            "downloadURL": latestDownloadURL?.absoluteString ?? "",
+            "notes": latestNotes
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: cache) else { return }
+        try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
+        try? data.write(to: Self.cacheFileURL, options: .atomic)
+    }
+
+    /// 保存 ETag 到磁盘（跨启动持久化，避免每次冷启动都浪费一次 200 配额）
+    private func saveETag() {
+        guard let etag = cachedETag else { return }
+        try? FileManager.default.createDirectory(at: Self.cacheDir, withIntermediateDirectories: true)
+        try? etag.write(to: Self.etagFileURL, atomically: true, encoding: .utf8)
+    }
+
+    /// 启动时加载缓存的 ETag 和上次检查结果
+    private func loadCache() {
+        // 加载 ETag
+        cachedETag = try? String(contentsOf: Self.etagFileURL, encoding: .utf8)
+        // 加载上次检查结果（仅用于 403 兜底，不自动填充 UI —— 等首次 check 成功后再激活）
+        guard let data = try? Data(contentsOf: Self.cacheFileURL),
+              let cache = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let version = cache["version"] else { return }
+        // 仅当缓存版本比当前版本新时才预填（避免显示过期信息）
+        if UpdateChecker.compare(version, isNewerThan: currentVersion) {
+            self.latestVersion = version
+            if let urlStr = cache["downloadURL"], let url = URL(string: urlStr) {
+                self.latestDownloadURL = url
+            }
+            self.latestNotes = cache["notes"] ?? ""
+        }
+    }
+
+    /// API 请求失败后，尝试从磁盘缓存恢复结果。返回 true = 成功恢复。
+    private func restoreFromCache() -> Bool {
+        guard let data = try? Data(contentsOf: Self.cacheFileURL),
+              let cache = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+              let version = cache["version"] else { return false }
+        self.latestVersion = version
+        if let urlStr = cache["downloadURL"], let url = URL(string: urlStr) {
+            self.latestDownloadURL = url
+        }
+        self.latestNotes = cache["notes"] ?? ""
+        return true
     }
 
     // MARK: - 下载 + 引导安装
