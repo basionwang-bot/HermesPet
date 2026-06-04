@@ -9,7 +9,11 @@ final class IntelligenceOverlayController {
     static let shared = IntelligenceOverlayController()
 
     private var window: NSWindow?
-    private var hostingView: NSHostingView<IntelligenceGlowView>?
+    /// 用 NSHostingController 而非 NSHostingView。
+    /// NSHostingView 在 macOS 26 上即便 sizingOptions=[] 仍会通过 windowDidLayout →
+    /// updateAnimatedWindowSize 反推 NSWindow.setFrame → 嵌套 layout → 死循环（issue #109）。
+    /// NSHostingController 能真正禁掉该路径（DynamicIslandController 同一教训，见其 init 注释）。
+    private var hostingController: NSHostingController<IntelligenceGlowView>?
 
     private init() {}
 
@@ -20,7 +24,7 @@ final class IntelligenceOverlayController {
             window?.setFrame(screen.frame, display: false)
         }
         // 触发视图内 active = true 的 transition 动画
-        hostingView?.rootView = IntelligenceGlowView(isActive: true)
+        hostingController?.rootView = IntelligenceGlowView(isActive: true)
         window?.orderFront(nil)
 
         // 召唤音效 —— 由 SoundManager 统一管理（用户可在设置选 / 关 / 换自定义音频文件）
@@ -29,10 +33,10 @@ final class IntelligenceOverlayController {
 
     func hide() {
         // 触发淡出 transition；动画结束后真正 orderOut
-        hostingView?.rootView = IntelligenceGlowView(isActive: false)
+        hostingController?.rootView = IntelligenceGlowView(isActive: false)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) { [weak self] in
-            // 如果在动画期间又 show 了，hostingView 已经是 active=true，就不 hide
-            if self?.hostingView?.rootView.isActive == false {
+            // 如果在动画期间又 show 了，hostingController 已经是 active=true，就不 hide
+            if self?.hostingController?.rootView.isActive == false {
                 self?.window?.orderOut(nil)
             }
         }
@@ -56,14 +60,12 @@ final class IntelligenceOverlayController {
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         w.isReleasedWhenClosed = false
 
-        let host = NSHostingView(rootView: IntelligenceGlowView(isActive: false))
-        host.frame = w.contentLayoutRect
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        let hosting = NSHostingController(rootView: IntelligenceGlowView(isActive: false))
+        if #available(macOS 13.0, *) { hosting.sizingOptions = [] }  // 决策 #6
+        w.contentViewController = hosting
 
         self.window = w
-        self.hostingView = host
+        self.hostingController = hosting
     }
 }
 
