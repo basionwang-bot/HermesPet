@@ -10,7 +10,10 @@ final class QuickAskWindowController {
     static let shared = QuickAskWindowController()
 
     private var window: QuickAskPanel?
-    private var hostingView: NSHostingView<QuickAskView>?
+    /// 用 NSHostingController 而非 NSHostingView —— NSHostingView 在 macOS 26 上即便
+    /// sizingOptions=[] 仍会通过 windowDidLayout → updateAnimatedWindowSize 反推
+    /// NSWindow.setFrame → 嵌套 layout → SIGABRT（issue #109 / #110 同一根因）。
+    private var hostingController: NSHostingController<QuickAskView>?
     private let state = QuickAskState()
     private weak var viewModel: ChatViewModel?
     private weak var chatWindow: ChatWindowController?
@@ -219,7 +222,7 @@ final class QuickAskWindowController {
             }
         }
 
-        let host = NSHostingView(rootView: QuickAskView(
+        let hosting = NSHostingController(rootView: QuickAskView(
             state: state,
             onSubmit: { [weak self] text in self?.handleSubmit(text) },
             onPin: { [weak self] in self?.handlePin() },
@@ -228,13 +231,11 @@ final class QuickAskWindowController {
             onPasteBack: { [weak self] in self?.handlePasteBack() },
             onCopyAnswer: { [weak self] in self?.handleCopyAnswer() }
         ))
-        host.frame = NSRect(x: 0, y: 0, width: 680, height: 80)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        if #available(macOS 13.0, *) { hosting.sizingOptions = [] }  // 决策 #6
+        w.contentViewController = hosting
 
         self.window = w
-        self.hostingView = host
+        self.hostingController = hosting
     }
 
     /// 位置：屏幕中央偏上 30% 处。展开时窗口高 → 整体上移让顶部对齐。
@@ -625,7 +626,10 @@ struct QuickAskView: View {
             //   - opacity 静态 0.55 / 流式 0.85（原 0.75 / 0.95，明显降饱和）
             //   - blur 0.8（原 0.4，让色边"散"得更像真液体）
             //   - lineWidth 1.2（原 1.5，更细更轻）
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: false)) { timeline in
+            // 30Hz 已足够呈现彩虹旋转感（眼睛对边缘光晕的时间分辨率远低于硬边动画），
+            // 且 60Hz 在 macOS 26.5 上会让 AngularGradient 的 conic shader
+            // (RGBAf16_shade_conic_RGB) 穿透到 CA 层形成渲染死循环（issue #109）。
+            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { timeline in
                 let cycle: Double = state.isStreaming ? 3.0 : 8.0
                 let date = timeline.date.timeIntervalSinceReferenceDate
                 let angle = (date.truncatingRemainder(dividingBy: cycle) / cycle) * 360
