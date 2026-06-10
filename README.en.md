@@ -6,13 +6,10 @@
 
 # HermesPet 🐻‍❄️
 
-**An AI chat client living under your MacBook's notch · 5 parallel engines · 5 pixel pets keeping you company**
-
-<sub>🆕 **Windows early-access build is here** — the desktop AI companion now comes to Windows too</sub>
+**An AI chat client living under your MacBook's notch · 6 parallel engines · 6 pixel pets keeping you company**
 
 [![Website](https://img.shields.io/badge/website-hermespet.cc-7B68EE?logo=safari&logoColor=white)](https://hermespet.cc)
 [![macOS](https://img.shields.io/badge/macOS-14.0+-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
-[![Windows](https://img.shields.io/badge/Windows-10/11_early--access-0078D4?logo=windows&logoColor=white)](https://github.com/basionwang-bot/HermesPet/releases/tag/win-v0.1.0)
 [![Swift](https://img.shields.io/badge/Swift-6.0-F05138?logo=swift&logoColor=white)](https://www.swift.org/)
 [![Latest Release](https://img.shields.io/github/v/release/basionwang-bot/HermesPet?label=latest&color=success&logo=github)](https://github.com/basionwang-bot/HermesPet/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/basionwang-bot/HermesPet/total?label=downloads&color=blue)](https://github.com/basionwang-bot/HermesPet/releases)
@@ -20,15 +17,13 @@
 
 🌍 [中文](./README.md) · **English**
 
-### 🍎 [macOS download (DMG) →](https://github.com/basionwang-bot/HermesPet/releases/latest) · 🪟 [Windows early-access (exe) →](https://github.com/basionwang-bot/HermesPet/releases/tag/win-v0.1.0)
+### 📦 [Download the latest DMG →](https://github.com/basionwang-bot/HermesPet/releases/latest)
 
 ### 🌐 [Visit the project site · hermespet.cc →](https://hermespet.cc)
 
-macOS: grab the DMG · **double-click to install and open** (Apple-notarized) · pick a provider, paste an API key — **no command-line tools required**
+Grab the macOS DMG · **double-click to install and open** (Apple-notarized) · pick a provider, paste an API key — **no command-line tools required**
 
 <sub>💡 Prefer the official signed DMG above (no build needed, double-click to run) · 🤖 AI agents: see [AGENTS.md](AGENTS.md)</sub>
-
-<sub>🪟 Windows is an **early-access build**: multi-model chat, the desktop pixel monster, push-to-talk, and the read/write-files & run-commands tools all work today — more features are being brought to parity. If Windows blocks the first launch, click "More info → Run anyway".</sub>
 
 </div>
 
@@ -83,14 +78,12 @@ HermesPet is an AI chat client + desktop companion that lives **right below your
 Tap the notch to summon the chat window, hold `⌘⇧V` to talk, drop files onto the little pet, watch fomo the nine-tailed fox wander your desktop, see the Dynamic Island draw a Face ID-style checkmark ✓ when the AI is done — **desktop AI should feel alive**. The entire interface now ships in **English / 中文 with instant in-app switching**.
 
 > Swift 6 · SwiftUI · macOS 14+ · Pure native (no Electron / no Web view) · Apache-2.0 open source
->
-> 🪟 **Windows early-access**: rebuilt in Electron + TypeScript — a desktop AI companion that lives at the top of your screen. Multi-model chat, the desktop pixel monster, push-to-talk, and read/write-files & run-commands tools all work today; more features are being brought to parity with macOS.
 
 ---
 
 ## ✨ Highlights
 
-### 🔀 5 AI engines, truly running in parallel
+### 🔀 6 AI engines, truly running in parallel
 
 Not switching — **truly in parallel**. Each conversation independently binds to one AI engine and locks after the first message. Run up to 8 conversations at once (`⌘1`~`⌘8` jumps instantly). Have Claude editing code, Online AI translating docs, and Codex generating an image — **all at the same time**. When a background conversation finishes, the corresponding spot on the Dynamic Island pulses softly so you don't have to babysit.
 
@@ -101,10 +94,11 @@ Not switching — **truly in parallel**. Each conversation independently binds t
 | ✦ **Hermes Gateway** | Any **OpenAI-compatible HTTP endpoint** (self-hosted / cloud / vLLM / Ollama) | Fill in baseURL + Key; 3 built-in presets, model auto-pulled from `/v1/models` |
 | ⌨️ **Claude Code** | File edits / shell commands / deep coding | Install [`claude` CLI](https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview) (optional) |
 | ✨ **Codex** | Code + native image generation (multi-image vision) | Install [`codex` CLI](https://github.com/openai/codex) (optional) |
+| 🧩 **QwenCode** | **Zero-Key, zero-config** for Qwen `qwen` users (reuses your terminal login) | Install the `qwen` CLI and sign in → auto-detected & unlocked |
 
-**New users see only "Online AI" mode by default** (the simplest experience); the other four modes **auto-appear and unlock** when the matching tool is installed — no manual toggling required. **User intent always wins over auto-detection** — any enabled mode can be turned off again in settings.
+**New users see only "Online AI" mode by default** (the simplest experience); the other five modes **auto-appear and unlock** when the matching tool is installed — no manual toggling required. **User intent always wins over auto-detection** — any enabled mode can be turned off again in settings.
 
-### 🦊 5 pixel pets · one per AI mode
+### 🦊 6 pixel pets · one per AI mode
 
 Every AI mode gets its own **pixel-art pet** living in your menu bar:
 
@@ -115,6 +109,7 @@ Every AI mode gets its own **pixel-art pet** living in your menu bar:
 | 🦊 **fomo** | OpenClaw | Moonlight silver-white nine-tailed fox, with twitchy ears |
 | 🐴 **Pegasus** | Hermes | Golden flying horse, mane fluttering in trot rhythm |
 | ⌨️ **coco** | Codex | Iron Man-style pixel robot |
+| 👓 **Little Teal** | QwenCode | Teal monster in round black-rimmed glasses, zero-config Qwen |
 
 Pets aren't just decoration:
 
@@ -127,12 +122,13 @@ Pets aren't just decoration:
 
 The capsule below the notch is the **heart** of HermesPet:
 
-- **Left ear** sprite follows the current mode in real time (5 independent animations)
+- **Left ear** sprite follows the current mode in real time (6 independent animations)
 - **Right ear** real-time tool status: rotating pulse → step count → file change count → **Face ID-style stroke checkmark ✓** on completion
 - **Hover → water-drop expansion** — the capsule flows down from the notch, showing mode color + model name + recent reply preview
 - 🛡 **Real-time tool permission**: when Claude / Codex wants to **write a file or run a command** on your machine, a black card pops out **flush below** the island (visually seamless with the notch), showing the tool name + key arguments, with three buttons **[Deny / Allow / Always Allow]** and a feedback banner after you decide. When the chat window is open, the UI hops into the header strip and the pet strikes an "arms-up, help-me" pose — **HermesPet won't decide for you**
 - 💬 **AI response summary card**: when the chat window is closed, a summary card pops below the island for 8s after the AI finishes — never miss a reply you weren't watching for
 - 🎙 **Live speech transcription**: hold `⌘⇧V` and a real-time transcript bar appears below the island
+- 📊 **System info ticker**: the right ear cycles live **memory / CPU / network speed / temperature**; hover the island to expand the full set of metrics
 - ❌ **Error state** turns the whole capsule amber + click to retry · 📸 **Screenshot shutter** 0.18s white flash · 🌊 **Background conversations** pulse softly on their capsule spot
 
 ### 🎙 Push-to-talk · 📎 Drag files · 💬 Multi-conversation
@@ -157,6 +153,15 @@ Underneath, three hard features ship together:
 
 > Fully local, zero upload. Those "revisit / star / salience" signals make HermesPet understand your rhythm the more you use it — and the final say is always yours.
 
+### 🆕 New in v1.4 · more and more like a partner that works alongside you
+
+- 🎙 **Voice companion (`⌘⇧L`)**: summon a capsule floating under the notch and hold a **continuous voice conversation** with the AI (listen → think → speak, looping automatically). While listening it's a field of softly breathing **nebula particles**; as it speaks, **each word lights up as it's read aloud**, like karaoke lyrics your eyes can follow.
+- 📝 **AI Notes (`⌘⇧N`) + Writing mode**: a **local Markdown notebook** (three-pane window) your pet writes alongside you — let the AI continue / rewrite / tidy up as you type; Writing mode has live preview.
+- 🚀 **Fleet workflow (Beta)**: hand a task to a whole **"AI company" with real job roles** — the captain asks a few clarifying questions first, then splits the work across multiple AIs (research / copy / engineering / QA…) **running in parallel**, with a full-screen "fleet theater" showing every lane's progress live, then synthesizes it into one deliverable.
+- 🎬 **Meeting minutes**: record → auto-segmented transcription → AI organizes it into structured minutes.
+- 👁 **See & operate your screen (experimental)**: let the AI **see your screen** (screenshot + OCR) and **act on it** (move the mouse / click / type) to take over repetitive operations.
+- 🐣 **Pet growth**: as you get things done with the AI, your pet **gains XP, levels up, and shifts moods** — with more forms to unlock / collect down the road.
+
 ### 📋 AI task planner & dispatch · 📰 Cross-day memory + daily companion
 
 Let the AI **plan tasks and dispatch them to the right AI**: say "help me list what to do today" and the AI replies with a ```` ```tasks ```` YAML block that the client renders into **actionable cards**, each with 3 buttons — 📌 **Pin** to the desktop (checkbox strikes through, never disappears) / 🤖 **Let AI do it** (auto-creates a conversation in the recommended mode) / ✗ **Skip**. Not just a chat client — a **task dispatch hub**.
@@ -165,7 +170,7 @@ It also **quietly remembers you** (a big step in v1.2.13): it records what apps 
 
 - 🌅 **Daily briefing**: on morning launch the AI reviews yesterday, writes a Markdown recap, and **follows up proactively** ("You were tuning SwiftUI animation yesterday — want me to Pin the key solution to your desktop?")
 - 🎉 **Weekly review + milestones**: a recap every week, plus a little celebration at 30 / 100 / 365 days together
-- 🧠 **Cross-mode shared memory**: one **user-editable memory shared across all 5 AIs**, so any engine you switch to still "gets you" (edit / clear / disable under Settings → Privacy)
+- 🧠 **Cross-mode shared memory**: one **user-editable memory shared across all engines**, so any engine you switch to still "gets you" (edit / clear / disable under Settings → Privacy)
 
 > All intent data **stays on your machine** — one-click export to JSON / clear / blocklist an app.
 
@@ -237,9 +242,9 @@ After granting any permission, **fully quit and reopen** (menu-bar icon → Quit
 
 ---
 
-## 🎯 Online AI: 6 providers out of the box
+## 🎯 Online AI: a dozen+ providers out of the box
 
-"Online AI" is the default, zero-dependency mode for new users. It ships with presets for 6 mainstream LLMs, each with a **3-level response preference** (fast / balanced / deep) auto-mapped to the right model; the bundled opencode runtime handles SSE / reasoning filtering / tool calling:
+"Online AI" is the default, zero-dependency mode for new users. It ships with presets for **a dozen-plus mainstream LLMs — DeepSeek / Zhipu / Kimi / MiniMax / OpenAI / Qwen / Doubao / Hunyuan / ERNIE / Gemini / Grok / Mistral and more** (**the client auto-pulls the latest list from the cloud on launch — new providers need no app update**), each with a **3-level response preference** (fast / balanced / deep) auto-mapped to the right model; the bundled opencode runtime handles SSE / reasoning filtering / tool calling:
 
 | Provider | Default model | Sign up |
 |---|---|---|
@@ -250,7 +255,7 @@ After granting any permission, **fully quit and reopen** (menu-bar icon → Quit
 | OpenAI | gpt-4o-mini | [platform.openai.com](https://platform.openai.com) |
 | Custom | You decide | Any OpenAI-compatible endpoint |
 
-Each provider's **API Key is stored separately** (no cross-contamination); switching auto-fills the matching baseURL. **All 5 modes' configs are stored fully independently**, new conversations inherit "the last mode you used", and you're **5 minutes from install to first chat**.
+Each provider's **API Key is stored separately** (no cross-contamination); switching auto-fills the matching baseURL. **Each mode's config is stored fully independently**, new conversations inherit "the last mode you used", and you're **5 minutes from install to first chat**.
 
 ---
 
@@ -265,6 +270,9 @@ Each provider's **API Key is stored separately** (no cross-contamination); switc
 | `⌘⇧V` | Hold to talk, release to auto-send |
 | `⌘⇧P` | Pin the latest AI reply of the current conversation to the desktop |
 | `⌘⇧Space` | Spotlight-style quick-ask floating window |
+| `⌘⇧L` | Voice companion (continuous voice chat) |
+| `⌘⇧N` | AI notebook |
+| `⌘⇧G` | Knowledge Nebula |
 
 **In-window** (when the chat window is focused): `⌘N` new conversation · `⌘[` / `⌘]` previous/next conversation · `⌘1`~`⌘8` jump to that conversation · `⌘⌫` close current conversation · `⌘+` / `⌘-` / `⌘0` font size.
 
@@ -287,7 +295,7 @@ Each provider's **API Key is stored separately** (no cross-contamination); switc
 - 🛡 **Activity sampling + shared memory stay local**: all briefing / memory data lives in local SQLite and **never leaves your machine**; one-click export to JSON / clear / blocklist an app / edit or disable shared memory
 - 🛡 **Crash logs**: HermesPet scans local crash files → copies the full log to clipboard → **you** manually paste into a GitHub Issue. It never auto-uploads anything.
 
-> Technical decision notes (gotchas / Swift 6 isolation / macOS layout cycles) live in [CLAUDE.md](./CLAUDE.md); roadmap in [TODO.md](./TODO.md). ~60 Swift files, pure native, no Electron.
+> Technical decision notes (gotchas / Swift 6 isolation / macOS layout cycles) live in [CLAUDE.md](./CLAUDE.md); roadmap in [TODO.md](./TODO.md). Pure native Swift, no Electron.
 
 ---
 
@@ -299,9 +307,7 @@ HermesPet is currently a one-person open-source project. Every issue / PR / star
 - 🛠 **Want to send a PR**: open an issue first to chat about direction — saves us both time. No strict style guide, just match the surrounding files
 - ⭐ **Like the project**: a Star or a share with someone who'd like it goes a long way — getting this in front of more people is the best reward this project could ask for
 
-> 🪟 The **Windows early-access build** is developed by just me right now — limited bandwidth, still polishing, so please bear with the rough edges 🙏 Got issues or ideas? Add me on WeChat: `fastqingshan`
->
-> 💡 Want to use HermesPet inside your company, or customize it as your branded AI tool? Email me: [basionwang@gmail.com](mailto:basionwang@gmail.com)
+> 💡 Want to use HermesPet inside your company, or customize it as your branded macOS AI tool? Email me: [basionwang@gmail.com](mailto:basionwang@gmail.com)
 
 ---
 
