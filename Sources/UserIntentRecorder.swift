@@ -242,12 +242,14 @@ final class UserIntentRecorder {
         let errorKw = ["error", "exception", "崩溃", "crash", "panic", "fatal", "报错"]
         guard let kw = errorKw.first(where: { lower.contains($0) }) else { return nil }
 
-        // 取关键词上下 100 字上下文
-        guard let range = lower.range(of: kw) else { return nil }
-        let nsRange = NSRange(range, in: lower)
-        let start = max(0, nsRange.location - 100)
-        let end = min(text.count, nsRange.location + nsRange.length + 100)
+        // 取关键词上下 100 字上下文。统一在 NSString(UTF-16) 坐标系里算，
+        // 否则 emoji / 增补平面字符让 text.count(grapheme) 与 NSRange.location(UTF-16) 错位 → 负长度 NSRangeException
         let nsText = text as NSString
+        let kwRange = nsText.range(of: kw, options: .caseInsensitive)
+        guard kwRange.location != NSNotFound else { return nil }
+        let start = max(0, kwRange.location - 100)
+        let end = min(nsText.length, kwRange.location + kwRange.length + 100)
+        guard end > start else { return nil }
         let context = nsText.substring(with: NSRange(location: start, length: end - start))
 
         // 上下文必须有"代码/标识符"线索，否则不算（防止纯叙述性文本如菜单 "Help / Report Error"）
@@ -370,15 +372,18 @@ final class UserIntentRecorder {
 
         var ocrText: String? = nil
         var screenHash: String? = nil
+        var documentPath: String? = nil
 
         if !isBlacklisted {
             // 4) 截鼠标所在屏 → Vision OCR
             if let cgImage = await ScreenCapture.captureMouseScreenAsCGImage() {
-                ocrText = await Self.performOCR(on: cgImage)
+                ocrText = await VisionOCR.recognizeText(in: cgImage)
                 if let text = ocrText, !text.isEmpty {
                     screenHash = Self.sha256Prefix(text)
                 }
             }
+            // 4.5) 拿当前文档真实路径（仅文档类 app 给）—— 用于昨日回顾的可点击文档链接
+            documentPath = AccessibilityReader.frontDocumentPath()
         }
 
         // 5) 落库
@@ -389,7 +394,8 @@ final class UserIntentRecorder {
             windowTitle: windowTitle,
             ocrText: ocrText,
             screenHash: screenHash,
-            isBlacklisted: isBlacklisted
+            isBlacklisted: isBlacklisted,
+            documentPath: documentPath
         )
         store?.insertUserIntent(intent)
         NSLog("[UserIntent] \(trigger.rawValue) @ \(appName ?? "?") · \(windowTitle ?? "?") · ocr=\(ocrText?.count ?? 0)字")
@@ -439,88 +445,7 @@ final class UserIntentRecorder {
     }
 
     // MARK: - Vision OCR
-
-    /// 用 macOS Vision Framework 做 OCR（zh-Hans + en，fast 级别）。
-    /// 后台线程跑（VNImageRequestHandler.perform 是 blocking IO），完成后 resume。
-    ///
-    /// **性能策略**（v1.2.9 优化）：
-    /// - `.fast` 替代 `.accurate`：关键词检测场景不需要精准识别，速度提升 2-5×
-    /// - `usesLanguageCorrection = false`：拼写矫正对截屏 OCR 价值低，关掉省一半时间
-    /// - 输入图先 downsample 到 ≤ 1600pt 边长：5K 屏全分辨率 OCR 太贵，
-    ///   缩到 1600pt 后大字号/正文都能识别，小字（< 12pt）虽然丢但对意图判定无关键损失
-    ///
-    /// 三项叠加后 OCR 速度提升 5-10×，主线程 Foundation→Swift dictionary bridging 同步减少。
-    nonisolated private static func performOCR(on cgImage: CGImage) async -> String? {
-        await withCheckedContinuation { (cont: CheckedContinuation<String?, Never>) in
-            DispatchQueue.global(qos: .utility).async {
-                // 先 downsample 减少 ANE 处理量
-                let processedImage = downsampleIfNeeded(cgImage) ?? cgImage
-
-                let request = VNRecognizeTextRequest { (req, _) in
-                    guard let results = req.results as? [VNRecognizedTextObservation] else {
-                        cont.resume(returning: nil)
-                        return
-                    }
-                    // 按 boundingBox 从上到下、从左到右排序（Y 原点在 image 底部）
-                    let sorted = results.sorted { a, b in
-                        if abs(a.boundingBox.origin.y - b.boundingBox.origin.y) > 0.02 {
-                            return a.boundingBox.origin.y > b.boundingBox.origin.y
-                        }
-                        return a.boundingBox.origin.x < b.boundingBox.origin.x
-                    }
-                    let text = sorted
-                        .compactMap { $0.topCandidates(1).first?.string }
-                        .joined(separator: "\n")
-                    cont.resume(returning: text.isEmpty ? nil : text)
-                }
-                // 中文识别 macOS 13+ 支持，需要显式声明
-                request.recognitionLanguages = ["zh-Hans", "en-US"]
-                request.recognitionLevel = .fast
-                request.usesLanguageCorrection = false
-
-                let handler = VNImageRequestHandler(cgImage: processedImage, options: [:])
-                do {
-                    try handler.perform([request])
-                } catch {
-                    NSLog("[UserIntent] Vision OCR 失败: \(error.localizedDescription)")
-                    cont.resume(returning: nil)
-                }
-            }
-        }
-    }
-
-    /// 把全屏截图（5K = 5120×2880 等）按比例缩到长边 ≤ 1600pt。
-    /// CGImage 已经够小（长边 < 1600）则直接 return nil 让调用方用原图。
-    /// 用 CoreGraphics 重绘到小尺寸 context，速度 < 20ms。
-    nonisolated private static func downsampleIfNeeded(_ image: CGImage) -> CGImage? {
-        let maxEdge: CGFloat = 1600
-        let w = CGFloat(image.width)
-        let h = CGFloat(image.height)
-        let longSide = max(w, h)
-        guard longSide > maxEdge else { return nil }
-
-        let scale = maxEdge / longSide
-        let newW = Int(w * scale)
-        let newH = Int(h * scale)
-
-        let colorSpace = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = image.bitmapInfo
-        let bitsPerComponent = image.bitsPerComponent
-
-        guard let ctx = CGContext(
-            data: nil,
-            width: newW,
-            height: newH,
-            bitsPerComponent: bitsPerComponent,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo.rawValue
-        ) else { return nil }
-
-        ctx.interpolationQuality = .medium
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
-        return ctx.makeImage()
-    }
+    // OCR 实现已抽到公共工具 `VisionOCR`（圈选截图问 AI 也复用），见 VisionOCR.swift。
 
     /// SHA256 前 16 位 hex —— 用于 Phase 2 重复屏幕检测
     nonisolated private static func sha256Prefix(_ text: String) -> String {

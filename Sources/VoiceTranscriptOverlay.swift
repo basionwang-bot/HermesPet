@@ -16,7 +16,7 @@ final class VoiceTranscriptOverlayController {
     static let shared = VoiceTranscriptOverlayController()
 
     private var window: NSWindow?
-    private var hostingView: NSHostingView<VoiceTranscriptView>?
+    private var hostingView: NSHostingController<VoiceTranscriptView>?
     private let viewState = TranscriptState()
 
     private init() {
@@ -29,22 +29,26 @@ final class VoiceTranscriptOverlayController {
         let nc = NotificationCenter.default
         nc.addObserver(forName: .init("HermesPetVoiceStarted"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
+                guard !VoiceChatController.isSessionActive else { return }   // 陪聊用的是同一个 VoiceInputController，别让字幕条串扰冒出来
                 self?.showOverlay(initialText: "正在听…")
             }
         }
         nc.addObserver(forName: .init("HermesPetVoicePartial"), object: nil, queue: .main) { [weak self] note in
             let text = (note.userInfo?["text"] as? String) ?? ""
             Task { @MainActor in
+                guard !VoiceChatController.isSessionActive else { return }
                 self?.updateText(text)
             }
         }
         nc.addObserver(forName: .init("HermesPetVoiceFinished"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
+                guard !VoiceChatController.isSessionActive else { return }
                 self?.hideOverlay()
             }
         }
         nc.addObserver(forName: .init("HermesPetVoiceCancelled"), object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
+                guard !VoiceChatController.isSessionActive else { return }
                 self?.hideOverlay()
             }
         }
@@ -114,11 +118,14 @@ final class VoiceTranscriptOverlayController {
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         w.isReleasedWhenClosed = false
 
-        let host = NSHostingView(rootView: VoiceTranscriptView(state: viewState))
-        host.frame = NSRect(x: 0, y: 0, width: 320, height: 60)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        // 决策 #1/#6 升级：裸 NSHostingView 即便 sizingOptions=[] 在 macOS 26 仍会经
+        // updateAnimatedWindowSize 反推 setFrame（2026-06-11 00:09 崩溃实锤）；只有
+        // NSHostingController + sizingOptions=[] 真正禁掉反推（照语音陪聊/迷你岛范本）
+        let host = NSHostingController(rootView: VoiceTranscriptView(state: viewState))
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }
+        w.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // 防御：铺满全窗（autoresizingMask 收口）
+        w.setContentSize(NSSize(width: 320, height: 60))
 
         self.window = w
         self.hostingView = host

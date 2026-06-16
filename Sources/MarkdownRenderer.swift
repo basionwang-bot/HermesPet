@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - Markdown Renderer
 
@@ -14,8 +15,8 @@ struct MarkdownTextView: View {
     var onChoiceSelected: ((String) -> Void)? = nil
     /// 点击任务卡片 📌 Pin → 把任务转成桌面任务 Pin
     var onPinTask: ((PlannedTask) -> Void)? = nil
-    /// 点击任务卡片 🤖 让 AI 做 → 新开对话派发给指定 mode 处理
-    var onDispatchTask: ((PlannedTask) -> Void)? = nil
+    /// 点击任务卡片 🤖 让 AI 做 → 新开对话派发给用户选中的 mode 处理
+    var onDispatchTask: ((PlannedTask, AgentMode) -> Void)? = nil
     /// 卡片主题色（跟当前 mode 联动：Hermes 绿 / Claude 橙 / Codex 青）
     var tint: Color = .accentColor
 
@@ -24,7 +25,7 @@ struct MarkdownTextView: View {
     @Environment(\.chatFontScale) private var fontScale: Double
 
     var body: some View {
-        let blocks = parseBlocks(content)
+        let blocks = Self.cachedBlocks(content)
         VStack(alignment: .leading, spacing: 6) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 switch block {
@@ -51,8 +52,15 @@ struct MarkdownTextView: View {
                         items: items,
                         tint: tint,
                         onPin: { task in onPinTask?(task) },
-                        onDispatch: { task in onDispatchTask?(task) }
+                        onDispatch: { task, mode in onDispatchTask?(task, mode) }
                     )
+                case .docList(let paths):
+                    DocumentLinkCardList(paths: paths, tint: tint)
+                case .noteEdit(let filename, let content):
+                    // 流式期间 onChoiceSelected 为 nil → 只预览不落地，避免半截内容被误应用
+                    NoteApplyCard(filename: filename, content: content, tint: tint, interactive: onChoiceSelected != nil)
+                case .image(let alt, let path):
+                    MarkdownImageView(alt: alt, path: path)
                 }
             }
         }
@@ -103,6 +111,12 @@ struct MarkdownTextView: View {
         case table(headers: [String], alignments: [TableColumnAlignment], rows: [[String]])
         /// AI 输出 ```tasks fence 时识别为任务清单，渲染成可操作卡片
         case taskList(items: [PlannedTask])
+        /// ```docs fence（每行一个绝对文件路径）→ 渲染成可点击打开的文档卡（昨日回顾用）
+        case docList(paths: [String])
+        /// ```note:文件名 fence（写作模式）→ 渲染成"应用到笔记"卡片
+        case noteEdit(filename: String, content: String)
+        /// 独占一行的图片 `![alt](path)` → 渲染本地/远程图片（写作模式插图用）
+        case image(alt: String, path: String)
     }
 
     /// 表格列对齐 —— 由 separator 行的 :--- / ---: / :---: 决定
@@ -110,7 +124,35 @@ struct MarkdownTextView: View {
         case leading, center, trailing
     }
 
-    private func parseBlocks(_ text: String) -> [Block] {
+    /// 解析结果缓存盒（NSCache 需要 class 值类型）。
+    private final class BlocksBox {
+        let blocks: [Block]
+        init(_ blocks: [Block]) { self.blocks = blocks }
+    }
+
+    /// 块解析缓存：以**完整内容字符串**为 key。
+    /// 之前 `body` 每次重渲染都 `parseBlocks(content)` 整段重拆 —— 流式逐字时每帧重解析（O(n²)），
+    /// 非流式时 hover / 字号变 / 窗口缩放 / LazyVStack 滚动复用 cell 也都白拆一遍。
+    /// 加缓存后：内容没变直接命中，SwiftUI 也因块身份稳定不再重建下游 AttributedString。
+    /// `countLimit` 限 96 条 → 流式产生的大量中间态字符串会被自动淘汰，不会无限涨内存。
+    private static let blockCache: NSCache<NSString, BlocksBox> = {
+        let cache = NSCache<NSString, BlocksBox>()
+        cache.countLimit = 96
+        return cache
+    }()
+
+    /// 带缓存的块解析入口。命中即返回；未命中才真正 `parseBlocks` 并写回缓存。
+    private static func cachedBlocks(_ text: String) -> [Block] {
+        let key = text as NSString
+        if let hit = blockCache.object(forKey: key) {
+            return hit.blocks
+        }
+        let parsed = parseBlocks(text)
+        blockCache.setObject(BlocksBox(parsed), forKey: key)
+        return parsed
+    }
+
+    private static func parseBlocks(_ text: String) -> [Block] {
         let lines = text.components(separatedBy: "\n")
         var blocks: [Block] = []
         var i = 0
@@ -121,15 +163,37 @@ struct MarkdownTextView: View {
             // Code block (```)
             if line.hasPrefix("```") {
                 let language = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let isNoteBlock = language.lowercased() == "note" || language.lowercased().hasPrefix("note:")
                 var codeLines: [String] = []
                 i += 1
-                while i < lines.count {
-                    if lines[i].hasPrefix("```") {
-                        i += 1
-                        break
+                if isNoteBlock {
+                    // ⚠️ note 内容常含嵌套代码块（如 ```cpp … ```）。普通收集器遇到内层 ``` 就误判
+                    // note 结束 → 后半截被截断、写文件丢内容（用户实测 bug）。这里跟踪内层 fence：
+                    // 带语言的 ```cpp = 内层开启；裸 ``` 在内层时 = 内层关闭，不在内层时 = note 真正结束。
+                    var insideInner = false
+                    while i < lines.count {
+                        let l = lines[i]
+                        if l.hasPrefix("```") {
+                            let innerLang = String(l.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                            if insideInner {
+                                insideInner = false; codeLines.append(l); i += 1; continue
+                            } else if !innerLang.isEmpty {
+                                insideInner = true; codeLines.append(l); i += 1; continue
+                            } else {
+                                i += 1; break   // 裸 ``` 且不在内层 → note 块结束
+                            }
+                        }
+                        codeLines.append(l); i += 1
                     }
-                    codeLines.append(lines[i])
-                    i += 1
+                } else {
+                    while i < lines.count {
+                        if lines[i].hasPrefix("```") {
+                            i += 1
+                            break
+                        }
+                        codeLines.append(lines[i])
+                        i += 1
+                    }
                 }
                 // 特殊语言 "tasks" → 解析为可操作的任务卡片清单
                 if language.lowercased() == "tasks" {
@@ -139,6 +203,28 @@ struct MarkdownTextView: View {
                         continue
                     }
                     // 解析不出来就退化成普通 code block 显示 raw 内容
+                }
+                // 特殊语言 "docs" → 每行一个绝对路径，渲染成可点击打开的文档卡（昨日回顾用）
+                if language.lowercased() == "docs" {
+                    let paths = codeLines
+                        .map { $0.trimmingCharacters(in: .whitespaces) }
+                        .filter { $0.hasPrefix("/") }
+                    if !paths.isEmpty {
+                        blocks.append(.docList(paths: paths))
+                        continue
+                    }
+                }
+                // 特殊语言 "note" / "note:文件名"（写作模式）→ 渲染成"应用到笔记"卡片
+                let langLower = language.lowercased()
+                if langLower == "note" || langLower.hasPrefix("note:") {
+                    let filename: String
+                    if let colon = language.firstIndex(of: ":") {
+                        filename = String(language[language.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                    } else {
+                        filename = ""
+                    }
+                    blocks.append(.noteEdit(filename: filename, content: codeLines.joined(separator: "\n")))
+                    continue
                 }
                 blocks.append(.codeBlock(
                     language: language,
@@ -151,6 +237,13 @@ struct MarkdownTextView: View {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed == "---" || trimmed == "***" || trimmed == "___" {
                 blocks.append(.divider)
+                i += 1
+                continue
+            }
+
+            // 独占一行的图片 ![alt](path) → 图片块
+            if let img = Self.parseImageLine(line) {
+                blocks.append(.image(alt: img.alt, path: img.path))
                 i += 1
                 continue
             }
@@ -285,6 +378,26 @@ struct MarkdownTextView: View {
         return cells.map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
+    /// 解析独占一行的图片 `![alt](path)`（可带 `"title"`）。不是图片行返回 nil。
+    static func parseImageLine(_ line: String) -> (alt: String, path: String)? {
+        let s = line.trimmingCharacters(in: .whitespaces)
+        guard s.hasPrefix("!["), s.hasSuffix(")"),
+              let altEnd = s.firstIndex(of: "]") else { return nil }
+        let afterAlt = s.index(after: altEnd)
+        guard afterAlt < s.endIndex, s[afterAlt] == "(" else { return nil }
+        let alt = String(s[s.index(s.startIndex, offsetBy: 2)..<altEnd])
+        let pathStart = s.index(after: afterAlt)
+        let pathEnd = s.index(before: s.endIndex)   // 末尾的 )
+        guard pathStart < pathEnd else { return nil }
+        var path = String(s[pathStart..<pathEnd]).trimmingCharacters(in: .whitespaces)
+        // 去掉可选 title：![](path "标题")
+        if let sp = path.firstIndex(of: " ") { path = String(path[..<sp]) }
+        // 去掉路径外层尖括号 ![](<path>)
+        if path.hasPrefix("<"), path.hasSuffix(">") { path = String(path.dropFirst().dropLast()) }
+        guard !path.isEmpty else { return nil }
+        return (alt, path)
+    }
+
     /// 解析编号列表项："1. xxx" / "12. xxx" / "  3. xxx"。返回去掉前缀后的内容；不是编号项返回 nil。
     static func numberedItemContent(of line: String) -> String? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -300,6 +413,73 @@ struct MarkdownTextView: View {
         guard afterDot < trimmed.endIndex, trimmed[afterDot] == " " else { return nil }
         return String(trimmed[trimmed.index(after: afterDot)...])
             .trimmingCharacters(in: .whitespaces)
+    }
+}
+
+// MARK: - 图片块（写作模式插图 / 一般本地图片）
+
+/// 渲染 `![alt](path)`：本地相对路径按笔记库根解析、绝对/`file://` 直用、`http(s)` 走 AsyncImage。
+/// 加载结果缓存(NSCache)，避免每次重渲染都重读盘。失败时给占位条。
+struct MarkdownImageView: View {
+    let alt: String
+    let path: String
+
+    var body: some View {
+        // 库根在 body(@MainActor)里读，传给 nonisolated 的解析器
+        let resolved = Self.resolve(path, vaultPath: NotesStore.shared.vaultURL.path)
+        Group {
+            if path.hasPrefix("http"), let u = URL(string: path) {
+                AsyncImage(url: u) { img in
+                    img.resizable().scaledToFit()
+                } placeholder: {
+                    placeholder
+                }
+                .frame(maxWidth: .infinity, maxHeight: 420, alignment: .leading)
+            } else if let url = resolved, let ns = Self.cachedImage(url) {
+                Image(nsImage: ns)
+                    .resizable().scaledToFit()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxHeight: 420)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(.primary.opacity(0.08), lineWidth: 0.5)
+                    )
+            } else {
+                placeholder
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private var placeholder: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "photo").foregroundStyle(.secondary)
+            Text(alt.isEmpty ? path : alt)
+                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(.primary.opacity(0.05)))
+    }
+
+    /// 把 markdown 里的路径解析成本地 URL（http 的不在这里处理）。
+    nonisolated static func resolve(_ path: String, vaultPath: String) -> URL? {
+        if path.hasPrefix("http") { return nil }
+        if path.hasPrefix("file://") { return URL(string: path) }
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+        let clean = path.hasPrefix("./") ? String(path.dropFirst(2)) : path
+        return URL(fileURLWithPath: vaultPath).appendingPathComponent(clean)
+    }
+
+    // NSCache 本身线程安全 → nonisolated(unsafe) 让 nonisolated 的 cachedImage 能安全引用（决策 #5）
+    nonisolated(unsafe) private static let imgCache = NSCache<NSString, NSImage>()
+    nonisolated static func cachedImage(_ url: URL) -> NSImage? {
+        let key = url.path as NSString
+        if let hit = imgCache.object(forKey: key) { return hit }
+        guard let img = NSImage(contentsOf: url) else { return nil }
+        imgCache.setObject(img, forKey: key)
+        return img
     }
 }
 
@@ -374,7 +554,7 @@ struct ChoiceCard: View {
             )
         }
         .buttonStyle(.plain)
-        .help("填入输入框：\(text)")
+        .help(L("markdown.choice.fillHelp", text))
         .onHover { hovering in
             withAnimation(AnimTok.snappy) { isHovering = hovering }
         }
@@ -484,13 +664,36 @@ struct TableBlockView: View {
 struct InlineMarkdownView: View {
     let text: String
 
+    /// 富文本缓存盒（NSCache 需要 class 值；`nil` 也缓存，避免对解析失败的文本反复重试）。
+    private final class AttributedBox {
+        let value: AttributedString?
+        init(_ value: AttributedString?) { self.value = value }
+    }
+
+    /// inline markdown → AttributedString 的缓存。以文本为 key。
+    /// `.inlineOnly` 只解析 **粗体/斜体/行内代码/链接**、不烘焙字号，所以缓存对字号缩放安全
+    /// （字号由外层 Text.font() 施加，不进 AttributedString）。完成消息重渲染时直接命中、不再重建。
+    private static let attributedCache: NSCache<NSString, AttributedBox> = {
+        let cache = NSCache<NSString, AttributedBox>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    private static func attributed(for text: String) -> AttributedString? {
+        let key = text as NSString
+        if let hit = attributedCache.object(forKey: key) { return hit.value }
+        let built = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnly)
+        )
+        attributedCache.setObject(AttributedBox(built), forKey: key)
+        return built
+    }
+
     var body: some View {
         if text.trimmingCharacters(in: .whitespaces).isEmpty {
             EmptyView()
-        } else if let attributed = try? AttributedString(
-            markdown: text,
-            options: .init(interpretedSyntax: .inlineOnly)
-        ) {
+        } else if let attributed = Self.attributed(for: text) {
             Text(attributed)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -513,7 +716,7 @@ struct CodeBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text(language.isEmpty ? "代码" : language)
+                Text(language.isEmpty ? L("markdown.code.untitled") : language)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -523,7 +726,7 @@ struct CodeBlockView: View {
                     HStack(spacing: 4) {
                         Image(systemName: copied ? "checkmark" : "doc.on.doc")
                             .font(.caption2)
-                        Text(copied ? "已复制" : "复制")
+                        Text(copied ? L("markdown.code.copied") : L("markdown.code.copy"))
                             .font(.caption2)
                     }
                     .foregroundStyle(.secondary)
@@ -663,7 +866,7 @@ struct TaskCardListView: View {
     let items: [PlannedTask]
     let tint: Color
     let onPin: (PlannedTask) -> Void
-    let onDispatch: (PlannedTask) -> Void
+    let onDispatch: (PlannedTask, AgentMode) -> Void
 
     /// 用户操作过的任务 id —— 点 ✗ 跳过 / 点 📌 Pin / 点 🤖 让 AI 做 后该任务标记为"已处理"，淡出
     @State private var dismissedIDs: Set<UUID> = []
@@ -675,7 +878,7 @@ struct TaskCardListView: View {
                 Image(systemName: "checklist")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(tint)
-                Text("任务清单 · \(items.count) 项")
+                Text(L("markdown.tasks.header", items.count))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
             }
@@ -690,8 +893,8 @@ struct TaskCardListView: View {
                             onPin(task)
                             dismissedIDs.insert(task.id)
                         },
-                        onDispatch: {
-                            onDispatch(task)
+                        onDispatch: { mode in
+                            onDispatch(task, mode)
                             dismissedIDs.insert(task.id)
                         },
                         onSkip: {
@@ -709,7 +912,7 @@ struct TaskCardListView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                    Text("任务都安排好了")
+                    Text(L("markdown.tasks.allArranged"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -726,7 +929,8 @@ struct TaskCard: View {
     let task: PlannedTask
     let tint: Color
     let onPin: () -> Void
-    let onDispatch: () -> Void
+    /// 选哪个 AI 来做这条任务 —— 由卡片上的下拉菜单传出用户选中的 mode
+    let onDispatch: (AgentMode) -> Void
     let onSkip: () -> Void
 
     @State private var isHovering = false
@@ -738,6 +942,7 @@ struct TaskCard: View {
         case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
+        case .qwenCode:   return .teal
         }
     }
 
@@ -756,7 +961,7 @@ struct TaskCard: View {
                 HStack(spacing: 3) {
                     Image(systemName: task.suggestedMode.iconName)
                         .font(.system(size: 9, weight: .semibold))
-                    Text(task.suggestedMode.label)
+                    Text(L(task.suggestedMode.labelKey))
                         .font(.system(size: 10, weight: .medium))
                 }
                 .foregroundStyle(modeColor)
@@ -785,9 +990,9 @@ struct TaskCard: View {
             // —— 三个操作按钮 ——
             HStack(spacing: 6) {
                 taskActionButton(icon: "pin.fill", label: "Pin", color: tint, action: onPin)
-                taskActionButton(icon: "wand.and.stars", label: "让 AI 做", color: modeColor, action: onDispatch)
+                dispatchMenu
                 Spacer()
-                taskActionButton(icon: "xmark", label: "跳过", color: .secondary, action: onSkip, prominent: false)
+                taskActionButton(icon: "xmark", label: L("markdown.task.skip"), color: .secondary, action: onSkip, prominent: false)
             }
             .padding(.top, 2)
         }
@@ -804,6 +1009,43 @@ struct TaskCard: View {
         .onHover { hovering in
             withAnimation(AnimTok.snappy) { isHovering = hovering }
         }
+    }
+
+    /// 🤖「让 AI 做」下拉菜单 —— 列出全部 5 个 AI，选哪个就用哪个新开对话去做。
+    /// 卡片右上角徽章已标了 AI 建议的引擎，菜单里给它打个 ✓，但允许换成任意一个。
+    private var dispatchMenu: some View {
+        Menu {
+            Section(L("markdown.task.dispatch.menuTitle")) {
+                ForEach(AgentMode.allCases) { mode in
+                    Button {
+                        onDispatch(mode)
+                    } label: {
+                        Label(
+                            mode == task.suggestedMode ? "\(L(mode.labelKey))  ✓" : L(mode.labelKey),
+                            systemImage: mode.iconName
+                        )
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "wand.and.stars")
+                    .font(.system(size: 10, weight: .semibold))
+                Text(L("markdown.task.dispatch"))
+                    .font(.system(size: 11, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .opacity(0.6)
+            }
+            .foregroundStyle(modeColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(modeColor.opacity(0.15)))
+            .overlay(Capsule().stroke(modeColor.opacity(0.35), lineWidth: 0.5))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
     }
 
     @ViewBuilder
@@ -828,5 +1070,162 @@ struct TaskCard: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 应用到笔记卡片（写作模式 ```note fence 渲染）
+
+/// AI 在写作模式产出的 ```note:文件名 块 → 一张"应用到笔记"卡片。
+/// interactive=true(非流式)时显示「应用 / 另存为」按钮，点了直接写进 NotesStore；
+/// 流式期间 interactive=false，只预览不落地。
+struct NoteApplyCard: View {
+    let filename: String
+    let content: String
+    let tint: Color
+    var interactive: Bool = true
+
+    @State private var applied = false
+
+    private var displayName: String {
+        filename.isEmpty ? L("markdown.note.untitled") : filename
+    }
+    private var preview: String {
+        let t = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.count > 360 ? String(t.prefix(360)) + "…" : t
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Image(systemName: "square.and.pencil")
+                Text(displayName).lineLimit(1).truncationMode(.middle)
+                Spacer()
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(tint)
+
+            Text(preview)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            if applied {
+                Label(L("markdown.note.applied"), systemImage: "checkmark.circle.fill")
+                    .font(.caption).foregroundStyle(.green)
+            } else if interactive {
+                HStack(spacing: 6) {
+                    Button(L("markdown.note.apply")) {
+                        NotesStore.shared.applyNote(filename: filename, content: content, saveAsNew: false)
+                        applied = true
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button(L("markdown.note.saveAs")) {
+                        NotesStore.shared.applyNote(filename: filename, content: content, saveAsNew: true)
+                        applied = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(tint.opacity(0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(tint.opacity(0.28), lineWidth: 1))
+    }
+}
+
+// MARK: - 可点击文档卡（昨日回顾的 ```docs fence 渲染）
+
+/// 昨日回顾里"碰过的文档"清单 —— 一组可点击打开的文档卡。
+/// 数据来自 MorningBriefingService 收集到的真实文件路径（kAXDocumentAttribute），
+/// 点击 / ⌘+点击 → 用默认 App 直接打开，把用户送回工作现场。
+struct DocumentLinkCardList: View {
+    let paths: [String]
+    let tint: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 5) {
+                Image(systemName: "doc.on.doc")
+                Text(L("markdown.docs.header"))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            ForEach(Array(paths.enumerated()), id: \.offset) { _, path in
+                DocumentLinkCard(path: path, tint: tint)
+            }
+        }
+    }
+}
+
+/// 单张可点击文档卡。文件不存在时置灰不可点（移动/删除过的文档）。
+struct DocumentLinkCard: View {
+    let path: String
+    let tint: Color
+
+    @State private var isHovering = false
+
+    private var url: URL { URL(fileURLWithPath: path) }
+    private var exists: Bool { FileManager.default.fileExists(atPath: path) }
+
+    private var iconName: String {
+        switch url.pathExtension.lowercased() {
+        case "pdf": return "doc.richtext"
+        case "md", "markdown": return "doc.plaintext"
+        case "txt", "log", "rtf": return "doc.text"
+        case "json", "yml", "yaml", "toml", "ini", "conf": return "curlybraces"
+        case "swift", "ts", "tsx", "js", "jsx", "py", "go", "rs", "java",
+             "c", "cpp", "h", "rb", "php", "kt", "scala", "lua", "sh":
+            return "chevron.left.forwardslash.chevron.right"
+        case "csv": return "tablecells"
+        case "html", "xml": return "globe"
+        case "doc", "docx", "pages": return "doc.text"
+        case "xls", "xlsx", "numbers": return "tablecells"
+        case "ppt", "pptx", "key": return "rectangle.on.rectangle"
+        default: return "doc"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: exists ? iconName : "doc.badge.ellipsis")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(exists ? tint : .secondary)
+            Text(url.lastPathComponent)
+                .font(.system(size: 12))
+                .foregroundStyle(exists ? .primary : .secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: 220, alignment: .leading)
+            if exists, isHovering {
+                Image(systemName: "arrow.up.right.square")
+                    .font(.system(size: 11))
+                    .foregroundStyle(tint)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(
+            Capsule().fill(isHovering && exists ? tint.opacity(0.12) : .primary.opacity(0.06))
+        )
+        .overlay(
+            Capsule().stroke(isHovering && exists ? tint.opacity(0.4) : .primary.opacity(0.14), lineWidth: 0.5)
+        )
+        .opacity(exists ? 1 : 0.55)
+        .contentShape(Capsule())
+        .help(exists ? L("markdown.docs.openHelp", path) : L("markdown.docs.missingHelp", path))
+        .onHover { hovering in
+            withAnimation(AnimTok.snappy) { isHovering = hovering }
+            if exists {
+                if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+        }
+        .onTapGesture {
+            guard exists else { return }
+            NSWorkspace.shared.open(url)
+        }
     }
 }

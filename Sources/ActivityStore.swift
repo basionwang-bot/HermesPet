@@ -27,7 +27,7 @@ final class ActivityStore: @unchecked Sendable {
 
     init(at url: URL = ActivityStore.defaultURL) {
         self.dbPath = url.path
-        self.queue = DispatchQueue(label: "com.nousresearch.hermespet.activitystore", qos: .utility)
+        self.queue = DispatchQueue(label: "com.basionwang.hermespet.activitystore", qos: .utility)
         queue.sync { self.openAndMigrate() }
     }
 
@@ -153,12 +153,34 @@ final class ActivityStore: @unchecked Sendable {
                 ocr_text_compressed BLOB,
                 screen_hash TEXT,
                 followed_up INTEGER DEFAULT 0,
-                is_blacklisted INTEGER DEFAULT 0
+                is_blacklisted INTEGER DEFAULT 0,
+                document_path TEXT
             )
         """)
         exec("CREATE INDEX IF NOT EXISTS idx_intents_time ON user_intents(timestamp)")
         exec("CREATE INDEX IF NOT EXISTS idx_intents_app ON user_intents(app_bundle_id, window_title)")
         exec("CREATE INDEX IF NOT EXISTS idx_intents_hash ON user_intents(screen_hash)")
+        // 老库迁移：document_path 是后加的列，CREATE IF NOT EXISTS 不会补，用 ALTER 加（守卫避免重复加报错）
+        if !columnExists("user_intents", "document_path") {
+            exec("ALTER TABLE user_intents ADD COLUMN document_path TEXT")
+        }
+
+        // daily_journal: 每天一行的"日报归档"（v1.3 跨天记忆地基）。
+        // 第一层"昨日综合回顾"生成后写一行，第二层"周期总分析"读最近 N 行当原料，
+        // 设置→成长轨迹面板读它做时间线展示。永久保留（体积小：一天就一段文本）。
+        //   - summary_markdown：当天那份温暖回顾正文（用户能直接看到的）
+        //   - structured_json：结构化原料（主题 / 可能没收尾的事 / 碰过的文档 / app 分布 / 状态），给第二层总分析用
+        //   - backend：哪个 mode 生成的
+        exec("""
+            CREATE TABLE IF NOT EXISTS daily_journal (
+                date TEXT PRIMARY KEY,
+                created_at REAL NOT NULL,
+                summary_markdown TEXT NOT NULL,
+                structured_json TEXT,
+                backend TEXT
+            )
+        """)
+        exec("CREATE INDEX IF NOT EXISTS idx_journal_date ON daily_journal(date)")
     }
 
     // MARK: - 写入
@@ -185,9 +207,10 @@ final class ActivityStore: @unchecked Sendable {
         }
     }
 
-    /// 写一条会话块（同步，因为通常在切换会话的关键时机调用，需保证落盘顺序）
+    /// 写一条会话块。串行队列 async 已天然保序，无需 sync 阻塞调用方（主线程的 ActivityRecorder
+    /// 每次切 app/窗口都调它，若 sync 撞上后台 VACUUM/维护会冻结 UI；返回值无人用，改 async）
     func insertSession(_ session: ActivitySession) {
-        queue.sync { [weak self] in
+        queue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
             let sql = """
                 INSERT OR REPLACE INTO activity_sessions
@@ -315,8 +338,8 @@ final class ActivityStore: @unchecked Sendable {
             let sql = """
                 INSERT INTO user_intents
                 (timestamp, trigger_type, app_bundle_id, app_name, window_title,
-                 safari_url, ocr_text, screen_hash, is_blacklisted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 safari_url, ocr_text, screen_hash, is_blacklisted, document_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -330,6 +353,7 @@ final class ActivityStore: @unchecked Sendable {
             self.bindOptionalText(stmt, 7, intent.ocrText)
             self.bindOptionalText(stmt, 8, intent.screenHash)
             sqlite3_bind_int(stmt, 9, intent.isBlacklisted ? 1 : 0)
+            self.bindOptionalText(stmt, 10, intent.documentPath)
             sqlite3_step(stmt)
         }
     }
@@ -341,7 +365,7 @@ final class ActivityStore: @unchecked Sendable {
             let cutoff = Date().addingTimeInterval(-Double(minutes) * 60).timeIntervalSince1970
             let sql = """
                 SELECT id, timestamp, trigger_type, app_bundle_id, app_name, window_title,
-                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted
+                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted, document_path
                 FROM user_intents
                 WHERE timestamp >= ?
                 ORDER BY timestamp DESC
@@ -467,11 +491,91 @@ final class ActivityStore: @unchecked Sendable {
         }
     }
 
+    // MARK: - 日报归档（daily_journal，v1.3 跨天记忆地基）
+
+    /// 写/覆盖某一天的日报归档（date 是主键，同一天重复生成会覆盖）。
+    /// structuredJSON 可空（结构化原料，给第二层周期总分析用）；backend 记哪个 mode 生成的。
+    func upsertDailyJournal(date: String, summaryMarkdown: String, structuredJSON: String?, backend: String?) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            let sql = """
+                INSERT INTO daily_journal (date, created_at, summary_markdown, structured_json, backend)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(date) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    summary_markdown = excluded.summary_markdown,
+                    structured_json = excluded.structured_json,
+                    backend = excluded.backend
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, date, -1, Self.SQLITE_TRANSIENT)
+            sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
+            sqlite3_bind_text(stmt, 3, summaryMarkdown, -1, Self.SQLITE_TRANSIENT)
+            self.bindOptionalText(stmt, 4, structuredJSON)
+            self.bindOptionalText(stmt, 5, backend)
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// 读某一天的日报归档（没有返回 nil）
+    func dailyJournal(for date: String) -> DailyJournalEntry? {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return nil }
+            let sql = """
+                SELECT date, created_at, summary_markdown, structured_json, backend
+                FROM daily_journal WHERE date = ?
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, date, -1, Self.SQLITE_TRANSIENT)
+            return self.readJournals(stmt: stmt).first
+        }
+    }
+
+    /// 读最近 N 天的日报归档（按日期倒序）—— 第二层周期总分析 + 成长轨迹面板用
+    func recentDailyJournals(limit: Int) -> [DailyJournalEntry] {
+        queue.sync { [weak self] in
+            guard let self = self, let db = self.db else { return [] }
+            let sql = """
+                SELECT date, created_at, summary_markdown, structured_json, backend
+                FROM daily_journal ORDER BY date DESC LIMIT ?
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            return self.readJournals(stmt: stmt)
+        }
+    }
+
+    /// 删单天日报（成长轨迹面板单条删除）
+    func deleteDailyJournal(date: String) {
+        queue.async { [weak self] in
+            guard let self = self, let db = self.db else { return }
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "DELETE FROM daily_journal WHERE date = ?", -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, date, -1, Self.SQLITE_TRANSIENT)
+            _ = sqlite3_step(stmt)
+        }
+    }
+
+    /// 清空所有日报归档（成长轨迹面板"清空"按钮）
+    func clearDailyJournal() {
+        queue.async { [weak self] in
+            self?.exec("DELETE FROM daily_journal")
+        }
+    }
+
     // MARK: - 每日聚合（把 sessions 卷成 app_usage_stats）
 
-    /// 把指定日期的所有 sessions 聚合到 app_usage_stats（增量，旧统计 REPLACE）
+    /// 把指定日期的所有 sessions 聚合到 app_usage_stats（增量，旧统计 REPLACE）。
+    /// 同 insertSession：主线程高频触发，改 async 不阻塞 UI（串行队列保序）
     func aggregateDailyStats(for date: Date) {
-        queue.sync { [weak self] in
+        queue.async { [weak self] in
             guard let self = self, let db = self.db else { return }
             let dayStart = Calendar.current.startOfDay(for: date)
             let dayEnd = dayStart.addingTimeInterval(86400)
@@ -610,6 +714,7 @@ final class ActivityStore: @unchecked Sendable {
             self?.exec("DELETE FROM app_usage_stats")
             self?.exec("DELETE FROM user_questions")
             self?.exec("DELETE FROM user_intents")
+            self?.exec("DELETE FROM daily_journal")
             self?.exec("VACUUM")
         }
     }
@@ -641,7 +746,7 @@ final class ActivityStore: @unchecked Sendable {
             guard let self = self, let db = self.db else { return [] }
             let sql = """
                 SELECT id, timestamp, trigger_type, app_bundle_id, app_name, window_title,
-                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted
+                       safari_url, ocr_text, screen_hash, followed_up, is_blacklisted, document_path
                 FROM user_intents
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -773,6 +878,19 @@ final class ActivityStore: @unchecked Sendable {
         return String(cString: cStr)
     }
 
+    /// 检查某张表是否已有某列 —— 给 ALTER TABLE ADD COLUMN 迁移做守卫（重复加列会报错）
+    private func columnExists(_ table: String, _ column: String) -> Bool {
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA table_info(\(table))", -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // PRAGMA table_info 第 1 列（index 1）是列名
+            if textColumn(stmt, 1) == column { return true }
+        }
+        return false
+    }
+
     private func bindOptionalText(_ stmt: OpaquePointer?, _ index: Int32, _ value: String?) {
         if let value {
             sqlite3_bind_text(stmt, index, value, -1, Self.SQLITE_TRANSIENT)
@@ -815,8 +933,23 @@ final class ActivityStore: @unchecked Sendable {
                 ocrText: textColumn(stmt, 7),
                 screenHash: textColumn(stmt, 8),
                 isBlacklisted: sqlite3_column_int(stmt, 10) != 0,
+                documentPath: textColumn(stmt, 11),
                 id: Int(sqlite3_column_int64(stmt, 0)),
                 followedUp: sqlite3_column_int(stmt, 9) != 0
+            ))
+        }
+        return out
+    }
+
+    private func readJournals(stmt: OpaquePointer?) -> [DailyJournalEntry] {
+        var out: [DailyJournalEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(DailyJournalEntry(
+                date: textColumn(stmt, 0) ?? "",
+                createdAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 1)),
+                summaryMarkdown: textColumn(stmt, 2) ?? "",
+                structuredJSON: textColumn(stmt, 3),
+                backend: textColumn(stmt, 4)
             ))
         }
         return out
@@ -936,6 +1069,16 @@ struct AppDailyStat: Identifiable {
     let mouseClicks: Int
 }
 
+/// 一天的日报归档（daily_journal 表的一行，v1.3 跨天记忆地基）
+struct DailyJournalEntry: Identifiable {
+    var id: String { date }
+    let date: String              // yyyy-MM-dd
+    let createdAt: Date
+    let summaryMarkdown: String   // 当天那份温暖回顾正文
+    let structuredJSON: String?   // 结构化原料（给第二层周期总分析用）
+    let backend: String?          // 哪个 mode 生成的
+}
+
 /// 用户跟 AI 说过的话 —— 仅用户那一侧，不存 AI 回答
 struct UserQuestion: Identifiable {
     let id: Int
@@ -984,6 +1127,9 @@ struct UserIntent: Identifiable {
     let followedUp: Bool
     /// 是否命中隐私黑名单（命中时不存 ocr_text，只存 meta）
     let isBlacklisted: Bool
+    /// 当前文档的真实文件路径（kAXDocumentAttribute 拿到的，仅文档类 app 给）。
+    /// 用于"昨日回顾"里甩出可 ⌘+点击直接打开的文档链接（v1.3 跨天续接）
+    let documentPath: String?
 
     init(timestamp: Date = Date(),
          triggerType: TriggerType,
@@ -994,6 +1140,7 @@ struct UserIntent: Identifiable {
          ocrText: String?,
          screenHash: String?,
          isBlacklisted: Bool = false,
+         documentPath: String? = nil,
          id: Int = 0,
          followedUp: Bool = false) {
         self.id = id
@@ -1007,5 +1154,6 @@ struct UserIntent: Identifiable {
         self.screenHash = screenHash
         self.followedUp = followedUp
         self.isBlacklisted = isBlacklisted
+        self.documentPath = documentPath
     }
 }

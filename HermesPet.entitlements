@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 内嵌的 opencode 是 bun 编译的二进制，JIT 必需。
+	     hardened runtime（公证强制要求）默认禁止 JIT / 可写可执行内存，
+	     不开这两项 opencode 子进程会在运行时崩溃。 -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<!-- 允许加载 / 运行非本 Team 签名的代码（内嵌第三方 runtime）。 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+	<!-- 麦克风："按住说话"(Cmd+Shift+V) 语音输入需要。
+	     Hardened Runtime 下访问麦克风必须显式声明此 entitlement，
+	     否则系统连授权框都不弹、直接拒绝（Info.plist 用途说明只是必要条件，不充分）。 -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<!-- Apple Events 自动化：读 Finder 桌面图标（Clawd 桌面巡视）走 osascript 控制 Finder，
+	     Hardened Runtime 下跨 app 发送 Apple Events 需要此 entitlement，否则巡视功能可能失效。 -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<!-- 手机命令接收器：监听局域网端口、接受手机的传入连接 -->
+	<key>com.apple.security.network.server</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>

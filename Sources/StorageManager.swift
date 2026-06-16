@@ -91,6 +91,10 @@ final class StorageManager: @unchecked Sendable {
     // MARK: - 多对话存读
 
     func saveConversations(_ conversations: [Conversation]) {
+        // ⚠️ 加锁串行落盘：语音陪聊把存盘丢到后台线程（appendVoiceChatTurn 的 Task.detached），会与
+        // 主线程的 saveConversations 并发；.atomic 只防单次写出半截损坏文件，挡不住两次并发写「后写
+        // 覆盖先写」整段丢数据。用已有的 lock 串行化 encode+write。
+        lock.lock()
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
@@ -99,6 +103,9 @@ final class StorageManager: @unchecked Sendable {
         } catch {
             print("[Storage] saveConversations 失败: \(error.localizedDescription)")
         }
+        lock.unlock()
+        // 顺手镜像进永久历史库（自带串行队列，放锁外）——满 8 个被挤掉的对话仍能在历史面板里找回
+        ConversationHistoryStore.shared.mirror(conversations)
     }
 
     func loadConversations() -> [Conversation] {
@@ -110,6 +117,9 @@ final class StorageManager: @unchecked Sendable {
                 let data = try Data(contentsOf: conversationsFile)
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
+                // 启动加载跳过图片 Data 同步读取（images 目录可达几十 MB，会卡冷启动主线程）。
+                // 图片由 ChatViewModel.hydrateImagesInBackground() 后台补水。
+                decoder.userInfo[ChatMessage.lazyImagesKey] = true
                 return sanitizeLoadedConversations(try decoder.decode([Conversation].self, from: data))
             } catch {
                 // 把损坏文件改名备份，避免覆写丢失用户数据 + 让用户知道

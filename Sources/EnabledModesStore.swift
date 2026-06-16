@@ -128,7 +128,14 @@ final class EnabledModesStore {
                 if let m = AgentMode(rawValue: raw) { s.insert(m) }
             }
             s.insert(.directAPI)   // 兜底
+            // 一次性迁移：QwenCode 是新增的第 6 个后端，老用户首次见到时默认开启（除非已被手动关过），
+            // 之后用户可在设置里自由开关；seeded 标记保证只强开这一次，不会跟用户意愿对抗。
+            if !ud.bool(forKey: "qwenCodeSeeded") {
+                ud.set(true, forKey: "qwenCodeSeeded")
+                if !userExplicitlyDisabled.contains(.qwenCode) { s.insert(.qwenCode) }
+            }
             self.enabledModes = s
+            save()
             return
         }
 

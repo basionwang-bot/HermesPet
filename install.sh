@@ -2,13 +2,13 @@
 # install.sh — 一键构建 + 覆盖安装到 /Applications + 启动
 #
 # 跟 build.sh / make-dmg.sh 的关系：
-#   build.sh       仅构建到 ~/Desktop/HermesPet/HermesPet.app（用 Apple Development 证书）
-#   make-dmg.sh    打 ad-hoc 签名 DMG 给别人分发（接收方需手动右键打开）
+#   build.sh       仅构建到 ~/Desktop/HermesPet/HermesPet.app（Developer ID + Hardened Runtime 签名）
+#   make-dmg.sh    打 Developer ID 签名 + Apple 公证的 DMG 给别人分发（接收方双击直接打开）
 #   install.sh ← 你用：本地构建 + 覆盖装到 /Applications + 启动新版
 #
-# 由于用 Apple Development 证书签名，权限授权是稳定的：
-# 第一次跑可能要重新授权（从旧的 ad-hoc 版本切过来），之后再跑 install.sh
-# 任意次，屏幕录制 / 麦克风 / 语音识别权限都不会丢。
+# build.sh 跟 make-dmg.sh 用一样的签名方式（Developer ID + Hardened Runtime + 同一份 entitlements），
+# 所以"本地装的 == 用户下载的"：权限授权稳定（TeamID 不变不会丢），
+# 且能在本机提前发现"缺 entitlement"这类只在 Hardened Runtime 下才暴露的坑。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -19,9 +19,19 @@ DISPLAY_NAME="Hermes 桌宠"
 SOURCE="$SCRIPT_DIR/$APP_NAME.app"
 TARGET="/Applications/$DISPLAY_NAME.app"
 
-# 1. 构建（build.sh 内部已经会用本地 Apple Development 证书签名）
-echo "🏗️  构建中..."
-./build.sh > /dev/null
+# 1. 构建（build.sh 内部已经会用 Developer ID + Hardened Runtime 签名）
+# 本地只编当前机器架构（arm64），省掉 Intel 那一遍 ≈ 一半构建时间。
+# 发版给别人的双架构 universal 由 make-dmg.sh 负责，跟这里无关。
+# ⚠️ swift build 的编译报错走 stdout —— 以前直接 > /dev/null 会把报错整个吞掉，
+# 失败时只看到一行"构建中"就没了（2026-06-10 踩坑）。改成落日志、失败回显尾部。
+echo "🏗️  构建中（仅 arm64，本地提速）..."
+BUILD_LOG="$(mktemp -t hermespet-build)"
+if ! BUILD_ARCHS=arm64 ./build.sh > "$BUILD_LOG" 2>&1; then
+    echo "❌ 构建失败，日志尾部（完整日志: ${BUILD_LOG}）："
+    tail -40 "$BUILD_LOG"
+    exit 1
+fi
+rm -f "$BUILD_LOG"
 
 # 2. 退出在跑的版本（如果有）
 # 注意：用精确进程名匹配 ($APP_NAME)，不要用 .app 路径，
@@ -61,7 +71,7 @@ open "$TARGET"
 echo ""
 echo "✅ 完成。$DISPLAY_NAME 已安装到 /Applications 并启动"
 echo ""
-echo "   签名身份: $(codesign -dvvv "$TARGET" 2>&1 | grep 'Authority=Apple Development' | head -1 | sed 's/Authority=//' || echo 'ad-hoc')"
+echo "   签名身份: $(codesign -dvvv "$TARGET" 2>&1 | grep -E 'Authority=(Developer ID Application|Apple Development)' | head -1 | sed 's/.*Authority=//' || echo 'ad-hoc')"
 echo ""
-echo "   💡 因签名身份稳定，以后再跑 install.sh 权限不会丢"
-echo "   ⚠️  首次跑可能需要重新授权（从旧 ad-hoc 版本切过来）"
+echo "   💡 因签名身份稳定（Developer ID + Hardened Runtime），以后再跑 install.sh 权限不会丢"
+echo "   ⚠️  首次跑可能需要重新授权（从旧版本切过来）"

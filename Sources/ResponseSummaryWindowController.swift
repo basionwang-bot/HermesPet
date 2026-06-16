@@ -20,7 +20,7 @@ final class ResponseSummaryWindowController {
     static weak var shared: ResponseSummaryWindowController?
 
     private let window: NSWindow
-    private let hosting: NSHostingView<ResponseSummaryRoot>
+    private let hosting: NSHostingController<ResponseSummaryRoot>
     private let viewState = ResponseSummaryViewState()
 
     /// 当前是否正在显示摘要卡片（v1.2.7-dev 暂未被外部查询，保留接口）
@@ -74,13 +74,14 @@ final class ResponseSummaryWindowController {
         win.alphaValue = 0
         self.window = win
 
-        let host = NSHostingView(rootView: ResponseSummaryRoot(state: viewState))
-        host.frame = NSRect(x: 0, y: 0, width: initialWidth, height: cardHeight)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) {
-            host.sizingOptions = []   // 阻止 SwiftUI 反向请求 window setFrame
-        }
-        win.contentView = host
+        // 决策 #1/#6 升级：裸 NSHostingView 即便 sizingOptions=[] 在 macOS 26 仍会经
+        // updateAnimatedWindowSize 反推 setFrame（2026-06-11 00:09 崩溃实锤）；只有
+        // NSHostingController + sizingOptions=[] 真正禁掉反推（照语音陪聊/迷你岛范本）
+        let host = NSHostingController(rootView: ResponseSummaryRoot(state: viewState))
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }
+        win.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // 防御：铺满全窗，动态 setFrame 后内容跟随（autoresizingMask 收口）
+        win.setContentSize(NSSize(width: initialWidth, height: cardHeight))
         self.hosting = host
         Self.shared = self
 
@@ -290,10 +291,10 @@ struct ResponseSummaryRoot: View {
         ZStack {
             if state.summary != nil {
                 ResponseSummaryCardView(state: state)
-                    .transition(.asymmetric(
-                        insertion: .move(edge: .top).combined(with: .opacity),
-                        removal: .opacity
-                    ))
+                    // 纯 opacity，不用几何 transition(.move)。几何过渡会让 NSHostingView 在
+                    // CA commit 期间反推 NSWindow.setFrame，与 controller 自身 setFrame 撞车 → NSException（决策 #6，
+                    // 与 IntentSuggestionWindowController 同源，那边已统一用 .opacity）
+                    .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -312,23 +313,15 @@ struct ResponseSummaryCardView: View {
 
     private var palette: PetPalette { paletteStore.palette(for: state.mode) }
 
-    private var petName: String {
-        switch state.mode {
-        case .claudeCode: return "Clawd"
-        case .directAPI:  return "云朵"
-        case .openclaw:   return "fomo"
-        case .hermes:     return "小马"
-        case .codex:      return "coco"
-        }
-    }
+    private var petName: String { L(state.mode.petNameKey) }
 
     /// 相对时间显示
     private var relativeTime: String {
         let secs = Int(nowTick.timeIntervalSince(state.finishedAt))
-        if secs < 3 { return "刚刚" }
-        if secs < 60 { return "\(secs)s 前" }
-        if secs < 3600 { return "\(secs/60)m 前" }
-        return "\(secs/3600)h 前"
+        if secs < 3 { return L("island.summary.time.justNow") }
+        if secs < 60 { return L("island.summary.time.secondsAgo", secs) }
+        if secs < 3600 { return L("island.summary.time.minutesAgo", secs / 60) }
+        return L("island.summary.time.hoursAgo", secs / 3600)
     }
 
     var body: some View {
@@ -379,13 +372,12 @@ struct ResponseSummaryCardView: View {
         .onHover { hovering in
             state.onHover(hovering)
         }
-        // 每秒触发一次重渲染让 relativeTime 跟着走
-        .onAppear {
-            Task { @MainActor in
-                while true {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    nowTick = Date()
-                }
+        // 每秒触发一次重渲染让 relativeTime 跟着走。用 .task（卡片消失时自动 cancel）+ 取消守卫，
+        // 避免 onAppear 裸 Task 永不取消，反复弹卡片累积空转 1Hz 任务（memory leak）
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                nowTick = Date()
             }
         }
     }
@@ -431,7 +423,7 @@ struct ResponseSummaryCardView: View {
                 HStack(spacing: 4) {
                     Image(systemName: state.copied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 10, weight: .semibold))
-                    Text(state.copied ? "已复制" : "复制")
+                    Text(state.copied ? L("island.summary.copied") : L("island.summary.copy"))
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .foregroundStyle(.white)
@@ -450,7 +442,7 @@ struct ResponseSummaryCardView: View {
                 state.onViewFull()
             } label: {
                 HStack(spacing: 4) {
-                    Text("查看完整")
+                    Text(L("island.summary.viewFull"))
                         .font(.system(size: 12, weight: .semibold))
                     Image(systemName: "arrow.right")
                         .font(.system(size: 10, weight: .semibold))
@@ -475,7 +467,7 @@ struct ResponseSummaryCardView: View {
             switch mode {
             case .claudeCode:
                 ClawdView(pose: .rest, height: height, isWalking: false, palette: palette, animated: anim)
-            case .directAPI:
+            case .directAPI, .qwenCode:
                 CloudPetView(pose: .rest, height: height, isWalking: false,
                              glassesProgress: 0, palette: palette, animated: anim)
             case .openclaw:
@@ -496,6 +488,7 @@ struct ResponseSummaryCardView: View {
 /// 把 Markdown 正文压缩成 200 字摘要：代码块 / 表格 / 图片替换成 inline 标签
 enum SummaryProcessor {
     /// 主入口：完整 Markdown → maxChars 摘要
+    @MainActor
     static func compress(_ content: String, maxChars: Int) -> String {
         var text = content
 
@@ -508,7 +501,7 @@ enum SummaryProcessor {
         // 3) 图片 ![alt](url) → "【图】"
         text = text.replacingOccurrences(
             of: #"!\[[^\]]*\]\([^)]*\)"#,
-            with: "【图】",
+            with: L("island.summary.imageTag"),
             options: .regularExpression
         )
 
@@ -537,6 +530,7 @@ enum SummaryProcessor {
     }
 
     /// 倒序替换避免 NSRange 失效
+    @MainActor
     private static func replaceCodeBlocks(in text: String) -> String {
         let pattern = #"```[^\n]*\n([\s\S]*?)```"#
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return text }
@@ -549,13 +543,14 @@ enum SummaryProcessor {
             let bodyRange = match.range(at: 1)
             let body = nsText.substring(with: bodyRange)
             let lineCount = body.components(separatedBy: "\n").filter { !$0.isEmpty }.count
-            let replacement = "【代码 · \(lineCount) 行 · 点查看】"
+            let replacement = L("island.summary.codeTag", lineCount)
             result = result.replacingCharacters(in: match.range, with: replacement) as NSString
         }
         return result as String
     }
 
     /// 连续 ≥ 2 行 |...| 视为表格，整段替换成"【表格 · N 行】"
+    @MainActor
     private static func replaceTables(in text: String) -> String {
         let lines = text.components(separatedBy: "\n")
         var resultLines: [String] = []
@@ -563,7 +558,7 @@ enum SummaryProcessor {
 
         func flushTable() {
             if tableBuffer.count >= 2 {
-                resultLines.append("【表格 · \(tableBuffer.count - 1) 行】")
+                resultLines.append(L("island.summary.tableTag", tableBuffer.count - 1))
             } else {
                 resultLines.append(contentsOf: tableBuffer)
             }

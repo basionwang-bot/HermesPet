@@ -7,12 +7,12 @@ import Security
 /// 当前签名的 Team ID + 跟"原作者已知 Team ID" 对比，让用户能一眼识别是否官方版。
 ///
 /// **三种结果**：
-/// - `.officialSignature` —— Team ID 匹配 R34KL4X4D9（原作者 Apple Development 证书）
+/// - `.officialSignature` —— Team ID 匹配 R34KL4X4D9（原作者的 Developer ID 证书）
 /// - `.adHocSignature` —— ad-hoc 签名（DMG 分发常见，没有 Team ID）—— 视为"开发版 / 非官方"
 /// - `.thirdPartySignature(let teamID)` —— 其他 Team ID = 第三方重签 = 高度疑似盗版
 /// - `.unsigned` —— 没有任何签名（极少见）
 enum CodeSignVerifier {
-    /// 原作者的 Apple Development Team ID（CLAUDE.md 决策 #4 / make-dmg.sh）
+    /// 原作者的 Apple Developer Team ID（CLAUDE.md 决策 #4 / make-dmg.sh）
     static let officialTeamID = "R34KL4X4D9"
 
     /// 官方 GitHub 仓库 URL —— 让用户能跳过去验证
@@ -26,32 +26,9 @@ enum CodeSignVerifier {
         case unsigned
         case unknown(reason: String)
 
-        /// UI 展示的简短标签
-        var shortLabel: String {
-            switch self {
-            case .officialSignature:           return "✓ 原作者签名"
-            case .adHocSignature:              return "ad-hoc 签名"
-            case .thirdPartySignature:         return "⚠️ 第三方签名"
-            case .unsigned:                    return "未签名"
-            case .unknown:                     return "无法验证"
-            }
-        }
-
-        /// 详细说明（关于页内显示）
-        var detailText: String {
-            switch self {
-            case .officialSignature:
-                return "Team ID：\(CodeSignVerifier.officialTeamID) · 这是原作者用 Apple Development 证书签名的官方版本。"
-            case .adHocSignature:
-                return "这是 ad-hoc 签名的 DMG 分发版本。如果你不是从官方 GitHub Releases 下载，请去官方仓库核对版本。"
-            case .thirdPartySignature(let id):
-                return "Team ID：\(id) · 这不是原作者的签名。可能是别人重新打包的版本，存在安全和合法性风险。建议去官方仓库下载正版。"
-            case .unsigned:
-                return "此 app 没有任何签名，强烈建议从官方 GitHub Releases 重新下载。"
-            case .unknown(let reason):
-                return "无法读取签名信息：\(reason)"
-            }
-        }
+        /// 简短标签 / 详细说明的文案已 i18n 化，移到 SettingsView 的 authShortLabel / authDetailText
+        /// （CodeSignVerifier 是 nonisolated，不能直接调 @MainActor 的 L()）。
+        /// 状态分支与 SettingsView 的两个 helper 一一对应。
 
         /// 标识颜色（绿 / 橙 / 红 / 灰）
         var indicatorColorName: String {

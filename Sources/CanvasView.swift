@@ -56,9 +56,9 @@ struct CanvasView: View {
                 .font(.system(size: 13))
                 .foregroundStyle(.indigo)
             VStack(alignment: .leading, spacing: 2) {
-                Text(board.topic.isEmpty ? "未命名画布" : board.topic)
+                Text(board.topic.isEmpty ? L("canvas.toolbar.untitled") : board.topic)
                     .font(.system(size: 13, weight: .semibold))
-                Text(CanvasTemplates.find(id: board.templateID).name)
+                Text(L(CanvasTemplates.find(id: board.templateID).nameKey))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -75,17 +75,17 @@ struct CanvasView: View {
             Menu {
                 Button {
                     viewModel.regenerateFailedCanvasElements(canvasID: conversationID)
-                } label: { Label("仅重生失败的卡", systemImage: "exclamationmark.arrow.circlepath") }
+                } label: { Label(L("canvas.toolbar.regenFailed"), systemImage: "exclamationmark.arrow.circlepath") }
                 Button {
                     viewModel.regenerateAllCanvasImages(canvasID: conversationID)
-                } label: { Label("重生所有图片", systemImage: "photo.stack") }
+                } label: { Label(L("canvas.toolbar.regenAll"), systemImage: "photo.stack") }
             } label: {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 12))
             }
             .menuStyle(.borderlessButton)
             .frame(width: 28)
-            .help("重新生成")
+            .help(L("canvas.toolbar.regen.help"))
 
             // 打包下载：把全套主图按 "主图1.png / 主图2.png / ..." 命名规则
             // 导出到桌面一个文件夹里。电商团队拿到文件夹直接上架
@@ -97,7 +97,7 @@ struct CanvasView: View {
             }
             .buttonStyle(.borderless)
             .frame(width: 28)
-            .help("打包下载到桌面")
+            .help(L("canvas.toolbar.export.help"))
             .disabled(!hasAnyDoneImage(board: board))
         }
         .padding(.horizontal, 14)
@@ -120,7 +120,7 @@ struct CanvasView: View {
         let safeTopic = board.topic.replacingOccurrences(of: "/", with: "-")
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Desktop")
-        let folder = desktop.appendingPathComponent("\(safeTopic)-主图套图-\(stamp)")
+        let folder = desktop.appendingPathComponent("\(safeTopic)-\(L("canvas.export.folderSuffix"))-\(stamp)")
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let sorted = board.elements
@@ -133,7 +133,7 @@ struct CanvasView: View {
                 let cleanCaption = element.caption
                     .replacingOccurrences(of: "/", with: "-")
                     .replacingOccurrences(of: "·", with: "-")
-                let filename = "主图\(idx + 1)-\(cleanCaption).png"
+                let filename = "\(L("canvas.export.imagePrefix"))\(idx + 1)-\(cleanCaption).png"
                 let dst = folder.appendingPathComponent(filename)
                 if FileManager.default.fileExists(atPath: dst.path) {
                     try FileManager.default.removeItem(at: dst)
@@ -142,9 +142,9 @@ struct CanvasView: View {
             }
             // 打开 Finder 让用户看到目录
             NSWorkspace.shared.activateFileViewerSelecting([folder])
-            viewModel.errorMessage = "✅ 已导出到桌面：\(folder.lastPathComponent)"
+            viewModel.errorMessage = L("canvas.export.done", folder.lastPathComponent)
         } catch {
-            viewModel.errorMessage = "导出失败：\(error.localizedDescription)"
+            viewModel.errorMessage = L("canvas.export.failed", error.localizedDescription)
         }
     }
 
@@ -153,7 +153,7 @@ struct CanvasView: View {
         let done = board.elements.filter { $0.status == .done }.count
         let generating = board.elements.filter { $0.status == .generating }.count
         if generating == 0 && done == total { return nil }
-        return "\(done)/\(total)\(generating > 0 ? " · \(generating) 生成中" : "")"
+        return "\(done)/\(total)\(generating > 0 ? " · " + L("canvas.progress.generating", generating) : "")"
     }
 
     /// 是否有任意元素在生成中（决定 toolbar 是否显示带计时的进度条）
@@ -175,7 +175,7 @@ struct CanvasView: View {
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.7)
-                Text("生成中 \(min(currentSlot, totalImages))/\(totalImages)")
+                Text(L("canvas.progress.generatingCount", min(currentSlot, totalImages), totalImages))
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.indigo)
                 if let startedAt {
@@ -214,7 +214,7 @@ struct CanvasView: View {
                     .sorted(by: { $0.slot < $1.slot })
                 if !legacyTexts.isEmpty {
                     Divider()
-                    Text("辅助文案")
+                    Text(L("canvas.legacy.title"))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     ForEach(legacyTexts) { element in
@@ -258,7 +258,7 @@ struct CanvasView: View {
         let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory() + "/Desktop")
         // 文件名用 "<画布主题>-<卡片标题>.png"，方便用户辨认
-        let safeTopic = (board?.topic ?? "canvas").replacingOccurrences(of: "/", with: "-")
+        let safeTopic = (board?.topic ?? L("canvas.save.fallbackTopic")).replacingOccurrences(of: "/", with: "-")
         let safeCaption = element.caption.replacingOccurrences(of: "/", with: "-")
         let target = desktop.appendingPathComponent("\(safeTopic)-\(safeCaption).png")
         do {
@@ -266,9 +266,9 @@ struct CanvasView: View {
                 try FileManager.default.removeItem(at: target)
             }
             try FileManager.default.copyItem(at: src, to: target)
-            viewModel.errorMessage = "✅ 已保存到桌面：\(target.lastPathComponent)"
+            viewModel.errorMessage = L("canvas.save.done", target.lastPathComponent)
         } catch {
-            viewModel.errorMessage = "保存失败：\(error.localizedDescription)"
+            viewModel.errorMessage = L("canvas.save.failed", error.localizedDescription)
         }
     }
 
@@ -279,7 +279,7 @@ struct CanvasView: View {
             Image(systemName: "rectangle.3.group")
                 .font(.system(size: 36))
                 .foregroundStyle(.tertiary)
-            Text("画布加载中…")
+            Text(L("canvas.empty.loading"))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -329,7 +329,7 @@ struct CanvasImageCard: View {
                 Image(systemName: "sparkles")
                     .font(.system(size: 9))
                     .foregroundStyle(.indigo)
-                Text("AI 正在画…")
+                Text(L("canvas.card.painting"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -337,7 +337,7 @@ struct CanvasImageCard: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 10))
                 .foregroundStyle(.orange)
-                .help(element.errorMessage ?? "生成失败")
+                .help(element.errorMessage ?? L("canvas.card.genFailed"))
         default:
             EmptyView()
         }
@@ -431,7 +431,7 @@ struct CanvasImageCard: View {
                             .rotationEffect(.degrees(sin(t * 1.2) * 8))
                             .scaleEffect(0.95 + CGFloat(breathe) * 0.1)
                     }
-                    Text("AI 正在创作 · \(element.caption)")
+                    Text(L("canvas.card.creating", element.caption))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                     // 三点波浪
@@ -453,13 +453,13 @@ struct CanvasImageCard: View {
             Image(systemName: "photo.badge.exclamationmark")
                 .font(.system(size: 30))
                 .foregroundStyle(.orange.opacity(0.7))
-            Text("这张没生成成功")
+            Text(L("canvas.card.failedHint"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Button {
                 onRegenerate()
             } label: {
-                Label("再试一次", systemImage: "arrow.clockwise")
+                Label(L("canvas.card.retry"), systemImage: "arrow.clockwise")
             }
             .controlSize(.small)
         }
@@ -470,7 +470,7 @@ struct CanvasImageCard: View {
             Image(systemName: "clock")
                 .font(.system(size: 18))
                 .foregroundStyle(.tertiary)
-            Text("等待生成…")
+            Text(L("canvas.card.waiting"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -479,10 +479,10 @@ struct CanvasImageCard: View {
     /// hover 时浮出的操作条：[看大图 / 保存 / 重生 / 删除]
     private var hoverOps: some View {
         HStack(spacing: 6) {
-            iconButton("eye.fill", help: "查看大图", action: onOpen)
-            iconButton("square.and.arrow.down", help: "保存到桌面", action: onSave)
-            iconButton("arrow.clockwise", help: "重新生成", action: onRegenerate)
-            iconButton("trash", help: "删除此卡", color: .red, action: onDelete)
+            iconButton("eye.fill", help: L("canvas.card.op.view"), action: onOpen)
+            iconButton("square.and.arrow.down", help: L("canvas.card.op.save"), action: onSave)
+            iconButton("arrow.clockwise", help: L("canvas.card.op.regen"), action: onRegenerate)
+            iconButton("trash", help: L("canvas.card.op.delete"), color: .red, action: onDelete)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -561,10 +561,10 @@ struct CanvasTextCard: View {
             if isHovering {
                 Menu {
                     Button(action: onRegenerate) {
-                        Label("重新生成", systemImage: "arrow.clockwise")
+                        Label(L("canvas.text.menu.regen"), systemImage: "arrow.clockwise")
                     }
                     Button(role: .destructive, action: onDelete) {
-                        Label("删除", systemImage: "trash")
+                        Label(L("canvas.text.menu.delete"), systemImage: "trash")
                     }
                 } label: {
                     Image(systemName: "ellipsis")
@@ -617,7 +617,7 @@ struct CanvasTextCard: View {
     }
 
     private var text: String {
-        element.content.isEmpty ? "（生成中…）" : element.content
+        element.content.isEmpty ? L("canvas.text.generating") : element.content
     }
 
     private var kindIcon: String {
@@ -678,7 +678,7 @@ struct ImageLightboxView: View {
                         Button {
                             saveToDesktop(element: element)
                         } label: {
-                            Label("保存到桌面", systemImage: "square.and.arrow.down")
+                            Label(L("canvas.lightbox.save"), systemImage: "square.and.arrow.down")
                                 .font(.system(size: 12))
                         }
                         .controlSize(.small)
@@ -800,22 +800,22 @@ struct CanvasCreatorSheet: View {
                 Image(systemName: "rectangle.3.group.fill")
                     .font(.system(size: 16))
                     .foregroundStyle(.indigo)
-                Text("新建画布")
+                Text(L("canvas.creator.title"))
                     .font(.system(size: 14, weight: .semibold))
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("选模板")
+                Text(L("canvas.creator.template"))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Picker(selection: $selectedTemplate) {
                     ForEach(CanvasTemplates.all, id: \.id) { tpl in
-                        Label(tpl.name, systemImage: tpl.icon).tag(tpl)
+                        Label(L(tpl.nameKey), systemImage: tpl.icon).tag(tpl)
                     }
                 } label: { EmptyView() }
                     .labelsHidden()
                     .pickerStyle(.menu)
-                Text(selectedTemplate.summary)
+                Text(L(selectedTemplate.summaryKey))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
@@ -823,10 +823,10 @@ struct CanvasCreatorSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("主题")
+                Text(L("canvas.creator.topic"))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                TextField("如：可口可乐 / SwiftUI 入门课 / 一个孤独的灯塔", text: $topic)
+                TextField(L("canvas.creator.topic.placeholder"), text: $topic)
                     .textFieldStyle(.roundedBorder)
                     .focused($topicFocused)
                     .onSubmit { submit() }
@@ -836,12 +836,12 @@ struct CanvasCreatorSheet: View {
 
             HStack {
                 Spacer()
-                Button("取消", action: onCancel)
+                Button(L("canvas.creator.cancel"), action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Button {
                     submit()
                 } label: {
-                    Label("开始生成", systemImage: "sparkles")
+                    Label(L("canvas.creator.start"), systemImage: "sparkles")
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
@@ -857,10 +857,10 @@ struct CanvasCreatorSheet: View {
     private var referenceImageSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
-                Text("产品参考图")
+                Text(L("canvas.creator.ref.title"))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
-                Text("（强烈推荐 · 让品牌还原度大幅提升）")
+                Text(L("canvas.creator.ref.recommend"))
                     .font(.caption2)
                     .foregroundStyle(.indigo)
             }
@@ -873,7 +873,7 @@ struct CanvasCreatorSheet: View {
                 addReferenceButton
             }
 
-            Text("没上传也能生成，但 AI 会从零画，品牌细节大概率不对（如 logo 错版 / 标签糊）")
+            Text(L("canvas.creator.ref.note"))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(2)
@@ -926,16 +926,17 @@ struct CanvasCreatorSheet: View {
         .onDrop(of: [.image, .fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers: providers)
         }
-        .help("点击选图，或拖一张产品图进来")
+        .help(L("canvas.creator.ref.add.help"))
     }
 
+    @MainActor
     private func pickFiles() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowedContentTypes = [.image]
-        panel.message = "选择真实产品图（推荐多张：正面 / 侧面 / 细节）"
+        panel.message = L("canvas.creator.ref.pick.message")
         if panel.runModal() == .OK {
             for url in panel.urls {
                 if !referenceImages.contains(url) {
@@ -945,16 +946,23 @@ struct CanvasCreatorSheet: View {
         }
     }
 
+    // ⚠️ 决策 #22（同 DragDropUtil.handleProviders 的崩溃）：loadObject 的 completionHandler 在
+    // 后台队列回调。**不能**在后台 @Sendable 闭包里写 `Task { @MainActor in referenceImages.append }`
+    // ——构造该 Task 时编译器要插 MainActor 执行器断言，后台队列上断言失败 → SIGTRAP 必崩。
+    // 正确做法：本函数 @MainActor（onDrop 闭包本就在主线程调它），先在主线程把「追加引用图」
+    // 包成 @Sendable 转发器（内部 DispatchQueue.main.async + assumeIsolated 跳主线程），
+    // 再传进后台闭包。后台闭包只持有非隔离的 @Sendable 转发器，绝不触发执行器断言。
+    @MainActor
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        let appendRef = DragDropUtil.mainActorForwarder { (url: URL) in
+            if !referenceImages.contains(url) {
+                referenceImages.append(url)
+            }
+        }
         for provider in providers {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url = url {
-                    Task { @MainActor in
-                        if !referenceImages.contains(url) {
-                            referenceImages.append(url)
-                        }
-                    }
-                }
+            _ = provider.loadObject(ofClass: URL.self) { @Sendable url, _ in
+                guard let url = url else { return }
+                appendRef(url)
             }
         }
         return true

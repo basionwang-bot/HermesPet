@@ -270,7 +270,7 @@ final class CanvasService {
             guard let first = generated.first else {
                 update(element.id) {
                     $0.status = .failed
-                    $0.errorMessage = "Codex 没有返回图片"
+                    $0.errorMessage = L("canvas.error.noImage")
                 }
                 return
             }
@@ -389,7 +389,7 @@ final class CanvasService {
     private func parsePlans(_ raw: String) throws -> [ElementPlan] {
         let cleaned = extractJSONArray(from: raw)
         guard let data = cleaned.data(using: .utf8) else {
-            throw NSError(domain: "Canvas", code: 1, userInfo: [NSLocalizedDescriptionKey: "规划 JSON 编码失败"])
+            throw NSError(domain: "Canvas", code: 1, userInfo: [NSLocalizedDescriptionKey: L("canvas.error.planEncode")])
         }
         return try JSONDecoder().decode([ElementPlan].self, from: data)
     }
@@ -412,7 +412,7 @@ final class CanvasService {
               let data = String(raw[start...end]).data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else {
-            return .noop(reason: "未能解析 AI 响应")
+            return .noop(reason: L("canvas.error.parseResponse"))
         }
         let action = obj["action"] as? String ?? ""
         switch action {
@@ -420,25 +420,25 @@ final class CanvasService {
             guard let id = obj["element_id"] as? String,
                   let np = obj["new_prompt"] as? String,
                   board.elements.contains(where: { $0.id == id })
-            else { return .noop(reason: "缺少 element_id 或匹配不到") }
+            else { return .noop(reason: L("canvas.error.missingElementID")) }
             return .replaceElement(elementID: id, newPrompt: np)
         case "add":
             guard let kindStr = obj["kind"] as? String,
                   let kind = CanvasElementKind(rawValue: kindStr),
                   let caption = obj["caption"] as? String,
                   let p = obj["prompt"] as? String
-            else { return .noop(reason: "add 参数不完整") }
+            else { return .noop(reason: L("canvas.error.addIncomplete")) }
             return .addElement(kind: kind, caption: caption, prompt: p)
         case "edit":
             guard let id = obj["element_id"] as? String,
                   let nc = obj["new_content"] as? String,
                   board.elements.contains(where: { $0.id == id })
-            else { return .noop(reason: "缺少 element_id 或匹配不到") }
+            else { return .noop(reason: L("canvas.error.missingElementID")) }
             return .editText(elementID: id, newContent: nc)
         case "regenerate_all":
             return .regenerateAll
         default:
-            return .noop(reason: obj["reason"] as? String ?? "未识别")
+            return .noop(reason: obj["reason"] as? String ?? L("canvas.error.unrecognized"))
         }
     }
 }

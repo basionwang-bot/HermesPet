@@ -48,8 +48,12 @@ struct ModeSpriteView: View {
             HermesHorseSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
                 .frame(width: size + 4, height: size + 4)
         case .directAPI:
-            // 在线 AI 跑 opencode agent runtime，视觉用云朵小精灵区别于 Hermes 羽毛
-            CloudPetIslandSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
+            // 在线 AI 的宠物 = 红色小怪兽（移植 Win 版 HermesPet Core 吉祥物，见 MonsterSprite.swift）
+            MonsterIslandSprite(isWorking: isWorking, size: size, palette: palette, animated: anim)
+                .frame(width: size + 4, height: size + 4)
+        case .qwenCode:
+            // QwenCode 的宠物 = 在线 AI 红怪兽的变体：青色 + 戴黑框眼镜（区别开）
+            MonsterIslandSprite(isWorking: isWorking, size: size, palette: palette, animated: anim, wearsGlasses: true)
                 .frame(width: size + 4, height: size + 4)
         case .openclaw:
             // PR-B：fomo 九尾狐专属 sprite（银白 / 异色瞳 / 大狐耳 + 蓬松尾巴）
@@ -73,6 +77,21 @@ struct ModeSpriteView: View {
 /// 走路 / 呼吸 / 眨眼等动画由 ClawdView 内部 TimelineView 自动驱动
 enum ClawdPose {
     case rest, lookLeft, lookRight, armsUp
+}
+
+/// Clawd 的"活动场景" —— 比 pose 更高一层，决定桌宠此刻在表演哪个小动作。
+/// pose 只管身体姿势；activity 决定额外"道具层"（Zzz / 抛球 / 锤子 / 星星 …）。
+/// 桌宠在桌面漫步时会**随机**挑一个表演几秒（见 ClawdWalkController.beginIdlePerformance），
+/// 让它不只是来回走，而是有各种讨喜的小动作。先做这几个，满意再继续铺。
+enum ClawdActivity {
+    case idle       // 默认：照常呼吸 / 张望 / 伸懒腰
+    case sleeping   // 睡觉：闭眼 + 头顶 Zzz（跑累了趴下休息时）
+    case juggling   // 抛接：举手 + 头顶 3 颗彩球抛接
+    case building   // 搭建：举魔法棒遥控悬浮锤子敲方块（小魔法师）
+    case happy      // 开心：原地蹦跶 + 周身冒星星
+    case music      // 听音乐：随节拍摇头晃脑 + 周身飘彩色音符
+    case sweeping   // 扫地：拿扫帚左右扫 + 扬起灰尘
+    case gaming     // 偷偷玩电脑：躲显示器后玩贪吃蛇 + 偷瞄怕被发现
 }
 
 /// Clawd sprite 的一个像素矩形组件。坐标在 viewBox 15×10 内
@@ -122,6 +141,11 @@ struct ClawdView: View {
     /// `false` 时画**一张静态帧**（now=0 → 呼吸/眨眼/走路相位都归零、不读鼠标位置）。
     /// 用户在设置里关「桌宠动效」、或 mini sprite 未 hover 时传 false 以省 CPU。
     var animated: Bool = true
+    /// 当前活动场景 —— 决定眼睛/道具的专属表现。默认 .idle 不改变原行为。
+    var activity: ClawdActivity = .idle
+    /// 睡着时"偷瞄" —— 用户在远处操作电脑（打字/动鼠标但没凑近）时，睁开一只眼瞄你。
+    /// 仅在 activity == .sleeping 时生效；鼠标真靠近会直接醒来（见 ClawdWalkController）。
+    var peeking: Bool = false
     /// 休息态降帧（见 ClawdWalkView / SpriteFrameIntervalKey）
     @Environment(\.spriteFrameInterval) private var spriteFrameInterval
 
@@ -280,17 +304,43 @@ struct ClawdView: View {
         // 眼睛 + 高光（让眼神"活"起来的关键）
         let totalEyeDX = totalDX + eyeLookX
         let totalEyeDY = totalDY + eyeLookY
-        if isBlinking {
+        // 睡觉态 → 眼睛始终闭合（静态帧也成立，不依赖眨眼相位）
+        if isBlinking || activity == .sleeping {
             // 闭眼：压扁成 0.3 单位横线，无高光
             let centerEyeY = Self.leftEye.y + Self.leftEye.h / 2
             let blinkH: CGFloat = 0.3
             let blinkY = centerEyeY - blinkH / 2
-            drawRect(ClawdRect(x: Self.leftEye.x,  y: blinkY, w: 1, h: blinkH),
-                     in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
-                     scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
-            drawRect(ClawdRect(x: Self.rightEye.x, y: blinkY, w: 1, h: blinkH),
-                     in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
-                     scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
+            // 睡着 + 偷瞄：睁开左眼（黑眼 + 高光），右眼紧闭成 "<" 折角 —— 偷偷摸摸的坏笑感
+            let peekNow = (activity == .sleeping && peeking)
+            if peekNow {
+                // 左眼睁开：黑眼 1×2 + 左上角 0.4×0.4 白高光（显机灵）
+                drawRect(Self.leftEye, in: ctx, unit: unit,
+                         offsetX: totalEyeDX, offsetY: totalEyeDY,
+                         scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
+                drawRect(ClawdRect(x: Self.leftEye.x + 0.05, y: Self.leftEye.y + 0.1, w: 0.4, h: 0.4),
+                         in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
+                         scaleX: totalSX, scaleY: totalSY, fill: highlightFill)
+                // 右眼紧闭成 "<"：顶点最左、上下两臂向右上 / 右下张开（错位小方块拼折角）
+                let chevron: [ClawdRect] = [
+                    ClawdRect(x: 10.62, y: 2.32, w: 0.36, h: 0.30),  // 上臂末端（右上）
+                    ClawdRect(x: 10.38, y: 2.62, w: 0.36, h: 0.30),
+                    ClawdRect(x: 10.14, y: 2.92, w: 0.42, h: 0.32),  // 折角顶点（最左）
+                    ClawdRect(x: 10.38, y: 3.16, w: 0.36, h: 0.30),
+                    ClawdRect(x: 10.62, y: 3.46, w: 0.36, h: 0.30),  // 下臂末端（右下）
+                ]
+                for r in chevron {
+                    drawRect(r, in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
+                             scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
+                }
+            } else {
+                // 没偷瞄（深睡 / 普通眨眼）：双眼都闭成横线
+                drawRect(ClawdRect(x: Self.leftEye.x,  y: blinkY, w: 1, h: blinkH),
+                         in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
+                         scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
+                drawRect(ClawdRect(x: Self.rightEye.x, y: blinkY, w: 1, h: blinkH),
+                         in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
+                         scaleX: totalSX, scaleY: totalSY, fill: eyeFill)
+            }
         } else {
             // 黑眼睛 1×2
             drawRect(Self.leftEye, in: ctx, unit: unit,
@@ -310,6 +360,32 @@ struct ClawdView: View {
             drawRect(ClawdRect(x: Self.rightEye.x + hlDX, y: Self.rightEye.y + hlDY, w: hlW, h: hlH),
                      in: ctx, unit: unit, offsetX: totalEyeDX, offsetY: totalEyeDY,
                      scaleX: totalSX, scaleY: totalSY, fill: highlightFill)
+        }
+
+        // 听音乐态：戴黑色耳机（粗头带 + 两侧大耳罩 + 耳罩浅灰发声单元）。
+        // 画在 sprite 本体里 → 随呼吸/蹦跳一起动不脱节
+        if activity == .music {
+            let headphone = GraphicsContext.Shading.color(.black)
+            let cupAccent = GraphicsContext.Shading.color(Color(white: 0.38))
+            // 头带（粗，横跨头顶）
+            drawRect(ClawdRect(x: 2.0, y: 0.0, w: 11.0, h: 1.1),
+                     in: ctx, unit: unit, offsetX: totalDX, offsetY: totalDY,
+                     scaleX: totalSX, scaleY: totalSY, fill: headphone)
+            // 左耳罩（大）
+            drawRect(ClawdRect(x: 0.3, y: 0.9, w: 2.9, h: 3.2),
+                     in: ctx, unit: unit, offsetX: totalDX, offsetY: totalDY,
+                     scaleX: totalSX, scaleY: totalSY, fill: headphone)
+            // 右耳罩（大）
+            drawRect(ClawdRect(x: 11.8, y: 0.9, w: 2.9, h: 3.2),
+                     in: ctx, unit: unit, offsetX: totalDX, offsetY: totalDY,
+                     scaleX: totalSX, scaleY: totalSY, fill: headphone)
+            // 耳罩中心浅灰发声单元（更像耳机）
+            drawRect(ClawdRect(x: 1.1, y: 1.9, w: 1.3, h: 1.4),
+                     in: ctx, unit: unit, offsetX: totalDX, offsetY: totalDY,
+                     scaleX: totalSX, scaleY: totalSY, fill: cupAccent)
+            drawRect(ClawdRect(x: 12.6, y: 1.9, w: 1.3, h: 1.4),
+                     in: ctx, unit: unit, offsetX: totalDX, offsetY: totalDY,
+                     scaleX: totalSX, scaleY: totalSY, fill: cupAccent)
         }
     }
 
@@ -409,18 +485,20 @@ enum ToolKind: Equatable {
         }
     }
 
-    /// 中文动词，用在灵动岛展开文本里
+    /// 动词，用在灵动岛展开文本里。读 L10nPet 双语表。
+    /// 调用方（DynamicIslandController body / PetHeaderStrip）都在 @MainActor，故标 @MainActor 安全。
+    @MainActor
     var verb: String {
         switch self {
-        case .read:     return "正在读"
-        case .write:    return "正在写"
-        case .bash:     return "正在执行"
-        case .search:   return "正在搜索"
-        case .web:      return "正在浏览"
-        case .todo:     return "更新清单"
-        case .task:     return "派遣 subagent"
-        case .thinking: return "正在思考"
-        case .other:    return "正在调用"
+        case .read:     return L("pet.tool.read")
+        case .write:    return L("pet.tool.write")
+        case .bash:     return L("pet.tool.bash")
+        case .search:   return L("pet.tool.search")
+        case .web:      return L("pet.tool.web")
+        case .todo:     return L("pet.tool.todo")
+        case .task:     return L("pet.tool.task")
+        case .thinking: return L("pet.tool.thinking")
+        case .other:    return L("pet.tool.other")
         }
     }
 
@@ -516,7 +594,8 @@ struct ClaudeKnotSprite: View {
 
     /// v2 像素更密 + 用户希望 Clawd 显得更大 → 系数从 1.15 拉到 1.4
     /// （配合调用点 size 13→18 一起，整体放大约 50~70%）
-    private var clawdHeight: CGFloat { size * 1.4 }
+    // 灵动岛各 mode 精灵尺寸统一协调：跟 Fomo(1.0)/怪兽(1.15) 一档，避免 Clawd 在刘海/胶囊里偏大
+    private var clawdHeight: CGFloat { size * 1.0 }
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -795,7 +874,7 @@ struct HermesHorseSprite: View {
     @State private var currentTool: ToolKind = .other
 
     /// 小马 viewBox 14:10，size 是图标常规高度。× 1.4 让它跟 Clawd 视觉重量接近
-    private var horseHeight: CGFloat { size * 1.4 }
+    private var horseHeight: CGFloat { size * 1.0 }   // 与 Clawd/Fomo/怪兽 统一协调
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1282,7 +1361,7 @@ struct CodexTerminalSprite: View {
     @State private var currentTool: ToolKind = .other
 
     /// 终端 viewBox 14:10，size 是常规图标高。× 1.4 跟 Clawd / 小马视觉重量一致
-    private var terminalHeight: CGFloat { size * 1.4 }
+    private var terminalHeight: CGFloat { size * 1.0 }   // 与 Clawd/Fomo/怪兽 统一协调
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -1722,132 +1801,6 @@ struct TerminalView: View {
     }
 }
 // MARK: - DirectAPI：云朵精灵（indigo 像素小云，有眼睛 + 呼吸 + 飘浮）
-
-/// 在线 AI 的灵动岛精灵 —— 跟 ClaudeKnotSprite 类似的 pose 驱动 + 工具动画
-struct CloudPetIslandSprite: View {
-    let isWorking: Bool
-    let size: CGFloat
-    /// 调色板 —— 默认 indigo，用户自定义后由调用方传入
-    var palette: PetPalette = .cloudDefault
-    /// 是否启用内部 CloudPetView 的 30fps 动画。false 时画静态帧
-    var animated: Bool = true
-
-    @State private var pose: ClawdPose = .rest
-    @State private var workingTask: Task<Void, Never>?
-    @State private var lookTask: Task<Void, Never>?
-    @State private var currentTool: ToolKind = .other
-    /// 戴眼镜动画进度（0~1）。监听 HermesPetCloudPetWearGlasses 通知触发
-    @State private var glassesProgress: Double = 0
-    @State private var glassesHideTask: Task<Void, Never>?
-
-    private var cloudHeight: CGFloat { size * 1.3 }
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            CloudPetView(pose: pose, height: cloudHeight, isWalking: false,
-                         glassesProgress: glassesProgress, palette: palette,
-                         animated: animated)
-            if isWorking {
-                ToolOverlay(kind: currentTool)
-                    .offset(x: 3, y: -2)
-                    .transition(.opacity.combined(with: .scale(scale: 0.6)))
-            }
-        }
-        .animation(AnimTok.smooth, value: isWorking)
-        .onAppear { applyState(isWorking) }
-        .onChange(of: isWorking) { _, w in applyState(w) }
-        .onDisappear { workingTask?.cancel(); lookTask?.cancel(); glassesHideTask?.cancel() }
-        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetToolStarted"))) { note in
-            guard let name = note.userInfo?["name"] as? String else { return }
-            withAnimation(AnimTok.snappy) { currentTool = ToolKind.from(toolName: name) }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetCloudPetWearGlasses"))) { note in
-            // OpenCodeHTTPClient 自动切到 vision model 时 post 此通知。
-            // 默认保持 6 秒（一个 vision 请求够长，再短就刚戴上就摘了）
-            let duration = (note.userInfo?["duration"] as? Double) ?? 6.0
-            triggerGlasses(duration: duration)
-        }
-    }
-
-    /// 戴上眼镜 → 保持 duration 秒 → 取下
-    /// **关键**：用 Task 手动每帧驱动 @State，**不能用 withAnimation**
-    /// 原因：CloudPetView 内 Canvas 是 immediate-mode 自绘，SwiftUI 不会自动给 Canvas
-    /// 插值动画进度参数。withAnimation 只会改最终值，Canvas 看到的是 0 → 突然 1
-    private func triggerGlasses(duration: Double) {
-        glassesHideTask?.cancel()
-        glassesHideTask = Task { @MainActor in
-            // 戴上动画：0 → 1，约 1.4s（用户要求看清"掏眼镜→戴上"的整个过程），easeOutBack 略弹
-            // 30fps 协调 —— 跟 TimelineView 频率对齐，省一半 state-push 开销
-            let onFrames = 42
-            for i in 1...onFrames {
-                if Task.isCancelled { return }
-                let t = Double(i) / Double(onFrames)
-                glassesProgress = easeOutBack(t)
-                try? await Task.sleep(nanoseconds: 33_333_333)
-            }
-            glassesProgress = 1
-            // 保持戴着
-            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
-            if Task.isCancelled { return }
-            // 摘下动画：1 → 0，0.6s ease-in 慢慢消失（30fps × 0.6s = 18 frames）
-            let offFrames = 18
-            for i in 1...offFrames {
-                if Task.isCancelled { return }
-                let t = 1 - Double(i) / Double(offFrames)
-                glassesProgress = t * t   // ease-in
-                try? await Task.sleep(nanoseconds: 33_333_333)
-            }
-            glassesProgress = 0
-        }
-    }
-
-    /// EaseOutBack 缓动 —— 在 1.0 附近会略微超过再回落，模拟「啪嗒戴上」的弹性
-    private func easeOutBack(_ t: Double) -> Double {
-        let c1 = 1.70158
-        let c3 = c1 + 1
-        let x = t - 1
-        return 1 + c3 * x * x * x + c1 * x * x
-    }
-
-    private func applyState(_ working: Bool) {
-        if working {
-            lookTask?.cancel(); lookTask = nil
-            startWorking()
-        } else {
-            workingTask?.cancel(); workingTask = nil
-            pose = .rest
-            startIdleLook()
-        }
-    }
-
-    private func startWorking() {
-        workingTask?.cancel()
-        workingTask = Task { @MainActor in
-            while !Task.isCancelled {
-                pose = .armsUp
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                if Task.isCancelled { return }
-                pose = .rest
-                try? await Task.sleep(nanoseconds: 400_000_000)
-                if Task.isCancelled { return }
-            }
-        }
-    }
-
-    private func startIdleLook() {
-        lookTask?.cancel()
-        lookTask = Task { @MainActor in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64.random(in: 20_000_000_000...40_000_000_000))
-                if Task.isCancelled { return }
-                pose = Bool.random() ? .lookLeft : .lookRight
-                try? await Task.sleep(nanoseconds: 500_000_000)
-                if Task.isCancelled { return }
-                pose = .rest
-            }
-        }
-    }
-}
 
 /// 云朵精灵像素渲染器 —— viewBox 14×10 的 indigo 小云，带两只眼睛。
 /// 动画：呼吸（上下浮动 ±1pt）+ 眨眼 + 走路时左右摇摆

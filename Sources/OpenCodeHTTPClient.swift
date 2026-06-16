@@ -42,6 +42,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
     private var sessionIDByConversation: [String: String] = [:]
     /// `conversationID -> 上次用的 modelID`。model 变化时清掉 sessionID 让新建（避免 model 不兼容）
     private var lastModelByConversation: [String: String] = [:]
+    /// `conversationID -> 在途建 session 的 Task`。同对话并发建 session 时复用同一个 Task，
+    /// 避免 check→POST→commit 之间无锁导致建出两个 session 互相覆盖、泄漏一个（决策 #15）
+    private var sessionTasks: [String: Task<(id: String, isNew: Bool), Error>] = [:]
 
     private init() {}
 
@@ -51,7 +54,11 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
     func streamCompletion(
         messages: [ChatMessage],
         conversationID: String,
-        modelOverride: String? = nil
+        modelOverride: String? = nil,
+        injectMemory: Bool = true,
+        directory: String? = nil,
+        onUsage: (@Sendable (Int) -> Void)? = nil,
+        onUsageDetail: (@Sendable (TokenUsageBreakdown) -> Void)? = nil
     ) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             Task.detached { @Sendable [weak self] in
@@ -63,7 +70,11 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                     messages: messages,
                     conversationID: conversationID,
                     modelOverride: modelOverride,
-                    continuation: continuation
+                    injectMemory: injectMemory,
+                    directory: directory,
+                    continuation: continuation,
+                    onUsage: onUsage,
+                    onUsageDetail: onUsageDetail
                 )
             }
         }
@@ -100,7 +111,11 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         messages: [ChatMessage],
         conversationID: String,
         modelOverride: String?,
-        continuation: AsyncThrowingStream<String, Error>.Continuation
+        injectMemory: Bool = true,
+        directory: String? = nil,
+        continuation: AsyncThrowingStream<String, Error>.Continuation,
+        onUsage: (@Sendable (Int) -> Void)? = nil,
+        onUsageDetail: (@Sendable (TokenUsageBreakdown) -> Void)? = nil
     ) async {
         // 1. 等 server ready（最多 5s）
         for _ in 0..<25 {
@@ -128,14 +143,18 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
 
         // 3. 拿 sessionID（model 变了 → 新建）
         let sessionID: String
+        let sessionIsNew: Bool
         do {
-            sessionID = try await ensureSession(
+            let info = try await ensureSession(
                 conversationID: conversationID,
                 providerID: providerID,
                 modelID: modelID,
                 baseURL: baseURL,
-                authHeader: authHeader
+                authHeader: authHeader,
+                directory: directory
             )
+            sessionID = info.id
+            sessionIsNew = info.isNew
         } catch {
             continuation.finish(throwing: error)
             return
@@ -148,7 +167,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                 baseURL: baseURL,
                 authHeader: authHeader,
                 streamState: streamState,
-                continuation: continuation
+                continuation: continuation,
+                onUsage: onUsage,
+                onUsageDetail: onUsageDetail
             )
         }
 
@@ -157,7 +178,13 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
 
         // 6. POST prompt（这是同步 endpoint，等到 message 完整生成才返回）
         // parts/body 序列化成 Data 跨 Sendable 边界（Swift 6: [[String:Any]] 不是 Sendable）
-        let parts = buildParts(userMsg: userMsg)
+        var parts = await buildParts(userMsg: userMsg)
+        // v1.3 Phase 4b：只在新建 session 时，把跨模式「共享记忆」作为头部 text part 注入一次。
+        // opencode session 后台保留上下文，后续消息复用同 session（isNew=false）不重复注入，省 token。
+        // injectMemory=false：工作流 / 验收等隔离调用不带长期画像（只对 {input} 干活）
+        if sessionIsNew, injectMemory, let memory = UserMemoryStore.shared.injectionText() {
+            parts.insert(["type": "text", "text": memory], at: 0)
+        }
         // 如果消息带图片，且当前 model 是文本模型 → 仅这次 prompt override 到该 provider 的 vision model。
         // session 仍绑用户原 model（不改 lastModelByConversation）—— 下次纯文本消息又用回原 model
         let hasImage = (userMsg?.images.isEmpty == false) || (userMsg?.imagePaths.isEmpty == false)
@@ -236,23 +263,60 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
 
     // MARK: - Session
 
-    /// 拿 / 建 session：检测 model 变化、绑定 directory + agent + model
+    /// 拿 / 建 session：检测 model 变化、绑定 directory + agent + model。
+    /// 返回 isNew=true 表示这次是新建（caller 据此决定是否注入一次共享记忆，决策 #15 + Phase 4b）。
     private func ensureSession(
         conversationID: String,
         providerID: String,
         modelID: String,
         baseURL: URL,
-        authHeader: String
-    ) async throws -> String {
-        let newModelKey = "\(providerID)/\(modelID)"
+        authHeader: String,
+        directory: String? = nil
+    ) async throws -> (id: String, isNew: Bool) {
+        // directory 编进 key：工作台换了工作目录 → key 变 → 复用「model 变化清旧 session 重建」那套，
+        // 让新 session 绑新目录（不另加字典、不碰锁/竞态，决策 #15 安全）
+        let newModelKey = "\(providerID)/\(modelID)@\(directory ?? "")"
 
-        // model 变了 → 清旧 session
+        // 快路径：已有可复用 session（model 变了会在 checkExistingSession 内清旧返回 nil）
         if let existing = checkExistingSession(conversationID: conversationID, newModelKey: newModelKey) {
-            return existing
+            return (existing, false)
         }
 
-        // 新建：directory 用对话独立目录（让 opencode 文件操作不互相串）
-        let dir = conversationDirectory(for: conversationID)
+        // 慢路径：按 conversationID 去重 —— 并发只起一个建 session 的 Task，其余 await 复用结果（决策 #15）
+        let task = sessionTask(for: conversationID) {
+            Task { [weak self] in
+                guard let self else { throw OpenCodeHTTPClientError.runtimeFailure("client released") }
+                defer { self.clearSessionTask(conversationID) }
+                return try await self.createSession(
+                    conversationID: conversationID,
+                    providerID: providerID,
+                    modelID: modelID,
+                    baseURL: baseURL,
+                    authHeader: authHeader,
+                    newModelKey: newModelKey,
+                    directory: directory
+                )
+            }
+        }
+        return try await task.value
+    }
+
+    /// 真正 POST /session 建会话。进 Task 后再查一次：可能在排队等本 Task 期间另一路已建好（彻底关竞态窗口）
+    private func createSession(
+        conversationID: String,
+        providerID: String,
+        modelID: String,
+        baseURL: URL,
+        authHeader: String,
+        newModelKey: String,
+        directory: String? = nil
+    ) async throws -> (id: String, isNew: Bool) {
+        if let existing = checkExistingSession(conversationID: conversationID, newModelKey: newModelKey) {
+            return (existing, false)
+        }
+
+        // 工作台传了真实工作目录就用它（让 AI 真在用户打开的文件夹干活）；否则用对话独立目录（文件操作不互相串）
+        let dir = directory ?? conversationDirectory(for: conversationID)
         try? FileManager.default.createDirectory(
             at: URL(fileURLWithPath: dir),
             withIntermediateDirectories: true
@@ -301,7 +365,7 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         }
 
         commitSession(conversationID: conversationID, sessionID: sid, modelKey: newModelKey)
-        return sid
+        return (sid, true)
     }
 
     // Swift 6 严格并发：NSLock 不能在 async 函数里直接 lock/unlock。
@@ -319,6 +383,23 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         sessionIDByConversation[conversationID] = sessionID
         lastModelByConversation[conversationID] = modelKey
+    }
+
+    /// 原子 get-or-insert 在途建 session Task：锁内已有就返回复用，否则 create 起一个存入再返回。
+    /// create 起的 Task 体内首次访问 lock 都在 await 之后（锁外），不与本锁嵌套（沿用 L320 sync-helper 铁律）。
+    private func sessionTask(
+        for conversationID: String,
+        create: () -> Task<(id: String, isNew: Bool), Error>
+    ) -> Task<(id: String, isNew: Bool), Error> {
+        lock.lock(); defer { lock.unlock() }
+        if let t = sessionTasks[conversationID] { return t }
+        let t = create()
+        sessionTasks[conversationID] = t
+        return t
+    }
+    private func clearSessionTask(_ conversationID: String) {
+        lock.lock(); defer { lock.unlock() }
+        sessionTasks.removeValue(forKey: conversationID)
     }
 
     private func deleteSession(_ sessionID: String) async throws {
@@ -397,7 +478,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         baseURL: URL,
         authHeader: String,
         streamState: StreamState,
-        continuation: AsyncThrowingStream<String, Error>.Continuation
+        continuation: AsyncThrowingStream<String, Error>.Continuation,
+        onUsage: (@Sendable (Int) -> Void)? = nil,
+        onUsageDetail: (@Sendable (TokenUsageBreakdown) -> Void)? = nil
     ) async {
         var req = URLRequest(url: baseURL.appendingPathComponent("event"))
         req.setValue(authHeader, forHTTPHeaderField: "Authorization")
@@ -422,7 +505,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
                     event,
                     targetSessionID: sessionID,
                     streamState: streamState,
-                    continuation: continuation
+                    continuation: continuation,
+                    onUsage: onUsage,
+                    onUsageDetail: onUsageDetail
                 )
             }
         } catch {
@@ -434,7 +519,9 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         _ event: [String: Any],
         targetSessionID: String,
         streamState: StreamState,
-        continuation: AsyncThrowingStream<String, Error>.Continuation
+        continuation: AsyncThrowingStream<String, Error>.Continuation,
+        onUsage: (@Sendable (Int) -> Void)? = nil,
+        onUsageDetail: (@Sendable (TokenUsageBreakdown) -> Void)? = nil
     ) {
         guard let type = event["type"] as? String,
               let props = event["properties"] as? [String: Any] else { return }
@@ -442,6 +529,12 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         if let sid = props["sessionID"] as? String, sid != targetSessionID { return }
 
         switch type {
+        case "message.updated":
+            // opencode 的 assistant message 信息，含真实 token 用量
+            if let info = (props["info"] as? [String: Any]) ?? (props["message"] as? [String: Any]) {
+                Self.reportTokens(from: info, onUsage: onUsage, onUsageDetail: onUsageDetail)
+            }
+
         case "message.part.delta":
             // text 增量：{"field":"text","delta":"hello"}
             if let field = props["field"] as? String, field == "text",
@@ -451,6 +544,10 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
             }
 
         case "message.part.updated":
+            // 有些版本把 message info（含 tokens）也带在这个事件里
+            if let info = props["message"] as? [String: Any] {
+                Self.reportTokens(from: info, onUsage: onUsage, onUsageDetail: onUsageDetail)
+            }
             if let part = props["part"] as? [String: Any] {
                 // 有些 provider 经 opencode HTTP API 只发 updated 里的完整 text part，
                 // 不发 delta；这里补一次，避免 UI 显示「(没有响应)」。
@@ -596,6 +693,27 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         }
     }
 
+    /// 从 opencode 的 message info 里取真实输入上下文 token = input + cache.read + cache.write。
+    /// opencode 把 input（非缓存）和 cache（read/write）分开记，相加才是完整上下文（同 Claude 口径）。
+    private static func reportTokens(from info: [String: Any],
+                                     onUsage: (@Sendable (Int) -> Void)?,
+                                     onUsageDetail: (@Sendable (TokenUsageBreakdown) -> Void)? = nil) {
+        guard let tokens = info["tokens"] as? [String: Any] else { return }
+        let input = (tokens["input"] as? Int) ?? 0
+        let output = (tokens["output"] as? Int) ?? 0
+        var cacheRead = 0, cacheWrite = 0
+        if let c = tokens["cache"] as? [String: Any] {
+            cacheRead = (c["read"] as? Int) ?? 0
+            cacheWrite = (c["write"] as? Int) ?? 0
+        }
+        let total = input + cacheRead + cacheWrite
+        if total > 0 { onUsage?(total) }
+        if total + output > 0 {
+            onUsageDetail?(TokenUsageBreakdown(input: input, output: output,
+                                               cacheRead: cacheRead, cacheCreate: cacheWrite))
+        }
+    }
+
     private func handleToolPart(_ part: [String: Any]) {
         guard let partType = part["type"] as? String, partType == "tool",
               let tool = part["tool"] as? String,
@@ -638,8 +756,14 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
     /// 把 user message 的 text + 图片/文档拼成 opencode parts 数组：
     /// - text: `{type:"text",text:"..."}`
     /// - 文件: `{type:"file",mime:"...",filename:"...",url:"file:///..."}`
-    private func buildParts(userMsg: ChatMessage?) -> [[String: Any]] {
+    private func buildParts(userMsg: ChatMessage?) async -> [[String: Any]] {
         var parts: [[String: Any]] = []
+        // 写作模式：把当前文档 + 文件夹清单 + ```note 协议作为上下文前置（在线 AI 系统提示是配置静态的，
+        // 走消息注入才能每次带最新文档）。非写作模式返回空串，不影响普通对话。
+        let writingCtx = NotesWritingContextHolder.shared.promptAddition()
+        if !writingCtx.isEmpty {
+            parts.append(["type": "text", "text": writingCtx])
+        }
         let text = userMsg?.content ?? ""
         if !text.isEmpty {
             parts.append(["type": "text", "text": text])
@@ -647,6 +771,39 @@ final class OpenCodeHTTPClient: @unchecked Sendable {
         // 文档：直接传 file:// URL，server 在本机能读到（走 Read tool 或 inline 都可）
         for path in userMsg?.documentPaths ?? [] {
             let url = URL(fileURLWithPath: path)
+            // PDF 特殊处理：OpenAI 兼容模型读不了 PDF 二进制 file part（opencode 会报
+            // 「file part media type not supported」或被模型忽略），所以在客户端本地用
+            // PDFKit 把 PDF 抽成纯文本内联进 prompt（扫描版走 VisionOCR）。详见
+            // PDFTextExtractor / 决策 #9。其他文档照旧走 file part（opencode 能读纯文本）。
+            if (path as NSString).pathExtension.lowercased() == "pdf" {
+                let result = await PDFTextExtractor.extract(from: url)
+                let header = "【附件 PDF：\(url.lastPathComponent)】"
+                if result.isEmpty {
+                    parts.append(["type": "text", "text": "\(header)\n（这个 PDF 没有可提取的文字，可能是加密或损坏的文件，无法读取内容。）"])
+                } else {
+                    var body = ""
+                    if result.usedOCR {
+                        body += "（以下是扫描版 PDF 的 OCR 识别结果，可能有少量错字）\n"
+                    }
+                    body += result.text
+                    if result.truncated {
+                        body += "\n\n……（文档较长，以上仅为前面部分，已截断）"
+                    }
+                    parts.append(["type": "text", "text": "\(header)\n\(body)"])
+                    // 记一笔「本地省 token」：本地把 PDF 抽成文本，省下了"把每页当图发给视觉模型"的视觉 token。
+                    let imagesAvoided = result.usedOCR ? min(result.pageCount, 30) : result.pageCount
+                    let textTokens = TokenEstimator.estimateTokens(result.text)
+                    let savedTok = max(0, imagesAvoided * ModelPricing.visionTokensPerImage - textTokens)
+                    if savedTok > 0 {
+                        let refModel = UserDefaults.standard.string(forKey: "directAPIModel") ?? "deepseek"
+                        Task { @MainActor in
+                            TokenUsageStore.shared.recordLocalSaving(
+                                savedTokens: savedTok, referenceModel: refModel, mode: .directAPI)
+                        }
+                    }
+                }
+                continue
+            }
             let mime = mimeType(forPath: path)
             parts.append([
                 "type": "file",

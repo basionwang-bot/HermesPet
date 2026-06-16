@@ -25,7 +25,7 @@ final class PermissionWindowController {
     var isShowing: Bool { viewState.isShowingCard }
 
     private let window: NSWindow
-    private let hosting: NSHostingView<PermissionWindowRoot>
+    private let hosting: NSHostingController<PermissionWindowRoot>
 
     /// 卡片宽度 = 灵动岛真实 NSWindow 宽度（actualNotchWidth + idleExtraWidth=80）。
     /// 跟灵动岛 NSWindow 完全等宽 —— 卡片左右沿严格对齐灵动岛左右沿，无凸出。
@@ -78,16 +78,26 @@ final class PermissionWindowController {
         win.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         win.isReleasedWhenClosed = false
         win.alphaValue = 0   // 默认隐藏，permission 来时 fade in
+        // ⭐ #142 修复：卡片背景永远是纯黑（决策 #16），但卡片内文字大量用 .primary/.secondary
+        // /.tertiary 语义色——这些色跟随**系统外观**：浅色模式下 .primary = 黑色 → 黑字压黑底
+        // → 用户「看不见写的什么」。强制窗口深色外观，让所有语义色解析成浅色版本，一处修好
+        // permission + question 两张卡片的所有文字（以后加新内容也不会再翻车）。
+        win.appearance = NSAppearance(named: .darkAqua)
         self.window = win
 
-        let host = NSHostingView(rootView: PermissionWindowRoot(state: viewState))
-        host.frame = NSRect(x: 0, y: 0, width: initialWidth, height: cardHeight)
-        host.autoresizingMask = [.width, .height]
+        // ⭐ #143~#145 同族崩溃：本窗会随卡片类型 setFrame 改高度（permission/question 各档位），
+        // 裸 NSHostingView 在 macOS 26.5.1 显示周期/尺寸变更反推约束 → NSException 崩。
+        // 改 NSHostingController + sizingOptions=[]（决策 #6 范式），让既有 setFrame 真正安全。
+        let host = NSHostingController(rootView: PermissionWindowRoot(state: viewState))
         // 跟灵动岛 hosting 一样的 trick：阻止 SwiftUI 反向请求 window setFrame
         if #available(macOS 13.0, *) {
             host.sizingOptions = []
         }
-        win.contentView = host
+        win.contentViewController = host
+        // ⭐ v1.4.5 回归修复：补回 autoresizingMask（照灵动岛范式）——否则 contentViewController 默认约束
+        // 把内容钉到 safe-area 下方，本窗贴刘海顶会被多顶一截（详见 SystemStatsPanelController 同款注释）。
+        host.view.autoresizingMask = [.width, .height]
+        win.setContentSize(NSSize(width: initialWidth, height: cardHeight))
         self.hosting = host
 
         Self.shared = self
@@ -293,8 +303,12 @@ struct PermissionWindowRoot: View {
     }
 
     private func permissionCard(_ req: PermissionRequest) -> some View {
+        // #142（用户拍板「四角都圆」）：原顶部直角是为跟刘海凹槽无缝衔接（决策 #16），但卡片
+        // 宽 = 刘海宽 +80，两侧约各探出 40pt 到普通菜单栏区域，那两个直角从来没贴着刘海、
+        // 只是压在壁纸上的黑色硬角不好看。改圆角后整体像「从菜单栏垂下来的悬浮圆角卡片」；
+        // 顶部圆角只修饰探出刘海的两侧、不动中间真正贴凹槽的区域。顶 16 / 底 22 留垂挂层次。
         let shape = UnevenRoundedRectangle(
-            cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
+            cornerRadii: .init(topLeading: 16, bottomLeading: 22, bottomTrailing: 22, topTrailing: 16),
             style: .continuous
         )
         return ZStack {
@@ -320,8 +334,12 @@ struct PermissionWindowRoot: View {
 
     /// AI 主动问问题卡片 —— 复用同一套 Liquid Glass material 背景 + transition，内部换 QuestionCardView
     private func questionCard(_ req: QuestionRequest) -> some View {
+        // #142（用户拍板「四角都圆」）：原顶部直角是为跟刘海凹槽无缝衔接（决策 #16），但卡片
+        // 宽 = 刘海宽 +80，两侧约各探出 40pt 到普通菜单栏区域，那两个直角从来没贴着刘海、
+        // 只是压在壁纸上的黑色硬角不好看。改圆角后整体像「从菜单栏垂下来的悬浮圆角卡片」；
+        // 顶部圆角只修饰探出刘海的两侧、不动中间真正贴凹槽的区域。顶 16 / 底 22 留垂挂层次。
         let shape = UnevenRoundedRectangle(
-            cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
+            cornerRadii: .init(topLeading: 16, bottomLeading: 22, bottomTrailing: 22, topTrailing: 16),
             style: .continuous
         )
         return ZStack {

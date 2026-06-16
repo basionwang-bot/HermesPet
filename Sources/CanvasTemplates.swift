@@ -8,8 +8,14 @@ struct CanvasTemplate: Identifiable, Codable, Hashable {
     let id: String              // "ecommerce" / "courseware" / "story" / "custom"
     let name: String            // "电商产品介绍"
     let icon: String            // SF Symbol 名
-    let summary: String         // 一句话说明，UI 上下拉时显示
+    let summary: String         // 一句话说明，UI 上下拉时显示（兜底文案，UI 优先用 summaryKey 的双语版）
     let slots: [CanvasSlot]     // 卡片占位定义
+
+    /// 模板显示名的 i18n key（按 id 区分），UI 显示时用 `L(template.nameKey)`。
+    /// 内置模板（ecommerce / courseware / storyboard / custom）有对应翻译；
+    /// 其它 id 没登记时 `L()` 回退到 key 本身，再退回 stored `name`（见 displayName / displaySummary）。
+    var nameKey: String { "canvas.template.\(id).name" }
+    var summaryKey: String { "canvas.template.\(id).summary" }
 }
 
 /// 模板里的一个 slot 定义 —— 决定该卡片的类型、小标题、给 AI 的提示

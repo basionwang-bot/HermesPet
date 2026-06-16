@@ -9,11 +9,12 @@ import AppKit
 /// 1. **quietMode** —— 用户在设置里关了桌宠动效，意味着"我现在专注，别打扰我"
 /// 2. **新鲜度门槛 60s** —— 事件触发距今 > 60s 就过期，不发（Wave B 的核心反延后准则）
 /// 3. **打字静默 10s** —— 最近 10s 内有按键 = 用户正在输入，不打断思路
-/// 4. **每分钟上限 2 次** —— 防"AI 一直在哔哔哔"轰炸
+/// 4. **每天上限 + 每分钟上限** —— 防"AI 一直在哔哔哔"轰炸（v1.3「不刻意」护栏：默认安静）
 /// 5. **关键 UI 显示中** —— PermissionWindow / ResponseSummary / IntentSuggestion 任一显示
 ///    就让位（它们都已经在表达 AI 意图，再加一层会乱）
 ///
 /// 设计原则：宁可少发，不可烦人 —— 信任感的根基比"展现智能"重要。
+/// 意图数据的主要去处是「日报归档」当安静的记忆底料，主动气泡只是点缀，所以默认压得很低。
 @MainActor
 final class IntentFeedbackBudget {
     static let shared = IntentFeedbackBudget()
@@ -26,12 +27,17 @@ final class IntentFeedbackBudget {
     static let typingQuietSeconds: TimeInterval = 10
 
     /// 滑动窗口 60s 内最多发几次反馈 —— 读用户偏好。
-    /// 用 AppStorage key `intentFeedbackPerMinute` 配置，默认 2。
+    /// 用 AppStorage key `intentFeedbackPerMinute` 配置，默认 1（安静）。
     /// 设置面板把它呈现为 安静(1) / 适中(2) / 频繁(4) 三档
     static var maxPerMinute: Int {
         let raw = UserDefaults.standard.integer(forKey: "intentFeedbackPerMinute")
-        return raw <= 0 ? 2 : raw   // 0 = 未设置 → 默认 2
+        return raw <= 0 ? 1 : raw   // 0 = 未设置 → 默认 1（安静）
     }
+
+    /// 一整天最多发几次主动气泡 —— "不刻意"硬护栏。
+    /// 防止零零碎碎冒一整天显得刻意；意图数据主要沉淀进日报归档，不靠实时气泡刷存在感。
+    /// in-memory 计数（重启清零），作为软护栏足够。
+    static let maxPerDay = 5
 
     private var recentFeedbackAt: [Date] = []
     private var lastKeyDownAt: Date? = nil
@@ -58,11 +64,15 @@ final class IntentFeedbackBudget {
             return false
         }
 
-        // 4. 每分钟上限（读用户偏好，默认 2 次）
-        let cutoff = Date().addingTimeInterval(-60)
-        recentFeedbackAt = recentFeedbackAt.filter { $0 > cutoff }
-        let cap = Self.maxPerMinute
-        if recentFeedbackAt.count >= cap { return false }
+        // 4. 频率上限（"不刻意"双重护栏）：先按 24h 修剪，再判每天上限 + 每分钟上限。
+        //    recentFeedbackAt 保留最近 24h 的发送记录（in-memory，重启清零，作为软护栏够用）。
+        let dayCutoff = Date().addingTimeInterval(-86400)
+        recentFeedbackAt = recentFeedbackAt.filter { $0 > dayCutoff }
+        // 4a. 每天上限 —— 防一整天零零碎碎冒太多显得刻意
+        if recentFeedbackAt.count >= Self.maxPerDay { return false }
+        // 4b. 每分钟上限（读用户偏好，默认安静 1 次）
+        let minuteCutoff = Date().addingTimeInterval(-60)
+        if recentFeedbackAt.filter({ $0 > minuteCutoff }).count >= Self.maxPerMinute { return false }
 
         // 5. 关键 UI 让位
         if PermissionWindowController.shared?.isShowing == true { return false }

@@ -121,4 +121,121 @@ enum ScreenCapture {
 
         return try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
     }
+
+    // MARK: - 窗口共享（v1.6「AI 看屏幕」里程碑 0）
+
+    /// 一个「可分享」的普通应用窗口的元信息。
+    /// `Sendable`：只带值类型，图标在 UI 层按 `pid` 用 NSRunningApplication 现取（NSImage 非 Sendable）。
+    struct ShareableWindow: Identifiable, Sendable {
+        let id: CGWindowID
+        let title: String        // 窗口标题；为空时回退成 app 名
+        let appName: String
+        let bundleID: String?
+        let pid: pid_t
+    }
+
+    /// 列出当前所有「可分享」的普通应用窗口（给输入栏「+ → 分享窗口」菜单用）。
+    /// 过滤掉：桌宠自己、非普通层级（菜单/状态栏/壁纸）、过小的浮窗、离屏窗口。
+    /// 失败（一般=没屏幕录制权限）返回空数组——调用方据此引导授权。
+    static func listWindows() async -> [ShareableWindow] {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                true,
+                onScreenWindowsOnly: true
+            )
+        } catch {
+            NSLog("[HermesPet] listWindows 失败（多半没屏幕录制权限）: \(error.localizedDescription)")
+            return []
+        }
+
+        let myBundleID = Bundle.main.bundleIdentifier
+        return content.windows.compactMap { w -> ShareableWindow? in
+            guard w.isOnScreen, w.windowLayer == 0 else { return nil }   // 只要普通窗口层
+            guard let app = w.owningApplication else { return nil }
+            if app.bundleIdentifier == myBundleID { return nil }          // 排除自己
+            guard w.frame.width > 120, w.frame.height > 80 else { return nil }  // 过滤小浮窗
+            let title = (w.title?.isEmpty == false) ? w.title! : app.applicationName
+            return ShareableWindow(
+                id: w.windowID,
+                title: title,
+                appName: app.applicationName,
+                bundleID: app.bundleIdentifier,
+                pid: app.processID
+            )
+        }
+    }
+
+    /// 截取指定窗口此刻的画面（单窗口，不含其它窗口/桌面）。
+    /// 用 `SCContentFilter(desktopIndependentWindow:)`，所以即使目标窗口被别的窗口盖住也能截到它本身。
+    /// 窗口已关闭/找不到 → `.failed`；没权限 → `.needsPermission`。
+    static func captureWindow(id: CGWindowID) async -> CaptureResult {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(
+                true,
+                onScreenWindowsOnly: true
+            )
+        } catch {
+            return .needsPermission
+        }
+        guard let window = content.windows.first(where: { $0.windowID == id }) else {
+            return .failed("目标窗口已关闭或不可见")
+        }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let config = SCStreamConfiguration()
+        config.width = max(1, Int(window.frame.width * scale))
+        config.height = max(1, Int(window.frame.height * scale))
+        config.showsCursor = false
+        config.capturesAudio = false
+
+        do {
+            let cgImage = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                return .success(png)
+            }
+            return .failed("PNG 编码失败")
+        } catch {
+            NSLog("[HermesPet] captureWindow 失败: \(error.localizedDescription)")
+            let msg = error.localizedDescription
+            if msg.lowercased().contains("permission")
+                || msg.lowercased().contains("declined")
+                || msg.lowercased().contains("entitlement") {
+                return .needsPermission
+            }
+            return .failed(msg)
+        }
+    }
+
+    /// 截窗口 → 直接返回 `CGImage` + **窗口在屏幕上的 frame（点，左上角原点）**。
+    /// 给「看屏定位」用：OCR 出归一化方框后，要靠这个 frame 映射成屏幕坐标喂给 `ScreenActuator`。
+    /// 返回 CGImage 而非 PNG，省一次编解码（OCR 直接吃 CGImage）。失败 / 没权限 → nil。
+    static func captureWindowImage(id: CGWindowID) async -> (image: CGImage, frame: CGRect)? {
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        } catch {
+            return nil
+        }
+        guard let window = content.windows.first(where: { $0.windowID == id }) else { return nil }
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
+        let config = SCStreamConfiguration()
+        config.width = max(1, Int(window.frame.width * scale))
+        config.height = max(1, Int(window.frame.height * scale))
+        config.showsCursor = false
+        config.capturesAudio = false
+
+        guard let cgImage = try? await SCScreenshotManager.captureImage(
+            contentFilter: filter, configuration: config
+        ) else { return nil }
+        return (cgImage, window.frame)
+    }
 }

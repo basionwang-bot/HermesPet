@@ -85,7 +85,7 @@ struct PermissionCardView: View {
                 diffLine(prefix: "-", text: line, bg: Color.red.opacity(0.15), fg: Color.red.opacity(0.9))
             }
             if oldLines.count > 3 {
-                Text("    … +\(oldLines.count - 3) 行")
+                Text(L("permission.diff.moreLines", oldLines.count - 3))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
@@ -94,7 +94,7 @@ struct PermissionCardView: View {
                 diffLine(prefix: "+", text: line, bg: Color.green.opacity(0.15), fg: Color.green.opacity(0.9))
             }
             if newLines.count > 5 {
-                Text("    … +\(newLines.count - 5) 行")
+                Text(L("permission.diff.moreLines", newLines.count - 5))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }

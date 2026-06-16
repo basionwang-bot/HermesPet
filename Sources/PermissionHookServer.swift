@@ -24,6 +24,11 @@ final class PermissionHookServer {
     /// 收到 hook POST 时新建 continuation 挂起 HTTP 响应；用户决策后 resume
     private var pendingResponses: [String: (PermissionDecision, String?) -> Void] = [:]
 
+    /// 与 pendingResponses 平行：保存每条未决请求的【真实数据】（工具名/参数/sessionID 等）
+    /// 和它被问到的时刻。手机端「远程拍板」要靠这个把未决列表暴露出去（M3）。
+    /// continuation 只是个闭包，序列化不了，所以另存一份结构化数据。
+    private var pendingRequests: [String: (request: PermissionRequest, askedAt: Date)] = [:]
+
     private init() {}
 
     /// 启动 server。失败抛错（端口被占等罕见情况）
@@ -81,9 +86,35 @@ final class PermissionHookServer {
         port = 0
     }
 
-    private func dispatchDecision(requestID: String, decision: PermissionDecision) {
-        guard let resume = pendingResponses.removeValue(forKey: requestID) else { return }
+    /// 用户（本机卡片 或 手机远程）决策后，resume 那条挂起的 CLI HTTP 响应放行。
+    /// 改成 @discardableResult + 返回是否命中，给手机端 /permission/decide 判 ok。
+    @discardableResult
+    func dispatchDecision(requestID: String, decision: PermissionDecision) -> Bool {
+        pendingRequests.removeValue(forKey: requestID)   // 真实数据也一并清掉，未决列表立即更新
+        guard let resume = pendingResponses.removeValue(forKey: requestID) else { return false }
         resume(decision, nil)
+        // 同步通知本机卡片收起（手机远程拍板时本机卡片也得跟着关）
+        NotificationCenter.default.post(
+            name: .init("HermesPetPermissionReplied"),
+            object: nil,
+            userInfo: ["requestID": requestID]
+        )
+        return true
+    }
+
+    // MARK: - 给手机端「远程拍板」用的只读桥（M3）
+
+    /// 列出当前所有未决权限请求（按问到时间升序）。CommandServer 的 /permissions 端点序列化它。
+    /// 只读快照，不影响挂起的 CLI 请求。
+    func pendingList() -> [(request: PermissionRequest, askedAt: Date)] {
+        pendingRequests.values.sorted { $0.askedAt < $1.askedAt }
+    }
+
+    /// 手机远程拍板回写：等价于本机点了卡片按钮。命中返回 true。
+    /// 走和本机一样的 dispatchDecision，触发 CLI 继续 + 本机卡片收起。
+    @discardableResult
+    func remoteDecide(requestID: String, decision: PermissionDecision) -> Bool {
+        dispatchDecision(requestID: requestID, decision: decision)
     }
 
     // MARK: - 单连接处理
@@ -146,6 +177,8 @@ final class PermissionHookServer {
             let respBody = source.responseBody(decision: decision, reason: reason)
             Self.respond(conn: conn, status: 200, body: respBody)
         }
+        // 同步登记结构化数据，供手机端 /permissions 列出（M3 远程拍板）
+        self.pendingRequests[reqID] = (request: request, askedAt: Date())
 
         NotificationCenter.default.post(
             name: .init("HermesPetPermissionAsked"),

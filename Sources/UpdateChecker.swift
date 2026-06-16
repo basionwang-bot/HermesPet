@@ -52,6 +52,13 @@ final class UpdateChecker {
     private static let owner = "basionwang-bot"
     private static let repo = "HermesPet"
     private static let checkInterval: TimeInterval = 24 * 60 * 60   // 24h
+    private static let preferredDMGAssetMarker: String = {
+        #if arch(arm64)
+        return "AppleSilicon"
+        #else
+        return "Intel"
+        #endif
+    }()
 
     private var periodicTask: Task<Void, Never>?
 
@@ -97,12 +104,12 @@ final class UpdateChecker {
             let (data, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                lastError = "GitHub 返回 HTTP \(code)"
+                lastError = L("update.error.httpStatus", code)
                 return
             }
             try parseRelease(data: data)
         } catch {
-            lastError = "检查失败：\(error.localizedDescription)"
+            lastError = L("update.error.checkFailed", error.localizedDescription)
         }
 
         if !silently, !hasUpdate {
@@ -127,11 +134,11 @@ final class UpdateChecker {
 
     private func parseRelease(data: Data) throws {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            lastError = "解析失败：响应不是 JSON 对象"
+            lastError = L("update.error.parseNotJSON")
             return
         }
         guard let tag = json["tag_name"] as? String else {
-            lastError = "解析失败：缺少 tag_name"
+            lastError = L("update.error.parseMissingTag")
             return
         }
         // GitHub tag 一般带 `v` 前缀（v1.3.0），剥掉再比对
@@ -139,20 +146,24 @@ final class UpdateChecker {
         self.latestVersion = version
         self.latestNotes = (json["body"] as? String) ?? ""
 
-        // 从 assets 找 .dmg 文件
+        // 从 assets 找当前架构对应的 .dmg；兼容旧版只有单个 DMG 的 release。
         if let assets = json["assets"] as? [[String: Any]] {
-            for asset in assets {
+            let dmgAssets = assets.compactMap { asset -> (name: String, url: URL)? in
                 if let name = asset["name"] as? String,
                    name.hasSuffix(".dmg"),
                    let urlStr = asset["browser_download_url"] as? String,
                    let url = URL(string: urlStr) {
-                    self.latestDownloadURL = url
-                    break
+                    return (name, url)
                 }
+                return nil
             }
+            let selectedAsset = dmgAssets.first {
+                $0.name.localizedCaseInsensitiveContains(Self.preferredDMGAssetMarker)
+            } ?? dmgAssets.first
+            self.latestDownloadURL = selectedAsset?.url
         }
         if latestDownloadURL == nil {
-            lastError = "未在 release 中找到 DMG 资产"
+            lastError = L("update.error.noDMGAsset")
         }
     }
 
@@ -162,7 +173,7 @@ final class UpdateChecker {
     /// 完成后会自动 `hdiutil attach` 挂载 DMG → `open` 让 Finder 弹出窗口让用户拖到 Applications
     func downloadAndInstall() async {
         guard let dlURL = latestDownloadURL else {
-            lastError = "下载链接缺失"
+            lastError = L("update.error.missingDownloadURL")
             return
         }
         guard !isDownloading else { return }
@@ -188,7 +199,7 @@ final class UpdateChecker {
             let (tempURL, response) = try await URLSession.shared.download(from: dlURL, progress: progressHandler)
             guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                lastError = "下载失败：HTTP \(code)"
+                lastError = L("update.error.downloadHTTP", code)
                 return
             }
             try FileManager.default.moveItem(at: tempURL, to: destination)
@@ -196,7 +207,7 @@ final class UpdateChecker {
             // 下载完成 → 全自动安装：挂载 → 替换 /Applications 旧版 → 卸载清理 → 重启新版
             await installFromDMG(dmgPath: destination.path)
         } catch {
-            lastError = "下载失败：\(error.localizedDescription)"
+            lastError = L("update.error.downloadFailed", error.localizedDescription)
         }
     }
 
@@ -204,7 +215,7 @@ final class UpdateChecker {
     /// 任一步不满足（挂载失败 / 找不到 .app / 目标目录不可写 / 脚本写入失败）→ 回退到打开 Finder 手动拖拽。
     private func installFromDMG(dmgPath: String) async {
         guard let volumePath = await Self.attachDMG(dmgPath: dmgPath) else {
-            lastError = "DMG 挂载失败，无法自动安装"
+            lastError = L("update.error.mountFailed")
             return
         }
         // 挂载卷里找 .app（优先与当前运行 app 同名）
@@ -227,15 +238,11 @@ final class UpdateChecker {
         }
 
         let alert = NSAlert()
-        alert.messageText = "新版 v\(latestVersion ?? "") 已就绪"
-        alert.informativeText = """
-        点击「立即重启」自动完成安装。
-
-        应用会先退出几秒，自动替换为新版后重新打开——你不用打开访达，也不用手动拖拽。
-        """
+        alert.messageText = L("update.ready.title", latestVersion ?? "")
+        alert.informativeText = L("update.ready.body")
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "立即重启")
-        alert.addButton(withTitle: "稍后")
+        alert.addButton(withTitle: L("update.button.restartNow"))
+        alert.addButton(withTitle: L("update.button.later"))
         if alert.runModal() == .alertFirstButtonReturn {
             launchInstaller(scriptPath: scriptPath)
             NSApp.terminate(nil)
@@ -364,21 +371,17 @@ final class UpdateChecker {
             try task.run()
             task.waitUntilExit()   // 外层 bash 后台化 nohup 子进程后立即退出
         } catch {
-            lastError = "无法启动安装程序：\(error.localizedDescription)"
+            lastError = L("update.error.launchInstaller", error.localizedDescription)
         }
     }
 
     /// 弹一个 NSAlert 引导用户拖到 Applications
     private func postInstallHint(volumePath: String) {
         let alert = NSAlert()
-        alert.messageText = "新版已挂载，请拖入应用程序"
-        alert.informativeText = """
-        Finder 已经打开新版 DMG。请把里面的「Hermes 桌宠」拖到旁边的「应用程序」文件夹替换旧版即可。
-
-        替换完成后退出当前版本（菜单栏右键 → 退出），重新打开新版本生效。
-        """
+        alert.messageText = L("update.manual.title")
+        alert.informativeText = L("update.manual.body")
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "知道了")
+        alert.addButton(withTitle: L("update.button.gotIt"))
         alert.runModal()
     }
 
@@ -401,12 +404,23 @@ final class UpdateChecker {
 
 // MARK: - URLSession.download with progress (custom helper)
 
+/// 持有 KVO observation 直到下载结束。observation 之前声明在 continuation 闭包里、闭包一退出就被释放
+/// → KVO 注销 → 进度条永远停在 0。用 holder 把它挂到 download() 函数作用域（跨 await 存活），
+/// 下载完成后 defer 里 invalidate。@unchecked Sendable 以便被 @Sendable 的 completion 闭包捕获。
+private final class ProgressObservationHolder: @unchecked Sendable {
+    private var obs: NSKeyValueObservation?
+    func set(_ o: NSKeyValueObservation?) { obs = o }
+    func invalidate() { obs?.invalidate(); obs = nil }
+}
+
 private extension URLSession {
     /// 自定义 download API 附带进度回调。Foundation 的原生 download(from:) 没有 progress hook。
     /// 用 dataTask + completion 简单封装；不做断点续传（更新场景文件小，没必要）
     func download(from url: URL,
                   progress: @escaping @Sendable (Double) -> Void) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(URL, URLResponse), Error>) in
+        let holder = ProgressObservationHolder()
+        defer { holder.invalidate() }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<(URL, URLResponse), Error>) in
             let task = self.downloadTask(with: url) { tempURL, response, error in
                 if let error = error {
                     continuation.resume(throwing: error)
@@ -418,12 +432,10 @@ private extension URLSession {
                 }
                 continuation.resume(returning: (tempURL, response))
             }
-            // 用 KVO 监听 fractionCompleted 转 callback
-            let observation = task.progress.observe(\.fractionCompleted) { p, _ in
+            // 用 KVO 监听 fractionCompleted 转 callback；observation 存进 holder 保活到下载结束
+            holder.set(task.progress.observe(\.fractionCompleted) { p, _ in
                 progress(p.fractionCompleted)
-            }
-            // 给 task 一个 keepalive 引用，否则 observation 在 closure 退出时释放
-            _ = observation
+            })
             task.resume()
         }
     }

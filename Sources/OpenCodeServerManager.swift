@@ -26,6 +26,8 @@ final class OpenCodeServerManager: @unchecked Sendable {
     private var _password: String?
     private var _ready: Bool = false
     private var _lastError: String?
+    /// 在途 start() 的 Task 句柄（锁保护）。并发 start 复用同一个，避免重复 spawn opencode serve（决策 #15）
+    private var startTask: Task<Void, Error>?
 
     private init() {}
 
@@ -71,10 +73,26 @@ final class OpenCodeServerManager: @unchecked Sendable {
     func start() async throws {
         // 已经在跑就直接返回
         if isReady { return }
+        // 去重 + 互斥：原子 get-or-insert 在途 start Task，并发只起一个 spawn，其余 await 复用，
+        // 避免 restartForConfigChange 在首个 start 未完成（process 仍 nil、terminate 空杀）时并行 spawn 出第二个 opencode serve（决策 #15）
+        let task = startTaskOrCreate {
+            Task {
+                defer { self.clearStartTask() }
+                try await self.performStart()
+            }
+        }
+        try await task.value
+    }
 
+    /// start() 的真正实现体（spawn + healthCheck + commitReady），由 start() 包成去重 Task 调用
+    private func performStart() async throws {
         do {
             let binary = try prepareWritableBinary()
             let pwd = ensurePassword()
+            // ⭐ 生成 opencode.json 前先等 ReasoningProxy 就绪（修推理泄漏的启动竞态）：
+            // 否则 buildConfig 在 proxy 没拿到端口时会 fallback 成"直连 provider"，绕过 reasoning 过滤
+            // → 智谱/DeepSeek 等推理模型的思考过程泄漏成正文。proxy 几十毫秒就 ready，等一下零感知。
+            await ReasoningProxy.shared.waitUntilReady()
             // 关键：v1.3 走 HTTP API 路线，serve 必须能加载所有用户配的 provider。
             // 准备一个"全局 config dir"放完整 opencode.json，让 serve cwd 指向它
             let configDir = try prepareGlobalConfigDir()
@@ -102,6 +120,11 @@ final class OpenCodeServerManager: @unchecked Sendable {
     /// 用户在设置改了 provider / API Key → 重写 globalConfigDir 的 opencode.json，
     /// 同步重启 server 让新配置生效（PATCH /config 这条路 opencode 1.15.1 对部分字段不热加载，最稳的是 restart）
     func restartForConfigChange() async {
+        // 先 await 在途 start 跑完（让其 commitReady 落下真实 process；不能 cancel——cancel 可能让 spawn 半途抛错留下真孤儿），
+        // 再 terminate 杀掉它，最后用新配置重启。避免与未完成的首个 start 并行 spawn 出双进程（决策 #15）
+        if let inFlight = currentStartTask() {
+            _ = try? await inFlight.value
+        }
         terminate()
         // 给 server 退出 + 端口释放一点时间
         try? await Task.sleep(nanoseconds: 200_000_000)
@@ -133,6 +156,24 @@ final class OpenCodeServerManager: @unchecked Sendable {
         self._ready = true
         self._lastError = nil
         lock.unlock()
+    }
+
+    // start Task 句柄的锁助手（同 commitReady 模式，锁操作收敛到 sync helper）。
+    // make 起的 Task 体内首次访问 lock 都在 await 之后（锁外），不与本锁嵌套。
+    private func startTaskOrCreate(_ make: () -> Task<Void, Error>) -> Task<Void, Error> {
+        lock.lock(); defer { lock.unlock() }
+        if let t = startTask { return t }
+        let t = make()
+        startTask = t
+        return t
+    }
+    private func currentStartTask() -> Task<Void, Error>? {
+        lock.lock(); defer { lock.unlock() }
+        return startTask
+    }
+    private func clearStartTask() {
+        lock.lock(); defer { lock.unlock() }
+        startTask = nil
     }
 
     private func recordError(_ msg: String) {

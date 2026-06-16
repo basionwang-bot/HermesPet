@@ -46,7 +46,7 @@ struct QuestionCardView: View {
             Image(systemName: "bubble.left.fill")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.cyan)
-            Text("AI 想问你")
+            Text(L("island.question.title"))
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(Color.cyan)
             Spacer()
@@ -128,7 +128,7 @@ struct QuestionCardView: View {
             Button {
                 submit()
             } label: {
-                Text("提交")
+                Text(L("island.question.submit"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)

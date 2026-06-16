@@ -160,6 +160,21 @@ final class CrashReporter {
             return
         }
 
+        // 捕获到的 NSException 原因（ExceptionLogger 在崩溃瞬间落盘）。系统 .ips 不带 reason，
+        // 这块是定位「显示周期约束异常」头号崩溃的关键。仅当其写入时间与本次崩溃接近才视为相关。
+        let capturedBlock: String = {
+            guard let (text, capturedAt) = ExceptionLogger.readLastLog() else { return "" }
+            let related = abs(capturedAt.timeIntervalSince(record.date)) < 600   // 10 分钟内 = 同一次崩溃
+            let tag = related ? "（与本次崩溃高度相关）" : "（⚠️ 与崩溃时间相差较大，可能是另一次，仅供参考）"
+            return """
+
+            ## 捕获到的异常原因 \(tag)
+            ```
+            \(text)
+            ```
+            """
+        }()
+
         let envHeader = """
         ## 环境信息
         - App 版本：\(record.appVersion)
@@ -167,7 +182,7 @@ final class CrashReporter {
         - 崩溃时间：\(formatDate(record.date))
         - Exception：\(record.exceptionType)
         \(record.terminationReason.isEmpty ? "" : "- 终止原因：\(record.terminationReason)")
-
+        \(capturedBlock)
         ## 操作步骤
         <!-- 请补充：崩溃前你在做什么？例如「按住 ⌘⇧V 录音时」「切换 AgentMode 到 Codex 时」 -->
 

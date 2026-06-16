@@ -16,6 +16,9 @@ struct ChatMessage: Identifiable, Codable, Equatable {
     var documentPaths: [String]
     let timestamp: Date
     var isStreaming: Bool
+    /// 若这条消息是「运行某工作流」的入口记录，存对应 WorkflowRun.id —— 聊天里挂"查看运行过程"按钮、
+    /// 点了重开 RunPanel（轨迹持久化在 ~/.hermespet/runs/，关掉/重启都能重开）。普通消息为 nil。
+    var workflowRunID: String?
 
     init(role: MessageRole,
          content: String,
@@ -23,6 +26,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
          imagePaths: [String] = [],
          documentPaths: [String] = [],
          isStreaming: Bool = false,
+         workflowRunID: String? = nil,
          timestamp: Date = Date()) {
         self.id = UUID().uuidString
         self.role = role
@@ -32,12 +36,18 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         self.documentPaths = documentPaths
         self.timestamp = timestamp
         self.isStreaming = isStreaming
+        self.workflowRunID = workflowRunID
     }
 
     // CodingKeys：images（Data）不存（避免 JSON 爆大），imagePaths / documentPaths 存
     private enum CodingKeys: String, CodingKey {
-        case id, role, content, timestamp, isStreaming, imagePaths, documentPaths
+        case id, role, content, timestamp, isStreaming, imagePaths, documentPaths, workflowRunID
     }
+
+    /// JSONDecoder.userInfo 开关：设 true 时 decode **跳过**图片文件读取（images 留空，由调用方
+    /// 稍后后台补水）。启动加载用 —— `~/.hermespet/images` 可达几十 MB，decode 里逐个同步
+    /// `Data(contentsOf:)` 会卡冷启动主线程；其余 decode 场景（历史库恢复等）不设则维持老行为。
+    static let lazyImagesKey = CodingUserInfoKey(rawValue: "hermesPetLazyImages")!   // rawValue 非空必成功
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -48,18 +58,24 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         self.isStreaming = try c.decode(Bool.self, forKey: .isStreaming)
         self.imagePaths = (try? c.decode([String].self, forKey: .imagePaths)) ?? []
         self.documentPaths = (try? c.decode([String].self, forKey: .documentPaths)) ?? []
-        // 从 imagePaths 还原 Data（启动时一次性 IO 不大）
-        // 若图片文件已被外部删除（用户手动清 ~/.hermespet/images/、或 deleteImageFiles 漏调）
-        // 会静默落空 → 至少 console 打个日志，方便事后追查
-        var loaded: [Data] = []
-        for path in self.imagePaths {
-            if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
-                loaded.append(data)
-            } else {
-                print("[Models] 消息 \(self.id) 引用的图片已缺失: \(path)")
+        self.workflowRunID = try? c.decode(String.self, forKey: .workflowRunID)
+        // 从 imagePaths 还原 Data。启动路径（lazyImagesKey=true）跳过 —— 由
+        // ChatViewModel.hydrateImagesInBackground() 后台补水，不卡冷启动。
+        if decoder.userInfo[ChatMessage.lazyImagesKey] as? Bool == true {
+            self.images = []
+        } else {
+            // 若图片文件已被外部删除（用户手动清 ~/.hermespet/images/、或 deleteImageFiles 漏调）
+            // 会静默落空 → 至少 console 打个日志，方便事后追查
+            var loaded: [Data] = []
+            for path in self.imagePaths {
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    loaded.append(data)
+                } else {
+                    print("[Models] 消息 \(self.id) 引用的图片已缺失: \(path)")
+                }
             }
+            self.images = loaded
         }
-        self.images = loaded
     }
 
     func encode(to encoder: Encoder) throws {
@@ -71,6 +87,7 @@ struct ChatMessage: Identifiable, Codable, Equatable {
         try c.encode(isStreaming, forKey: .isStreaming)
         try c.encode(imagePaths, forKey: .imagePaths)
         try c.encode(documentPaths, forKey: .documentPaths)
+        try c.encodeIfPresent(workflowRunID, forKey: .workflowRunID)
     }
 }
 
@@ -118,6 +135,12 @@ struct Conversation: Identifiable, Codable, Equatable {
     /// 仅内存态，不序列化（重启后所有 task 都没了，恢复成 false）
     var isStreaming: Bool
 
+    /// C 阶段·长对话压缩：早期消息折叠成的摘要。仅"每轮重发整段历史"的模式（Hermes/OpenClaw/Claude）发送时用到，
+    /// 替代原来"砍中间只留一句已省略"的粗暴裁剪，保住上下文又不爆 token。后台生成、缓存于此。
+    var summary: String?
+    /// 摘要已覆盖的"前 N 条 user/assistant 消息"数量（水位线）。0 = 还没摘要。
+    var summarizedCount: Int
+
     /// 这个对话是否已经发过 user 消息 —— mode 锁死的判断依据
     var hasUserMessages: Bool {
         messages.contains { $0.role == .user }
@@ -131,6 +154,8 @@ struct Conversation: Identifiable, Codable, Equatable {
          canvas: CanvasBoard? = nil,
          hasUnread: Bool = false,
          isStreaming: Bool = false,
+         summary: String? = nil,
+         summarizedCount: Int = 0,
          createdAt: Date = Date(),
          updatedAt: Date = Date()) {
         self.id = id
@@ -141,13 +166,15 @@ struct Conversation: Identifiable, Codable, Equatable {
         self.canvas = canvas
         self.hasUnread = hasUnread
         self.isStreaming = isStreaming
+        self.summary = summary
+        self.summarizedCount = summarizedCount
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
 
-    // hasUnread / mode / kind / canvas 参与序列化；isStreaming 是内存态，重启后归 false
+    // hasUnread / mode / kind / canvas / summary / summarizedCount 参与序列化；isStreaming 是内存态，重启后归 false
     private enum CodingKeys: String, CodingKey {
-        case id, title, messages, createdAt, updatedAt, hasUnread, mode, kind, canvas
+        case id, title, messages, createdAt, updatedAt, hasUnread, mode, kind, canvas, summary, summarizedCount
     }
 
     init(from decoder: Decoder) throws {
@@ -175,6 +202,9 @@ struct Conversation: Identifiable, Codable, Equatable {
         }
         self.canvas = try? c.decode(CanvasBoard.self, forKey: .canvas)
         self.isStreaming = false   // 内存态，启动恢复 false
+        // 旧版 JSON 没有这两个字段 —— 默认无摘要（C 阶段新加）
+        self.summary = try? c.decode(String.self, forKey: .summary)
+        self.summarizedCount = max(0, (try? c.decode(Int.self, forKey: .summarizedCount)) ?? 0)
     }
 }
 
@@ -316,6 +346,7 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
     case openclaw   = "openclaw"
     case claudeCode = "claude_code"
     case codex      = "codex"
+    case qwenCode   = "qwen_code"
 
     var id: String { rawValue }
 
@@ -326,8 +357,16 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
         case .openclaw:   return "OpenClaw"
         case .claudeCode: return "Claude Code"
         case .codex:      return "Codex"
+        case .qwenCode:   return "QwenCode"
         }
     }
+
+    /// UI 显示用的 i18n key（label 多为品牌名，只有 directAPI 的「在线 AI」需翻；
+    /// label 仍保留给 prompt 拼接 / 导出 markdown / errorMessage 等非 UI 场景）—— rawValue 即 hermes / direct_api / …
+    var labelKey: String { "mode.label.\(rawValue)" }
+
+    /// 桌宠名的 i18n key（Clawd / coco / fomo 是专名中英一致，云朵 / 小马 译 Cloud / Pony）—— rawValue 即 hermes / direct_api / …
+    var petNameKey: String { "mode.petName.\(rawValue)" }
 
     var iconName: String {
         switch self {
@@ -336,6 +375,7 @@ enum AgentMode: String, Codable, CaseIterable, Identifiable {
         case .openclaw:   return "bolt.circle.fill"
         case .claudeCode: return "terminal.fill"
         case .codex:      return "wand.and.stars"
+        case .qwenCode:   return "q.circle.fill"
         }
     }
 }
@@ -345,6 +385,25 @@ struct ChatCompletionRequest: Codable {
     let model: String
     let messages: [APIMessage]
     let stream: Bool
+    /// 让流式响应在结束时多发一个带真实 token 用量的 chunk（OpenAI 标准）。
+    /// 用来给「上下文进度条」拿真实 prompt_tokens（估算严重偏低，后端系统提示/工具定义不在可见消息里）。
+    var streamOptions: StreamOptions? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case model, messages, stream
+        case streamOptions = "stream_options"
+    }
+}
+
+struct StreamOptions: Codable {
+    let include_usage: Bool
+}
+
+/// OpenAI 兼容的 token 用量（流式末尾 chunk / 非流式响应都用这个）。
+struct TokenUsage: Codable {
+    let prompt_tokens: Int?
+    let completion_tokens: Int?
+    let total_tokens: Int?
 }
 
 /// OpenAI 兼容 message：content 既可以是纯字符串，也可以是混合内容数组（文本 + 图片）
@@ -427,6 +486,11 @@ struct Choice: Codable {
 struct StreamingChunk: Codable {
     let id: String?
     let choices: [StreamingChoice]?
+    /// include_usage 时，流的最后一个 chunk 带真实用量（choices 为空数组）
+    let usage: TokenUsage?
+    /// 服务端实际使用的模型名（OpenAI 兼容响应每个 chunk 都带）——
+    /// 给 OpenClaw（model 字段是 agent id，拿不到真名）/ Hermes 解析真实模型做计费用。
+    let model: String?
 }
 
 struct StreamingChoice: Codable {

@@ -11,23 +11,35 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.nousresearch.hermespet</string>
+	<string>com.basionwang.hermespet</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>zh-Hans</string>
+		<string>en</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>HermesPet</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.10</string>
+	<string>1.4.6</string>
 	<key>CFBundleVersion</key>
-	<string>15</string>
+	<string>31</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Hermes 桌宠 需要控制 Finder 读取桌面图标的名称和位置，让桌宠 Clawd 能在桌面上巡视并对你的文件做出反应</string>
 	<key>NSHumanReadableCopyright</key>
-	<string>© Nous Research</string>
+	<string>© 2026 Basion Wang</string>
 	<key>NSInputMonitoringUsageDescription</key>
 	<string>Hermes 桌宠 仅统计键盘按键次数（不读取按键内容），用来理解你的工作活动节奏，让 AI 能感知你在做什么</string>
 	<key>NSMicrophoneUsageDescription</key>

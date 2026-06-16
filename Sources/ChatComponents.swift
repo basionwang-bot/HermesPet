@@ -1,6 +1,5 @@
 import SwiftUI
 import UniformTypeIdentifiers
-import PDFKit
 
 // MARK: - Message Bubble
 
@@ -20,7 +19,11 @@ struct MessageBubbleView: View {
     /// AI 输出任务清单时，点击 📌 Pin → 把这一项转成桌面任务 Pin
     var onPinTask: ((PlannedTask) -> Void)? = nil
     /// AI 输出任务清单时，点击 🤖 让 AI 做 → 新对话派发该任务
-    var onDispatchTask: ((PlannedTask) -> Void)? = nil
+    var onDispatchTask: ((PlannedTask, AgentMode) -> Void)? = nil
+    /// hover 操作栏「✨ 生成网页」回调（仅 assistant）—— 取代旧的常驻智能动作条，改成每条回答自己的非常驻操作
+    var onMakeWebpage: (() -> Void)? = nil
+    /// 工作流运行记录的「查看运行过程」回调（仅 message.workflowRunID 非空时）—— 重开 RunPanel
+    var onOpenRun: ((String) -> Void)? = nil
 
     @State private var isHovering = false
     @State private var didCopy = false
@@ -35,30 +38,34 @@ struct MessageBubbleView: View {
     private var isError: Bool {
         !isUser && message.content.hasPrefix("❌")
     }
+    /// 共享 DateFormatter —— 流式输出时每条气泡每次重渲都会重算 timeString，旧写法每次
+    /// new DateFormatter()（内部 locale/calendar 初始化不便宜）纯属浪费；复用单例 +
+    /// 每次按需改 dateFormat（赋值很便宜）。只在主线程渲染时访问（body @MainActor）。
+    @MainActor private static let timeFormatter = DateFormatter()
     /// 时间戳格式：今天显示 HH:mm，昨天显示 "昨天 HH:mm"，更早显示 "M月D日 HH:mm"
     private var timeString: String {
         let cal = Calendar.current
-        let f = DateFormatter()
+        let f = Self.timeFormatter
         if cal.isDateInToday(message.timestamp) {
             f.dateFormat = "HH:mm"
             return f.string(from: message.timestamp)
         }
         if cal.isDateInYesterday(message.timestamp) {
             f.dateFormat = "HH:mm"
-            return "昨天 \(f.string(from: message.timestamp))"
+            return L("chat.bubble.time.yesterday", f.string(from: message.timestamp))
         }
         // 同年只显示月日；跨年加年份
         if cal.component(.year, from: message.timestamp) == cal.component(.year, from: Date()) {
-            f.dateFormat = "M月d日 HH:mm"
+            f.dateFormat = L("chat.bubble.time.format.thisYear")
         } else {
-            f.dateFormat = "yyyy年M月d日 HH:mm"
+            f.dateFormat = L("chat.bubble.time.format.otherYear")
         }
         return f.string(from: message.timestamp)
     }
     /// assistant 头像图标（hermes 用兔子，claude 用终端）
     private var assistantIcon: String { agentMode.iconName }
     /// assistant 显示名（"Hermes" / "Claude Code"）
-    private var assistantLabel: String { agentMode.label }
+    private var assistantLabel: String { L(agentMode.labelKey) }
     /// assistant 主题色
     private var assistantTint: Color {
         switch agentMode {
@@ -67,6 +74,7 @@ struct MessageBubbleView: View {
         case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
+        case .qwenCode:   return .teal
         }
     }
 
@@ -121,14 +129,34 @@ struct MessageBubbleView: View {
             Circle()
                 .fill(isUser ? Color.blue.opacity(0.2) : assistantTint.opacity(0.2))
                 .frame(width: 28, height: 28)
-            Image(systemName: isUser ? "person.fill" : assistantIcon)
-                .font(.caption)
-                .foregroundStyle(isUser ? .blue : assistantTint)
+            if isUser {
+                // 用户头像：自定义头像 > 昵称首字母 > person.fill 兜底（UserProfileStore，本地）
+                let profile = UserProfileStore.shared
+                if let avatar = profile.avatar {
+                    Image(nsImage: avatar)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: 28, height: 28)
+                        .clipShape(Circle())
+                } else if !profile.nickname.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Text(profile.initials)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.blue)
+                } else {
+                    Image(systemName: "person.fill")
+                        .font(.caption)
+                        .foregroundStyle(.blue)
+                }
+            } else {
+                // assistant 头像 = 当前 mode 的小宠物形象（在线 AI 红怪兽 / Claude 螃蟹 / Hermes 小马 …）
+                // animated:false 让多气泡场景零额外 CPU（每个气泡都是一个 avatar）
+                ModeSpriteView(mode: agentMode, isWorking: false, size: 16, animated: false)
+            }
         }
     }
 
     private var roleLabel: some View {
-        Text(isUser ? "你" : assistantLabel)
+        Text(isUser ? L("chat.bubble.role.user") : assistantLabel)
             .font(.caption2)
             .foregroundStyle(.secondary)
     }
@@ -150,7 +178,7 @@ struct MessageBubbleView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 10, weight: .semibold))
-                        Text("重试")
+                        Text(L("chat.bubble.retry"))
                             .font(.system(size: 11, weight: .medium))
                     }
                     .foregroundStyle(.secondary)
@@ -166,7 +194,11 @@ struct MessageBubbleView: View {
                     )
                 }
                 .buttonStyle(.plain)
-                .help("重新发送上一条消息")
+                .help(L("chat.bubble.retry.help"))
+            }
+            // 工作流运行记录 → 「查看运行过程」按钮（关掉独立窗口后也能从这里重开）
+            if let runID = message.workflowRunID {
+                WorkflowRunChip(runID: runID) { onOpenRun?(runID) }
             }
         }
         .padding(.top, -2)
@@ -219,8 +251,12 @@ struct MessageBubbleView: View {
     /// ViewModel 在用户只发附件不带文字时填的占位文案 —— 气泡上方已经显示图片/文档附件，
     /// 占位文字纯属冗余，所以隐藏。
     private func isPlaceholderText(_ text: String) -> Bool {
-        (text == "请分析这张图片。" && !message.images.isEmpty)
-        || (text == "请查看我附带的文档。" && !message.documentPaths.isEmpty)
+        // 写入端（ChatViewModel）用当前语言的 L() 文案，历史消息可能是另一语言存的，
+        // 所以这里同时匹配翻译表的中英两版，切语言后旧消息也能正确隐藏占位气泡。
+        let imgPH = [LocaleManager.zhTable["chat.placeholder.image"], LocaleManager.enTable["chat.placeholder.image"]]
+        let docPH = [LocaleManager.zhTable["chat.placeholder.document"], LocaleManager.enTable["chat.placeholder.document"]]
+        return (imgPH.contains(text) && !message.images.isEmpty)
+            || (docPH.contains(text) && !message.documentPaths.isEmpty)
     }
 
     private var assistantBubble: some View {
@@ -256,6 +292,10 @@ struct MessageBubbleView: View {
             if !message.images.isEmpty {
                 AssistantImagesGrid(images: message.images, tint: assistantTint)
             }
+            // 这条回答生成过网页 → 留个可点链接，随时重开（Artifact，靠 ArtifactStore @Observable 自动出现）
+            if !message.isStreaming, let rec = ArtifactStore.shared.recordForMessage(message.id) {
+                ArtifactLinkChip(record: rec)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -284,7 +324,7 @@ struct MessageBubbleView: View {
                         .overlay(Circle().stroke(.primary.opacity(0.08), lineWidth: 0.5))
                 }
                 .buttonStyle(.plain)
-                .help(didCopy ? "已复制" : "复制内容")
+                .help(didCopy ? L("chat.bubble.copied.help") : L("chat.bubble.copy.help"))
 
                 // Pin 到桌面（仅 assistant 消息显示，用户自己说的话没必要 pin）
                 if !isUser {
@@ -299,7 +339,21 @@ struct MessageBubbleView: View {
                     .buttonStyle(.plain)
                     .offset(x: pinShake ? 4 : 0)
                     .animation(pinShake ? .default.repeatCount(4, autoreverses: true).speed(8) : .default, value: pinShake)
-                    .help(didPin ? "已 Pin 到桌面" : "Pin 到桌面")
+                    .help(didPin ? L("chat.bubble.pinned.help") : L("chat.bubble.pin.help"))
+
+                    // ✨ 生成网页 —— 取代旧的常驻动作条，每条回答 hover 时才出现（非常驻）
+                    if let onMakeWebpage {
+                        Button(action: onMakeWebpage) {
+                            Image(systemName: "sparkles.rectangle.stack")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 20, height: 20)
+                                .background(Circle().fill(.ultraThinMaterial))
+                                .overlay(Circle().stroke(.primary.opacity(0.08), lineWidth: 0.5))
+                        }
+                        .buttonStyle(.plain)
+                        .help("把这条回答做成网页")
+                    }
                 }
             }
             .offset(x: isUser ? -6 : 6, y: -6)
@@ -328,6 +382,59 @@ struct MessageBubbleView: View {
             }
         case .full:
             didPin = false
+        }
+    }
+}
+
+// MARK: - 工作流运行记录 chip（聊天里「查看运行过程」）
+
+/// 挂在"运行了某工作流"那条消息下方的可点 chip —— 点了重开该 run 的 RunPanel。
+/// 状态从 `WorkflowRunStore`（@Observable）实时读，运行中→完成会自动变图标/配色。
+struct WorkflowRunChip: View {
+    let runID: String
+    let onTap: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        let run = WorkflowRunStore.shared.record(id: runID)
+        let status = run?.status
+        return Button(action: onTap) {
+            HStack(spacing: 6) {
+                Image(systemName: statusIcon(status))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(statusTint(status))
+                Text(run?.workflowName ?? "工作流")
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(.primary)
+                Text(L("chat.workflow.viewRun"))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Image(systemName: "arrow.up.forward.app")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Capsule().fill(.primary.opacity(hover ? 0.10 : 0.06)))
+            .overlay(Capsule().stroke(.primary.opacity(0.10), lineWidth: 0.5))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .help(L("chat.workflow.viewRun.help"))
+    }
+
+    private func statusIcon(_ s: String?) -> String {
+        switch s {
+        case "succeeded": return "checkmark.seal.fill"
+        case "failed": return "exclamationmark.triangle.fill"
+        case "aborted": return "stop.circle"
+        case "running", "awaitingConfirm": return "gearshape.2.fill"
+        default: return "wand.and.stars"
+        }
+    }
+    private func statusTint(_ s: String?) -> Color {
+        switch s {
+        case "succeeded": return .green
+        case "failed": return .orange
+        case "aborted": return .secondary
+        default: return .indigo
         }
     }
 }
@@ -388,11 +495,31 @@ struct ChatInputField: View {
     var pendingDocuments: [URL] = []
     /// 跟随当前 mode 的强调色（绿 / 橙），让发送按钮和聚焦边框跟头部呼应
     var tint: Color = .accentColor
+    /// v1.5：mode 选择搬到输入栏右侧（学 Gemini 把模型选择塞进输入栏的体验）
+    /// 当前对话的 mode —— picker 用它显示「现在发给谁」+ 当前 mini sprite
+    var currentMode: AgentMode = .directAPI
+    /// 用户在 picker 里选了新 mode 时的回调（外部决定是否要新建对话）
+    var onSelectMode: (AgentMode) -> Void = { _ in }
     var onSend: () -> Void
     var onCancel: () -> Void = {}
     var onPasteImage: (Data) -> Void = { _ in }
     var onRemoveImage: (Int) -> Void = { _ in }
     var onRemoveDocument: (Int) -> Void = { _ in }
+    /// 「+ → 分享窗口」选中某个窗口的回调（里程碑 0：截那个窗口给 AI 看）
+    var onShareWindow: (ScreenCapture.ShareableWindow) -> Void = { _ in }
+
+    // WTF 工作流(MVP)：加号选工作流 + 当前激活的 workflow chip
+    var activeWorkflow: Workflow? = nil
+    var workflows: [Workflow] = []
+    var onPickWorkflow: (String) -> Void = { _ in }
+    var onOpenWorkflowGallery: () -> Void = {}
+    var onCancelWorkflow: () -> Void = {}
+
+    // 全量模式（AI 公司舰队）
+    var onPickFleet: () -> Void = {}
+    var onCancelFleet: () -> Void = {}
+    var fleetPending: Bool = false
+    private let fleetChipColor = Color(red: 0.486, green: 0.424, blue: 1.0)
 
     @State private var textHeight: CGFloat = 28
     @State private var isFocused: Bool = false
@@ -438,10 +565,46 @@ struct ChatInputField: View {
                 .frame(height: 36)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
+            // 选中的工作流 chip（点 × 取消）
+            if let wf = activeWorkflow {
+                HStack(spacing: 6) {
+                    Image(systemName: wf.icon).font(.system(size: 11, weight: .semibold))
+                    Text(wf.name).font(.system(size: 12, weight: .medium))
+                    Button(action: onCancelWorkflow) {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(wf.accentColor)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(wf.accentColor.opacity(0.12)))
+                .overlay(Capsule().stroke(wf.accentColor.opacity(0.25), lineWidth: 0.5))
+                .padding(.horizontal, 14).padding(.top, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            // 全量模式 chip（点 × 取消）—— 照 workflow chip 同款
+            if fleetPending {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.fill").font(.system(size: 11, weight: .semibold))
+                    Text("全量模式").font(.system(size: 12, weight: .medium))
+                    Button(action: onCancelFleet) {
+                        Image(systemName: "xmark.circle.fill").font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(fleetChipColor)
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(fleetChipColor.opacity(0.12)))
+                .overlay(Capsule().stroke(fleetChipColor.opacity(0.25), lineWidth: 0.5))
+                .padding(.horizontal, 14).padding(.top, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             inputRow
         }
         .animation(AnimTok.smooth, value: pendingImages.count)
         .animation(AnimTok.smooth, value: pendingDocuments.count)
+        .animation(AnimTok.smooth, value: activeWorkflow?.id)
+        .animation(AnimTok.smooth, value: fleetPending)
         // 单色背景，不喧宾夺主；让外层窗口的 ultraThinMaterial 透下来一点
         .background(Color.primary.opacity(0.025))
         // 拖拽 hover 反馈和文件处理都由 ChatView 顶层统一负责
@@ -449,6 +612,7 @@ struct ChatInputField: View {
 
     /// iMessage 风格：空/单行时保持原来的小胶囊；多行时才展开成圆角输入面板。
     /// 发送按钮始终 overlay 固定在右侧，避免长文本挤到按钮下面。
+    /// v1.5：右侧 trailing 多让出 InputBarModePicker 的位置（mode 切换搬到输入栏）
     private var inputRow: some View {
         let measuredHeight = min(max(textHeight, 28), 112)
         let isExpanded = measuredHeight > 34 || text.contains("\n")
@@ -480,24 +644,48 @@ struct ChatInputField: View {
                 .frame(height: editorHeight)
                 .opacity(isLoading ? 0.5 : 1)
             }
-            .padding(.leading, 14)
-            .padding(.trailing, 42)
+            // 左下角统一「+」让出 40pt（不论实验性开关，始终一个按钮）
+            .padding(.leading, 40)
+            // 138pt 留给 mode picker + send button 的总宽度（picker ≈ 100pt，send 28pt + 间距）
+            .padding(.trailing, 138)
             .padding(.vertical, 6)
 
-            SendButton(
-                isLoading: isLoading,
-                canSend: canSend,
-                tint: tint,
-                action: { isLoading ? onCancel() : onSend() }
-            )
-            .keyboardShortcut(.defaultAction)
+            // mode picker + send button 同一行底部居右
+            HStack(spacing: 6) {
+                InputBarModePicker(
+                    currentMode: currentMode,
+                    onSelectMode: onSelectMode
+                )
+                SendButton(
+                    isLoading: isLoading,
+                    canSend: canSend,
+                    tint: tint,
+                    action: { isLoading ? onCancel() : onSend() }
+                )
+                .keyboardShortcut(.defaultAction)
+            }
             .padding(.trailing, 6)
             .padding(.bottom, 6)
         }
         .frame(minHeight: 40)
+        // 左下角统一「+」=「增加」能力入口：点开展开 工作流 + 分享窗口（实验性）。overlay 定位不撑高
+        .overlay(alignment: .bottomLeading) {
+            InputPlusMenu(workflows: workflows, tint: tint,
+                          onPick: onPickWorkflow, onOpenGallery: onOpenWorkflowGallery,
+                          shareEnabled: ExperimentalStore.shared.screenTakeoverEnabled,
+                          onShareWindow: onShareWindow,
+                          onPickFleet: onPickFleet,
+                          fleetEnabled: ExperimentalStore.shared.fleetModeEnabled)
+                .padding(.leading, 6)
+                .padding(.bottom, 6)
+        }
         .background(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .fill(.primary.opacity(isExpanded ? 0.075 : 0.06))
+        )
+        // 全量模式通电特效（只在 fleetPending 时点亮；颜色跟随当前 mode；自身 clip 在圆角内不撑父视图）
+        .background(
+            FleetInputCharge(active: fleetPending, cornerRadius: cornerRadius, tint: tint)
         )
         .overlay(
             RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
@@ -510,7 +698,10 @@ struct ChatInputField: View {
 
     /// 跟随当前 mode 的简短 placeholder（HIG: 1-3 字名词）
     private var placeholderText: String {
-        "消息"
+        if fleetPending { return "给舰队一个任务，比如：做一个苹果农场的网页" }
+        // 选了工作流就提示该喂什么（"粘贴要润色的文字…"）
+        if let wf = activeWorkflow { return wf.inputHint }
+        return L("chat.input.placeholder")
     }
 
     private func recalcHeight() {
@@ -523,6 +714,283 @@ struct ChatInputField: View {
             context: nil
         )
         textHeight = max(36, ceil(bounding.height) + 16)
+    }
+}
+
+// MARK: - 输入栏 Mode Picker（v1.5 学 Gemini，mode 切换搬进输入栏右侧）
+
+/// 输入栏右侧的 mode 切换器。
+/// - trigger: 当前 mode mini sprite + 名字 + chevron.down，整体一个 capsule
+/// - menu: 列出所有 enabled mode（按 EnabledModesStore），用 mode iconName + 名字
+/// - 选了新 mode → 调用方 `onSelectMode` 处理（默认行为：新建对话，跟旧 mode rail 一致）
+struct InputBarModePicker: View {
+    let currentMode: AgentMode
+    let onSelectMode: (AgentMode) -> Void
+
+    /// EnabledModesStore 变化时重渲（设置里加/减 mode）
+    @State private var refreshTick: Int = 0
+
+    /// 跟随当前 mode 的调色板（trigger 染色用）
+    @State private var paletteStore = PetPaletteStore.shared
+
+    private var enabledModes: [AgentMode] {
+        let s = EnabledModesStore.shared.enabledModes
+        return AgentMode.allCases.filter { s.contains($0) }
+    }
+
+    private var tint: Color {
+        paletteStore.palette(for: currentMode).primary
+    }
+
+    var body: some View {
+        Menu {
+            ForEach(enabledModes) { mode in
+                Button {
+                    onSelectMode(mode)
+                } label: {
+                    Label(L(mode.labelKey), systemImage: mode.iconName)
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                // 当前 mode 的 mini sprite —— 跟对话胶囊里的 mode icon 视觉对齐
+                ModeSpriteView(mode: currentMode, isWorking: false, size: 14, animated: false)
+                    .frame(width: 18, height: 16)
+                Text(L(currentMode.labelKey))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.primary.opacity(0.85))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 26)
+            .background(
+                Capsule()
+                    .fill(tint.opacity(0.10))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(tint.opacity(0.22), lineWidth: 0.5)
+            )
+            .contentShape(Capsule())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(L("chat.input.modepicker.help"))
+        .id(refreshTick)
+        .onReceive(NotificationCenter.default.publisher(for: EnabledModesStore.didChangeNotification)) { _ in
+            refreshTick &+= 1
+        }
+    }
+}
+
+// MARK: - 输入栏左下角统一「+」=「增加」入口（工作流 + 分享窗口，点开展开）
+
+/// 一个「+」整合两类"增加"能力：① 工作流（选一个 / 全部工作流陈列页）② 分享窗口给 AI（实验性）。
+/// 点开是个 Menu（展开看里面有什么）；"分享窗口"点了再弹窗口选择器 popover（异步列窗口）。
+struct InputPlusMenu: View {
+    let workflows: [Workflow]
+    let tint: Color
+    let onPick: (String) -> Void
+    let onOpenGallery: () -> Void
+    let shareEnabled: Bool
+    let onShareWindow: (ScreenCapture.ShareableWindow) -> Void
+    var onPickFleet: () -> Void = {}
+    /// 全量模式（实验性）是否开启 —— 关闭时「🚀 全量模式」行整行隐藏
+    var fleetEnabled: Bool = false
+
+    @State private var isHovering = false
+    @State private var showPlus = false
+    @State private var content: PlusContent = .menu
+    @State private var windows: [ScreenCapture.ShareableWindow] = []
+    @State private var loading = false
+
+    private enum PlusContent { case menu, workflows, share }
+    /// 全量模式身份色（与 FleetTheaterView.accent 一致）
+    private let accentFleet = Color(red: 0.486, green: 0.424, blue: 1.0)
+
+    // 用 plain Button（不是 SwiftUI Menu）—— Menu 在输入栏 overlay 里基线会下偏、跟发送键不齐。
+    var body: some View {
+        Button {
+            content = .menu
+            showPlus = true
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(isHovering ? tint : .secondary)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(isHovering ? tint.opacity(0.12) : Color.primary.opacity(0.06)))
+                .overlay(Circle().stroke(.primary.opacity(0.10), lineWidth: 0.5))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+        .help("增加 · 工作流 / 分享")
+        .popover(isPresented: $showPlus, arrowEdge: .top) {
+            switch content {
+            case .share:     sharePicker
+            case .workflows: workflowsPanel
+            case .menu:      menuPanel
+            }
+        }
+    }
+
+    /// 点开「+」展开的三件套主面板：① 工作流（▸ 二级）② 全量模式 ③ 分享屏幕。
+    private var menuPanel: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            plusRow(icon: "wave.3.right", title: "工作流", tint: .indigo, trailingChevron: true) {
+                content = .workflows
+            }
+            if fleetEnabled {
+                plusRow(icon: "bolt.fill", title: "全量模式", tint: accentFleet) {
+                    onPickFleet(); showPlus = false
+                }
+            }
+            if shareEnabled {
+                plusRow(icon: "macwindow.on.rectangle", title: "分享屏幕", tint: .secondary) {
+                    refresh(); content = .share
+                }
+            }
+        }
+        .padding(.vertical, 6)
+        .frame(width: 250)
+    }
+
+    /// 二级页：各工作流 + 全部工作流…（顶部带返回箭头）
+    private var workflowsPanel: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 6) {
+                Button { content = .menu } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                Text("工作流").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
+            ForEach(workflows) { wf in
+                plusRow(icon: wf.icon, title: wf.name, tint: wf.accentColor) {
+                    onPick(wf.id); showPlus = false
+                }
+            }
+            plusRow(icon: "square.grid.2x2", title: "全部工作流…", tint: .secondary) {
+                onOpenGallery(); showPlus = false
+            }
+        }
+        .padding(.bottom, 6)
+        .frame(width: 250)
+    }
+
+    @ViewBuilder
+    private func plusRow(icon: String, title: String, tint: Color,
+                         trailingChevron: Bool = false,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(tint).frame(width: 18)
+                Text(title).font(.system(size: 13)).foregroundStyle(.primary)
+                Spacer(minLength: 0)
+                if trailingChevron {
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var sharePicker: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Button { content = .menu } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                Text(L("chat.input.sharewindow.title"))
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 6)
+            if loading && windows.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(L("chat.input.sharewindow.loading")).font(.system(size: 12)).foregroundStyle(.secondary)
+                }.padding(12)
+            } else if windows.isEmpty {
+                Text(L("chat.input.sharewindow.empty")).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true).padding(12)
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(windows) { w in
+                            WindowPickerRow(window: w) { onShareWindow(w); showPlus = false }
+                        }
+                    }
+                    .padding(.horizontal, 6).padding(.bottom, 8)
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .frame(width: 300)
+    }
+
+    private func refresh() {
+        loading = true
+        Task { @MainActor in
+            windows = await ScreenCapture.listWindows()
+            loading = false
+        }
+    }
+}
+
+/// 窗口选择弹层里的一行：app 图标 + 窗口标题 + app 名。
+private struct WindowPickerRow: View {
+    let window: ScreenCapture.ShareableWindow
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Group {
+                    if let icon = appIcon {
+                        Image(nsImage: icon).resizable().interpolation(.high)
+                    } else {
+                        Image(systemName: "macwindow").resizable()
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 20, height: 20)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(window.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Text(window.appName)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(hover ? Color.primary.opacity(0.08) : .clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hover = $0 }
+    }
+
+    private var appIcon: NSImage? {
+        NSRunningApplication(processIdentifier: window.pid)?.icon
     }
 }
 
@@ -565,7 +1033,7 @@ struct SendButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!isActive)
-        .help(isLoading ? "取消" : "发送")
+        .help(isLoading ? L("chat.input.send.cancel.help") : L("chat.input.send.help"))
         .onHover { hovering in
             withAnimation(AnimTok.snappy) { isHovering = hovering }
         }
@@ -754,18 +1222,41 @@ final class PasteAwareTextView: NSTextView {
     var onPasteImage: ((Data) -> Void)?
 
     override func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        // 优先尝试图片
-        if let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
-           let img = images.first,
-           let tiff = img.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let png = bitmap.representation(using: .png, properties: [:]) {
-            onPasteImage?(png)
+        if let data = Self.imageData(from: .general) {
+            onPasteImage?(data)
             return
         }
         // 否则按默认文字粘贴
         super.paste(sender)
+    }
+
+    /// 从剪贴板里尽力取出一张图片的 PNG/原始数据。覆盖两种常见情况：
+    /// ① 访达里 ⌘C 拷的**图片文件**（剪贴板里是 file URL，不是图片数据）—— 优先，读原文件保真；
+    /// ② 截图 / 从浏览器、预览里拷的图（剪贴板里直接是**图片数据**）。
+    /// 拿不到图片返回 nil（让 super.paste 走正常文字粘贴）。
+    static func imageData(from pb: NSPasteboard) -> Data? {
+        // ① 图片文件 URL —— 只认图片类型的文件，文档类不会命中（落到文字粘贴）
+        let urlOptions: [NSPasteboard.ReadingOptionKey: Any] = [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: [UTType.image.identifier]
+        ]
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: urlOptions) as? [URL],
+           let url = urls.first {
+            let ext = url.pathExtension.lowercased()
+            // 模型原生支持的格式直接读原始字节，省去 decode + re-encode（跟 DragDropUtil 一致）
+            if ["png", "jpg", "jpeg", "gif"].contains(ext), let data = try? Data(contentsOf: url) {
+                return data
+            }
+            if let img = NSImage(contentsOf: url), let png = DragDropUtil.pngData(from: img) {
+                return png
+            }
+        }
+        // ② 剪贴板里直接是图片数据
+        if let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
+           let img = images.first, let png = DragDropUtil.pngData(from: img) {
+            return png
+        }
+        return nil
     }
 }
 
@@ -781,8 +1272,10 @@ struct AssistantImagesGrid: View {
     var body: some View {
         Group {
             if images.count == 1 {
-                imageThumb(images[0], index: 0)
-                    .frame(maxWidth: 280, maxHeight: 280)
+                // 单图用 .fit：完整显示整张图、按比例缩放进 280×320 盒子内，
+                // 竖图不会被 .fill 撑爆高度（旧 bug：竖图溢出到上千 pt，盖住下方文字气泡）
+                imageThumb(images[0], index: 0, contentMode: .fit)
+                    .frame(maxWidth: 280, maxHeight: 320)
             } else {
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
                     ForEach(Array(images.enumerated()), id: \.offset) { idx, data in
@@ -808,11 +1301,11 @@ struct AssistantImagesGrid: View {
     }
 
     @ViewBuilder
-    private func imageThumb(_ data: Data, index: Int) -> some View {
+    private func imageThumb(_ data: Data, index: Int, contentMode: ContentMode = .fill) -> some View {
         if let nsImage = NSImage(data: data) {
             Image(nsImage: nsImage)
                 .resizable()
-                .aspectRatio(contentMode: .fill)
+                .aspectRatio(contentMode: contentMode)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -820,10 +1313,10 @@ struct AssistantImagesGrid: View {
                 )
                 .contentShape(Rectangle())
                 .onTapGesture { previewIndex = index }
-                .help("点击放大查看 / 右键保存")
+                .help(L("chat.image.zoom.help"))
                 .contextMenu {
-                    Button("保存到桌面…") { saveImageToDesktop(data) }
-                    Button("拷贝") { copyImageToPasteboard(data) }
+                    Button(L("chat.image.saveToDesktop")) { saveImageToDesktop(data) }
+                    Button(L("chat.image.copy")) { copyImageToPasteboard(data) }
                 }
         } else {
             RoundedRectangle(cornerRadius: 8)
@@ -887,8 +1380,8 @@ struct AssistantImagePreview: View {
                     .buttonStyle(.plain)
                 }
 
-                Button("保存到桌面") { saveToDesktop(images[current]) }
-                Button("关闭", role: .cancel, action: onClose)
+                Button(L("chat.image.preview.saveToDesktop")) { saveToDesktop(images[current]) }
+                Button(L("chat.image.preview.close"), role: .cancel, action: onClose)
                     .keyboardShortcut(.cancelAction)
             }
         }

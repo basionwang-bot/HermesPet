@@ -37,27 +37,11 @@ enum SoundEvent: String, CaseIterable {
         }
     }
 
-    /// 用户看到的事件名（设置面板用）
-    var displayTitle: String {
-        switch self {
-        case .voiceStart:  return "启动语音"
-        case .voiceFinish: return "AI 回复完成"
-        case .dragIn:      return "拖文件入对话"
-        case .send:        return "发送消息"
-        case .error:       return "出错时"
-        }
-    }
+    /// 用户看到的事件名 i18n key（设置面板用）—— rawValue 即 voiceStart / voiceFinish / …
+    var titleKey: String { "settings.sound.event.\(rawValue).title" }
 
-    /// 设置面板里给用户看的说明
-    var displayCaption: String {
-        switch self {
-        case .voiceStart:  return "按住 ⌘⇧V 触发录音时"
-        case .voiceFinish: return "AI 完成回复（流式结束）时"
-        case .dragIn:      return "拖入文件 / 图片 / 文档成功时"
-        case .send:        return "你点发送按钮或按回车时"
-        case .error:       return "API 失败 / 连接断开等错误发生时"
-        }
-    }
+    /// 设置面板里给用户看的说明 i18n key
+    var captionKey: String { "settings.sound.event.\(rawValue).caption" }
 }
 
 enum SoundManager {
@@ -81,8 +65,7 @@ enum SoundManager {
                   let sound = NSSound(contentsOf: url, byReference: false) else {
                 return
             }
-            keepAlive(sound)
-            sound.play()
+            playKeepingAlive(sound)
         } else {
             // 系统音 —— NSSound(named:) 用框架缓存，引用不会丢
             NSSound(named: rawValue)?.play()
@@ -95,8 +78,11 @@ enum SoundManager {
     @MainActor private static let aliveDelegate = AliveDelegate()
 
     @MainActor
-    private static func keepAlive(_ sound: NSSound) {
+    private static func playKeepingAlive(_ sound: NSSound) {
         sound.delegate = aliveDelegate
+        // 仅在 play() 真正启动后才保活：设备被占/无效时 play() 返回 false 且不回调 didFinishPlaying，
+        // 无条件 append 会让该 NSSound 永久滞留 alive 数组（缓慢泄漏）
+        guard sound.play() else { return }
         alive.append(sound)
     }
 

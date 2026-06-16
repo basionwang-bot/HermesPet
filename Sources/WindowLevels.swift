@@ -33,4 +33,10 @@ enum HermesWindowLevel {
 
     /// 灵动岛胶囊 —— 最高层（系统刘海下方的视觉锚点）
     static let dynamicIsland: NSWindow.Level = .statusBar
+
+    /// 会议纪要控制台 —— 贴灵动岛下方、可交互。跟字幕同级（低于灵动岛胶囊，浮于聊天 / 普通窗之上）
+    static let meeting: NSWindow.Level = .mainMenu
+
+    /// AI 网页（Artifact）预览窗 —— 跟聊天窗同级，浮于普通窗之上，方便边看网页边聊
+    static let artifact: NSWindow.Level = .floating
 }

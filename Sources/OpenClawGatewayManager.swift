@@ -168,36 +168,23 @@ final class OpenClawGatewayManager: @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// 找 openclaw binary（homebrew / npm global / 用户 shell PATH）
+    /// 找 openclaw binary。
+    /// 旧版用 `zsh -l`（不加载 `~/.zshrc`）+ `waitUntilExit` 无超时 + 候选表只有 3 条 ——
+    /// openclaw 是 npm CLI，最常装在 nvm / bun / pnpm 等**写在 `.zshrc` 里**的 PATH，旧版漏判 = "有时候检测不到"。
+    /// 现复用 `CLIAvailability` 健壮四层探测（`-lic` 加载 .zshrc + 超时 + nvm/bun/pnpm 全面扫描）。
     private func locateOpenClawBinary() -> String? {
         let fm = FileManager.default
-        let candidates = [
+        // 快路径：homebrew / npm-global 命中就不必启 shell
+        let fast = [
             "/opt/homebrew/bin/openclaw",
             "/usr/local/bin/openclaw",
             "\(NSHomeDirectory())/.npm-global/bin/openclaw"
         ]
-        for path in candidates where fm.isExecutableFile(atPath: path) {
+        for path in fast where fm.isExecutableFile(atPath: path) {
             return path
         }
-        // 兜底走 zsh -l PATH
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-l", "-c", "which openclaw 2>/dev/null"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let path = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !path.isEmpty, fm.isExecutableFile(atPath: path) {
-                return path
-            }
-        } catch {
-            return nil
-        }
-        return nil
+        // 慢路径兜底：CLIAvailability 健壮四层（加载 .zshrc + nvm/bun/pnpm/volta/asdf… 全扫 + 超时）
+        return CLIAvailability.locateBinary(command: "openclaw")
     }
 
     /// 解析后的配置片段

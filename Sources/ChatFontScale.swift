@@ -11,9 +11,9 @@ enum ChatFontScale {
     /// AppStorage key
     static let storageKey = "chatFontScale"
 
-    /// 五档缩放：85% / 100% / 115% / 130% / 150%
-    /// 覆盖近视 / 远视 / 老花的常见需求；档差 ~15% 足够看出区别又不会跳跃
-    static let presets: [Double] = [0.85, 1.0, 1.15, 1.30, 1.50]
+    /// 缩放档位：60% / 70% / 85% / 100% / 115% / 130% / 150% / 170% / 200% / 250%
+    /// 两头都拉宽 —— 能缩得更小（一屏塞更多字）也能放得更大（演示/远看/老花），覆盖写作长文需求
+    static let presets: [Double] = [0.6, 0.7, 0.85, 1.0, 1.15, 1.30, 1.50, 1.70, 2.0, 2.5]
 
     static let `default`: Double = 1.0
 

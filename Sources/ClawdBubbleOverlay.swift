@@ -10,12 +10,21 @@ import SwiftUI
 ///
 /// 实现：单独 NSWindow，level .statusBar，浮在灵动岛胶囊**右下方**，
 /// 1.8s 自动淡出。跟 VoiceTranscriptOverlay 同款轻量模式
+///
+/// **守决策 #1/#6（2026-06-10 改）**：窗口尺寸**恒定** 380×64，气泡宽度变化全在 SwiftUI 内部
+/// 自适应；定位只 `setFrameOrigin` 不 resize。用 NSHostingController + sizingOptions=[]（照
+/// 语音陪聊窗）——旧写法是裸 NSHostingView + 每次显示按文字宽 setFrame + `.animation` 内容
+/// 同回合变化，正是 `updateAnimatedWindowSize → setFrame` 嵌套 layout 崩溃（6/9 .ips）的模式。
 @MainActor
 final class ClawdBubbleOverlayController {
     static let shared = ClawdBubbleOverlayController()
 
+    /// 窗口恒定尺寸：宽 = 气泡最大宽 360 + 余量；高 = 气泡 38 + 阴影余量（决策 #1：绝不按内容 resize）
+    private static let winW: CGFloat = 380
+    private static let winH: CGFloat = 64
+
     private var window: NSWindow?
-    private var hostingView: NSHostingView<ClawdBubbleView>?
+    private var hosting: NSHostingController<ClawdBubbleView>?
     private let viewState = BubbleState()
     private var hideTask: Task<Void, Never>?
 
@@ -77,7 +86,7 @@ final class ClawdBubbleOverlayController {
 
     private func createWindow() {
         let w = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 50),
+            contentRect: NSRect(x: 0, y: 0, width: Self.winW, height: Self.winH),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: true
@@ -90,18 +99,23 @@ final class ClawdBubbleOverlayController {
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         w.isReleasedWhenClosed = false
 
-        let host = NSHostingView(rootView: ClawdBubbleView(state: viewState))
-        host.frame = NSRect(x: 0, y: 0, width: 200, height: 50)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        // NSHostingController + sizingOptions=[]（照语音陪聊窗，见类头注释）——
+        // 根视图用固定 .frame(width:height:)，给 Auto Layout 确定尺寸，避免首帧反推崩
+        let host = NSHostingController(rootView: ClawdBubbleView(
+            state: viewState, width: Self.winW, height: Self.winH
+        ))
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #1/#6
+        w.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // 防御：铺满全窗（autoresizingMask 收口）
 
         self.window = w
-        self.hostingView = host
+        self.hosting = host
     }
 
     /// 浮在带刘海屏的左上方位置 —— 在灵动岛胶囊**右下方**，与 Clawd（在灵动岛左耳）斜对应
-    /// 实际是给 Clawd 的"思考泡"感
+    /// 实际是给 Clawd 的"思考泡"感。
+    /// ⚠️ 只挪原点（窗口尺寸恒定）——setFrameOrigin 无 resize 路径，不会与 SwiftUI 内容
+    /// 动画在同一 CA commit 撞 layout（决策 #6）。气泡视觉锚点跟旧版完全一致。
     private func positionWindow() {
         guard let window = window else { return }
         let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
@@ -111,21 +125,12 @@ final class ClawdBubbleOverlayController {
         let safeArea = screen.safeAreaInsets
         let notchHeight: CGFloat = safeArea.top > 0 ? safeArea.top : 28
 
-        // 估算文字宽度（每字 14pt + padding 32）
-        let charCount = viewState.text.count
-        let estimatedWidth: CGFloat = min(360, max(100, CGFloat(charCount) * 14 + 36))
-        let windowHeight: CGFloat = 38
+        // 气泡（内容居中）水平中心：刘海中心左移 200 → 灵动岛左耳（Clawd 所在）的左下方
+        let centerX = frame.midX - 200
+        // 气泡顶边：灵动岛胶囊本体下方（维持旧版 maxY - notch - 26 的视觉位置）
+        let topY = frame.maxY - notchHeight - 8 - 18
 
-        // x：刘海中心 - 灵动岛宽度一半 - 一段距离 → 出现在灵动岛左耳（Clawd 所在）的左下方
-        // 这样视觉上像 Clawd 头顶/左侧冒气泡
-        let bubbleX = frame.midX - 200 - estimatedWidth / 2
-        // y：灵动岛胶囊本体下方 24pt
-        let bubbleY = frame.maxY - notchHeight - 8 - windowHeight - 18
-
-        window.setFrame(
-            NSRect(x: bubbleX, y: bubbleY, width: estimatedWidth, height: windowHeight),
-            display: true
-        )
+        window.setFrameOrigin(NSPoint(x: centerX - Self.winW / 2, y: topY - Self.winH))
     }
 }
 
@@ -140,15 +145,18 @@ final class BubbleState {
 
 // MARK: - SwiftUI Bubble
 
-/// Clawd 头顶气泡 —— 白色卡片 + 黑字 + 小三角指向胶囊（向右上）
+/// Clawd 头顶气泡 —— 黑胶囊 + 白字。窗口尺寸恒定，气泡按文字在窗口**内部**自适应（决策 #1）
 struct ClawdBubbleView: View {
     @Bindable var state: BubbleState
+    /// 与窗口一致的固定尺寸 —— NSHostingController 下根视图必须定宽高（见控制器类头注释）
+    let width: CGFloat
+    let height: CGFloat
 
     /// Anthropic Clawd 品牌橘 #D77757
     private static let clawdOrange = Color(red: 215.0/255, green: 119.0/255, blue: 87.0/255)
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .top) {
             if state.isVisible {
                 Text(state.text)
                     .font(.system(size: 12, weight: .medium))
@@ -156,6 +164,7 @@ struct ClawdBubbleView: View {
                     .lineLimit(1)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
+                    .frame(maxWidth: 360)   // 维持旧版气泡最大宽
                     .background(
                         Capsule(style: .continuous)
                             .fill(.black.opacity(0.82))
@@ -165,11 +174,11 @@ struct ClawdBubbleView: View {
                             .stroke(Self.clawdOrange.opacity(0.35), lineWidth: 0.6)
                     )
                     .shadow(color: .black.opacity(0.30), radius: 10, y: 4)
-                    .transition(.scale(scale: 0.7, anchor: .topTrailing)
+                    .transition(.scale(scale: 0.7, anchor: .top)
                         .combined(with: .opacity))
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .frame(width: width, height: height, alignment: .top)
         .animation(.spring(response: 0.32, dampingFraction: 0.78), value: state.isVisible)
     }
 }

@@ -95,6 +95,12 @@ final class VoiceInputController: @unchecked Sendable {
 
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
+        // 无内置麦 / 外设刚断开 / 硬件未就绪时 format 为 sampleRate==0 的无效格式，
+        // 直接 installTap 会触发 CoreAudio 断言 NSException 崩。此处尚未 mutate 状态/启动引擎，安全早退。
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            postError("音频输入设备不可用，请检查麦克风是否连接")
+            return false
+        }
         input.removeTap(onBus: 0)
 
         // audio tap closure 在后台线程跑。不要捕获 self，

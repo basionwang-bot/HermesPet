@@ -50,12 +50,46 @@ enum OpenCodeConfigGenerator {
 
         ## 行为规则
 
-        - 用中文与用户对话（除非用户用英文）。
+        - \(LocaleManager.aiReplyLanguageInstruction())
         - 用户问读文件 / 跑命令 / 联网等需要本地能力时，主动用对应工具（`list_files` / `read` / `bash` / `webfetch` 等）。
         - 回答时简洁直接，避免不必要的格式化（无意义的 markdown 标题、空 bullet 列表等）。
+
+        ## 客户端卡片格式（HermesPet 专属，很有用，务必遵守）
+
+        - 想让用户在几个选项里做选择时，用 Markdown 编号列表（`1. xxx` `2. yyy` …），客户端会把它渲染成可点击的选项卡片。
+        - 识别到用户输入是**任务规划意图**（"今天要做哪些事 / 待办 / 帮我把 X 拆解成任务 / 列个计划"）时，把拆解后的任务用下面这种 fence 输出，客户端会渲染成可操作的任务卡片，每张卡片带 📌 Pin（钉到桌面）/ 🤖 让 AI 做 / ✗ 跳过 三个按钮：
+
+        ```tasks
+        - title: 任务标题
+          desc: 一行描述
+          mode: hermes        # hermes / claudeCode / codex 三选一，推荐最适合执行该任务的引擎
+          eta: 30m            # 可选预估时长
+        ```
+
+          eta 可选。**只在确实是任务规划场景才用此格式，普通对话仍走自然语言回复。**
         """
         let agentsPath = (directory as NSString).appendingPathComponent("AGENTS.md")
         try? agentsMD.data(using: .utf8)?.write(to: URL(fileURLWithPath: agentsPath), options: .atomic)
+
+        // C：写入技能卡（opencode 原生 SKILL.md，按需加载）—— 「AgentForge 技能 → 在线 AI」整合
+        writeSkills(in: directory)
+    }
+
+    // MARK: - 技能卡注入（AgentForge 上学成果 → opencode 原生 SKILL.md）
+
+    /// 把技能库（内置精选 + 用户 agent-forge 真实毕业卡，见 `SkillLibrary`）写成 opencode 能加载的
+    /// `<directory>/.opencode/skills/<id>/SKILL.md`。opencode serve 的 cwd = 此 directory，原生
+    /// `skill` 工具会**自动发现、按需加载**（不污染上下文、只在相关任务时 agent 才调用，符合「增强不打扰」）。
+    /// 用户去 AgentForge 上学毕业的技能卡会自动出现在这里，覆盖同名内置卡。
+    private static func writeSkills(in directory: String) {
+        let skillsRoot = (directory as NSString).appendingPathComponent(".opencode/skills")
+        let fm = FileManager.default
+        for card in SkillLibrary.loadAll() {
+            let dir = (skillsRoot as NSString).appendingPathComponent(card.id)
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            let path = (dir as NSString).appendingPathComponent("SKILL.md")
+            try? card.skillMarkdown.data(using: .utf8)?.write(to: URL(fileURLWithPath: path), options: .atomic)
+        }
     }
 
     /// model ID 到友好身份描述的映射（用于 AGENTS.md 让 AI 自我介绍时报真实身份）
@@ -203,13 +237,16 @@ enum OpenCodeConfigGenerator {
                 ]
             }
 
-            // 改写 baseURL 到本地代理（仅当代理在跑）。代理按 providerID 路由：
-            // http://127.0.0.1:<port>/<providerID> → 真实 baseURL
+            // 改写 baseURL 到本地代理（代理按 providerID 路由：http://127.0.0.1:<port>/<id> → 真实 baseURL）。
+            // ⭐ 现在**所有** provider（含远程清单加的新厂商）都走 proxy —— 把真实 upstream 注册给 proxy
+            // 再指向 proxy/<id>，于是推理过滤对所有家普适（不再有"漏注册→直连→泄漏"的坑）。
             let proxiedURL: String = {
-                if let proxy = proxyURL,
-                   ReasoningProxy.upstreamBaseURLs[preset.id] != nil {
+                if let proxy = proxyURL {
+                    ReasoningProxy.shared.registerUpstream(id: preset.id, baseURL: preset.baseURL)
                     return "\(proxy)/\(preset.id)"
                 }
+                // proxy 没就绪才直连（正常路径下 OpenCodeServerManager 已 await proxy 就绪，不该走到这）。
+                NSLog("[OpenCodeConfig] ⚠️ proxy 未就绪，provider '%@' 暂时直连（reasoning 不会被过滤！）", preset.id)
                 return preset.baseURL
             }()
 
@@ -231,11 +268,21 @@ enum OpenCodeConfigGenerator {
             let key = effectiveAPIKey(for: "custom")
             let model = UserDefaults.standard.string(forKey: "directAPIModel") ?? ""
             if !baseURL.isEmpty && !key.isEmpty && !model.isEmpty {
+                // ⭐ 自定义 provider 也走 proxy（之前直连 → 自定义推理模型如 MiMo 会泄漏思考过程，与决策 #15
+                // 启动竞态同病）。注册真实 baseURL 给 proxy，opencode 指向 proxy/custom。
+                let customURL: String = {
+                    if let proxy = proxyURL {
+                        ReasoningProxy.shared.registerUpstream(id: "custom", baseURL: baseURL)
+                        return "\(proxy)/custom"
+                    }
+                    NSLog("[OpenCodeConfig] ⚠️ proxy 未就绪，自定义 provider 暂时直连（reasoning 不会被过滤！）")
+                    return baseURL
+                }()
                 providers["custom"] = [
                     "npm": "@ai-sdk/openai-compatible",
                     "name": "Custom",
                     "options": [
-                        "baseURL": baseURL,
+                        "baseURL": customURL,
                         "apiKey": key
                     ],
                     "models": [

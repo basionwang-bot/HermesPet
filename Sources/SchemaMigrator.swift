@@ -19,7 +19,8 @@ enum SchemaMigrator {
     /// 当前 schema 最新版本号。每加一条新迁移就 +1。
     /// v0 = v1.2.2 及以前（没有版本号字段）
     /// v1 = v1.2.3 引入 scoped directAPIKey
-    private static let latestVersion = 1
+    /// v2 = AI 档案中心：把现有后端配置转成默认档案
+    private static let latestVersion = 2
 
     private static let versionKey = "hermesPetSchemaVersion"
 
@@ -27,6 +28,10 @@ enum SchemaMigrator {
     /// 整个过程在主线程同步跑（迁移操作都是 UserDefaults 读写，非常快）。
     @MainActor
     static func runMigrations() {
+        // 先做 bundle ID 域迁移（独立 flag，跟 schema 版本无关，只跑一次）：
+        // 必须赶在读取任何配置之前，把旧 bundle ID 域的设置 / API Key 搬到当前域，让老用户升级无感。
+        migrateLegacyBundleIDDomain()
+
         let currentVersion = UserDefaults.standard.integer(forKey: versionKey)
         guard currentVersion < latestVersion else {
             NSLog("[SchemaMigrator] up to date (version=%d)", currentVersion)
@@ -60,6 +65,11 @@ enum SchemaMigrator {
             targetVersion: 1,
             description: "把旧全局 directAPIKey 复制到 scoped directAPIKey.<providerID>",
             run: migrateGlobalDirectAPIKeyToScoped
+        ),
+        Migration(
+            targetVersion: 2,
+            description: "把现有 directAPI/hermes/qwen 配置转成「AI 档案中心」的默认档案",
+            run: { MainActor.assumeIsolated { AIProfileStore.shared.seedFromLegacyIfNeeded() } }
         )
     ]
 
@@ -84,5 +94,35 @@ enum SchemaMigrator {
         }
         ud.set(globalKey, forKey: scopedKeyName)
         NSLog("[SchemaMigrator] copied global directAPIKey → %@", scopedKeyName)
+    }
+
+    // MARK: - 一次性 bundle ID 域迁移
+
+    /// v1.2.11：bundle ID 从 `com.nousresearch.hermespet` 改成 `com.basionwang.hermespet`。
+    /// macOS 把新 bundle ID 当成全新 app，UserDefaults 域随之改变，老用户的设置 / API Key
+    /// 会"消失"。这里把旧域的所有键值搬到当前域，让升级无感。独立 flag 记录，保证只跑一次、幂等。
+    @MainActor
+    static func migrateLegacyBundleIDDomain() {
+        let flag = "didMigrateLegacyBundleIDDomain"
+        let ud = UserDefaults.standard
+        guard !ud.bool(forKey: flag) else { return }
+
+        let legacyDomain = "com.nousresearch.hermespet"
+        if let keys = CFPreferencesCopyKeyList(legacyDomain as CFString,
+                                               kCFPreferencesCurrentUser,
+                                               kCFPreferencesAnyHost) as? [String] {
+            var moved = 0
+            // 不覆盖当前域已有值（保险）；逐个把旧域键值搬过来
+            for key in keys where ud.object(forKey: key) == nil {
+                if let value = CFPreferencesCopyAppValue(key as CFString, legacyDomain as CFString) {
+                    ud.set(value, forKey: key)
+                    moved += 1
+                }
+            }
+            if moved > 0 {
+                NSLog("[SchemaMigrator] 从旧 bundle ID 域迁移了 %d 个设置项", moved)
+            }
+        }
+        ud.set(true, forKey: flag)
     }
 }

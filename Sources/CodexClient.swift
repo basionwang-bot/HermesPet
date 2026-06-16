@@ -9,6 +9,10 @@ import Foundation
 /// - stream 完成后通过 takeGeneratedImages() 给 ViewModel 消费，附加到 assistant 消息
 final class CodexClient: @unchecked Sendable {
 
+    /// 子进程「装死」看门狗阈值（秒）：codex 连续这么久没有任何 stdout/stderr 输出就判定卡死、
+    /// 自动断流收尾。跟 ClaudeCodeClient 一致取 300s —— Codex 也会真的跑命令/build，静默几分钟正常，不能误杀。
+    private static let streamIdleTimeoutSeconds: TimeInterval = 300
+
     /// codex CLI 的可执行路径 —— **不再 fallback 到硬编码路径**。
     /// 同 ClaudeCodeClient：由 CLIAvailability 探测后写到 UserDefaults；
     /// 找不到则返回 `""`，spawn 失败 → UI 显示 "找不到 codex 命令"
@@ -65,16 +69,19 @@ final class CodexClient: @unchecked Sendable {
     ///   画布进度由 CanvasView toolbar 独立展示。
     func streamCompletion(messages: [ChatMessage],
                           conversationID: String? = nil,
-                          suppressIslandUpdates: Bool = false) -> AsyncThrowingStream<String, Error> {
+                          suppressIslandUpdates: Bool = false,
+                          injectMemory: Bool = true,
+                          onUsage: (@Sendable (Int) -> Void)? = nil) -> AsyncThrowingStream<String, Error> {
         let existingSessionID = sessionID(for: conversationID)
-        let prompt = buildPrompt(messages: messages, isResume: existingSessionID != nil)
+        let prompt = buildPrompt(messages: messages, isResume: existingSessionID != nil, injectMemory: injectMemory)
         let inputImages = collectInputImagePaths(from: messages)
         return streamRaw(
             prompt: prompt,
             imageFiles: inputImages,
             conversationID: conversationID,
             sessionID: existingSessionID,
-            suppressIslandUpdates: suppressIslandUpdates
+            suppressIslandUpdates: suppressIslandUpdates,
+            onUsage: onUsage
         )
     }
 
@@ -135,7 +142,19 @@ final class CodexClient: @unchecked Sendable {
 
 """
 
-    private func buildPrompt(messages: [ChatMessage], isResume: Bool) -> String {
+    private func buildPrompt(messages: [ChatMessage], isResume: Bool, injectMemory: Bool = true) -> String {
+        // v1.3 Phase 4c：把跨模式「共享记忆」拼在 prompt 最前。
+        // Codex 会 resume 续接：仅在新 thread（!isResume）注入一次，复用线程不重复注入、省 token。
+        // Phase 5-3：prompt 末尾拼「用界面语言回复」指令，让 Codex 回复跟随界面语言。
+        // injectMemory=false：工作流 / 验收等隔离调用不带长期画像。
+        let body = buildPromptBody(messages: messages, isResume: isResume) + "\n\n" + LocaleManager.aiReplyLanguageInstruction() + NotesWritingContextHolder.shared.promptSuffix()
+        if !isResume, injectMemory, let mem = UserMemoryStore.shared.injectionText() {
+            return mem + "\n\n" + body
+        }
+        return body
+    }
+
+    private func buildPromptBody(messages: [ChatMessage], isResume: Bool) -> String {
         let convo = messages.filter { $0.role == .user || $0.role == .assistant }
         guard let latest = convo.last, latest.role == .user else {
             return convo.map { "\($0.role == .user ? "用户" : "助手"): \($0.content)" }.joined(separator: "\n\n") + Self.clientHints
@@ -190,7 +209,8 @@ final class CodexClient: @unchecked Sendable {
                            imageFiles: [String] = [],
                            conversationID: String?,
                            sessionID: String?,
-                           suppressIslandUpdates: Bool = false) -> AsyncThrowingStream<String, Error> {
+                           suppressIslandUpdates: Bool = false,
+                           onUsage: (@Sendable (Int) -> Void)? = nil) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             // spawn 前快照 codex 的默认图片目录
             let codexImageDir = (NSHomeDirectory() as NSString)
@@ -242,16 +262,26 @@ final class CodexClient: @unchecked Sendable {
             process.standardOutput = outPipe
             process.standardError = errPipe
             let stderrBuffer = CodexLockedData()
+
+            // 流式可变状态 + 跨队列收尾控制（提前到 handler 之前创建，供 watchdog / handler 共用）
+            let state = StreamState()
+
+            // 幂等收尾：terminationHandler / watchdog / run 失败三方抢占，continuation 只 finish 一次
+            let finishStream: @Sendable (Error?) -> Void = { error in
+                guard state.claimFinish() else { return }
+                if let error { continuation.finish(throwing: error) }
+                else { continuation.finish() }
+            }
+
             errPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 if data.isEmpty {   // EOF：置 nil，避免进程退出后 handler 空转
                     handle.readabilityHandler = nil
                     return
                 }
+                state.touch()
                 stderrBuffer.append(data)
             }
-
-            let state = StreamState()
 
             outPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
@@ -259,6 +289,7 @@ final class CodexClient: @unchecked Sendable {
                     handle.readabilityHandler = nil
                     return
                 }
+                state.touch()
                 state.buffer.append(data)
 
                 while let nlRange = state.buffer.range(of: Data([0x0a])) {
@@ -283,6 +314,12 @@ final class CodexClient: @unchecked Sendable {
                        let threadID = json["thread_id"] as? String,
                        !threadID.isEmpty {
                         self.setSessionID(threadID, for: conversationID)
+                    } else if type == "turn.completed",
+                              let usage = json["usage"] as? [String: Any] {
+                        // 真实输入上下文 token（input_tokens 已是完整 prompt，cached 是其子集，不另加）
+                        if let input = usage["input_tokens"] as? Int, input > 0 {
+                            onUsage?(input)
+                        }
                     } else if type == "item.completed",
                        let item = json["item"] as? [String: Any],
                        let itemType = item["type"] as? String,
@@ -370,18 +407,19 @@ final class CodexClient: @unchecked Sendable {
                     self.imagesLock.unlock()
                 }
 
+                // ⚠️ watchdog 可能已先收尾；finishStream 内部 claimFinish 幂等，重复调用是安全 no-op。
                 if proc.terminationStatus != 0 {
                     var err = stderrBuffer.data
                     err.append(errPipe.fileHandleForReading.readDataToEndOfFile())
                     let errStr = String(data: err, encoding: .utf8)?
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         ?? "Codex 进程异常退出"
-                    continuation.finish(throwing: APIError.httpError(
+                    finishStream(APIError.httpError(
                         statusCode: 0,
                         body: "Codex: \(errStr)"
                     ))
                 } else {
-                    continuation.finish()
+                    finishStream(nil)
                 }
             }
 
@@ -389,10 +427,32 @@ final class CodexClient: @unchecked Sendable {
                 try process.run()
                 SubprocessRegistry.shared.register(process)
             } catch {
-                continuation.finish(throwing: error)
+                finishStream(error)
+                return   // run 失败：进程没起，无需 watchdog / onTermination
             }
 
-            continuation.onTermination = { _ in
+            // Watchdog：codex 连续 streamIdleTimeoutSeconds 秒没有任何 stdout/stderr 输出
+            // → 判定「装死」（跑了永不返回的命令 / 卡住），杀进程 + 报错收尾，避免聊天框永久转圈。
+            // 阈值跟 Claude Code 一致 300s —— Codex 跑命令/build 正常也会静默几分钟。
+            let watchdog = Task { @Sendable in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    if state.isFinished { return }
+                    if state.idleSeconds() > Self.streamIdleTimeoutSeconds {
+                        if process.isRunning { process.terminate() }
+                        let mins = Int(Self.streamIdleTimeoutSeconds / 60)
+                        finishStream(APIError.httpError(
+                            statusCode: 0,
+                            body: "Codex 约 \(mins) 分钟没有任何响应，已自动断开。可能是某个命令卡住了，请重试或把操作拆小一点。"
+                        ))
+                        return
+                    }
+                }
+            }
+
+            // 取消请求 / 流结束时：停掉 watchdog + 杀子进程
+            continuation.onTermination = { @Sendable _ in
+                watchdog.cancel()
                 if process.isRunning {
                     process.terminate()
                 }
@@ -470,6 +530,32 @@ private final class StreamState: @unchecked Sendable {
     var startedToolIds: Set<String> = []
     /// 已发出 HermesPetToolEnded 通知的 tool id 集合
     var endedToolIds: Set<String> = []
+
+    // 以下要被 watchdog / terminationHandler 跨队列访问，单独用锁保护
+    private let lock = NSLock()
+    private var _finished = false
+    private var _lastActivityAt = Date()
+
+    /// 抢占式收尾：返回 true 表示「本次调用」抢到收尾权（去 finish continuation）。
+    /// terminationHandler / watchdog / run 失败三方抢占，保证一条流的 continuation 只 finish 一次。
+    func claimFinish() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if _finished { return false }
+        _finished = true
+        return true
+    }
+    var isFinished: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _finished
+    }
+    /// 收到任何 stdout / stderr 字节就 touch —— watchdog 靠它判断 codex 是否「装死」
+    func touch() {
+        lock.lock(); _lastActivityAt = Date(); lock.unlock()
+    }
+    func idleSeconds() -> TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        return Date().timeIntervalSince(_lastActivityAt)
+    }
 }
 
 private final class CodexLockedData: @unchecked Sendable {

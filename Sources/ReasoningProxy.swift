@@ -25,17 +25,29 @@ final class ReasoningProxy: @unchecked Sendable {
     private var listener: NWListener?
     private var _port: Int = 0
 
-    /// 各 provider 真实 baseURL（含 v1/v4 路径前缀）。
-    /// 客户端来路：`/<providerID>/chat/completions` → 转发到 `<upstreamBase>/chat/completions`
-    static let upstreamBaseURLs: [String: String] = [
-        "deepseek": "https://api.deepseek.com/v1",
-        "zhipu":    "https://open.bigmodel.cn/api/paas/v4",
-        "moonshot": "https://api.moonshot.cn/v1",
-        "minimax":  "https://api.minimaxi.com/v1",
-        "openai":   "https://api.openai.com/v1"
-    ]
+    /// 各 provider 真实 baseURL（含 v1/v4 路径前缀）的**运行时注册表**。
+    /// 客户端来路：`/<providerID>/chat/completions` → 转发到 `<upstreamBase>/chat/completions`。
+    /// ⭐ 以前是写死的 5 家静态表，加新厂商要改源码；现在改成运行时注册——
+    /// `ProviderPresetRegistry`（含远程清单）+ `OpenCodeConfigGenerator`（含用户自定义 provider）
+    /// 在生成 opencode 配置时把各自的真实 baseURL 注册进来，于是**任何厂商（含远程加的、用户自定义的）
+    /// 都能走 proxy → 推理过滤普适化、不再泄漏思考过程**。`_upstreams` 由 `lock` 保护。
+    /// 仍内置兜底种子（下方 `seedDefaults`），保证常见 5 家即便注册时序异常也能路由。
+    private var _upstreams: [String: String] = ProviderPreset.seedUpstreams
 
     private init() {}
+
+    /// 注册/更新某 provider 的真实 upstream baseURL。线程安全，幂等。
+    func registerUpstream(id: String, baseURL: String) {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespaces)
+        guard !id.isEmpty, !trimmed.isEmpty else { return }
+        lock.lock(); _upstreams[id] = trimmed; lock.unlock()
+    }
+
+    /// 查某 provider 的真实 upstream baseURL（路由转发 + 配置生成判断"是否走 proxy"都用它）。
+    func upstream(for id: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return _upstreams[id]
+    }
 
     // MARK: - Public state
 
@@ -53,6 +65,19 @@ final class ReasoningProxy: @unchecked Sendable {
     }
 
     var isReady: Bool { port > 0 }
+
+    /// 等 proxy 监听就绪（拿到端口）。⭐ 给 `OpenCodeServerManager` 在生成 opencode.json 前调用——
+    /// NWListener 的 READY 是异步的，启动时若配置抢在端口就绪前生成，`OpenCodeConfigGenerator.buildConfig`
+    /// 会 fallback 成**直连 provider**（绕过 reasoning 过滤）→ 推理泄漏成正文（智谱/DeepSeek 等推理模型「有时输出不好」的真凶）。
+    /// 已就绪立即返回；否则轮询到超时（默认 3s）。超时**不抛错**，由调用方决定降级（届时 buildConfig 仍会直连，但至少日志能看出 proxy 没起来）。
+    func waitUntilReady(timeoutMs: Int = 3000) async {
+        if isReady { return }
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 30_000_000)   // 30ms 轮询
+            if isReady { return }
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -199,7 +224,7 @@ final class ReasoningProxy: @unchecked Sendable {
         let pathTrim = path.hasPrefix("/") ? String(path.dropFirst()) : path
         let pathParts = pathTrim.split(separator: "/", maxSplits: 1).map(String.init)
         guard pathParts.count == 2,
-              let upstreamBase = Self.upstreamBaseURLs[pathParts[0]],
+              let upstreamBase = upstream(for: pathParts[0]),
               let upstreamURL = URL(string: "\(upstreamBase)/\(pathParts[1])") else {
             Self.fileLog("request 404: bad path \(path)")
             sendError(conn, status: 404, message: "Unknown provider or path: \(path)")
@@ -387,7 +412,8 @@ final class ReasoningProxy: @unchecked Sendable {
         }
 
         let contentStr = delta["content"] as? String     // "" 也算有 content；null 则为 nil
-        let reasoningStr = delta["reasoning_content"] as? String
+        // 兼容两种字段名：reasoning_content（DeepSeek/智谱/Moonshot）/ reasoning（部分新厂商）
+        let reasoningStr = (delta["reasoning_content"] as? String) ?? (delta["reasoning"] as? String)
 
         // 纯 reasoning chunk（无 content 或 content 是 null + 有 reasoning_content）→ 丢弃
         let hasContent = (contentStr != nil)
@@ -400,8 +426,9 @@ final class ReasoningProxy: @unchecked Sendable {
             return nil
         }
 
-        // 剥离 reasoning_content 字段（opencode 看不到推理过程），重新序列化
+        // 剥离推理字段（opencode 看不到推理过程），两种字段名都去掉，重新序列化
         delta.removeValue(forKey: "reasoning_content")
+        delta.removeValue(forKey: "reasoning")
         firstChoice["delta"] = delta
         choices[0] = firstChoice
         var newObj = obj

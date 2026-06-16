@@ -12,7 +12,7 @@ final class ChoiceMenuOverlayController {
     static let shared = ChoiceMenuOverlayController()
 
     private var window: NSWindow?
-    private var hostingView: NSHostingView<ChoiceMenuView>?
+    private var hostingView: NSHostingController<ChoiceMenuView>?
     private let viewState = ChoiceMenuState()
     private var autoHideTask: Task<Void, Never>?
 
@@ -98,15 +98,18 @@ final class ChoiceMenuOverlayController {
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         w.isReleasedWhenClosed = false
 
-        let host = NSHostingView(rootView: ChoiceMenuView(
+        // 决策 #1/#6 升级：裸 NSHostingView 即便 sizingOptions=[] 在 macOS 26 仍会经
+        // updateAnimatedWindowSize 反推 setFrame（2026-06-11 00:09 崩溃实锤）；只有
+        // NSHostingController + sizingOptions=[] 真正禁掉反推（照语音陪聊/迷你岛范本）
+        let host = NSHostingController(rootView: ChoiceMenuView(
             state: viewState,
             onSelect: { [weak self] text in self?.selectAndDismiss(text) },
             onDismiss: { [weak self] in self?.hide() }
         ))
-        host.frame = NSRect(x: 0, y: 0, width: 320, height: 200)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }
+        w.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // 防御：铺满全窗（autoresizingMask 收口）
+        w.setContentSize(NSSize(width: 320, height: 200))
 
         self.window = w
         self.hostingView = host

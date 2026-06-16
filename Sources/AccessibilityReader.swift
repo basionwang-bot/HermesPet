@@ -25,17 +25,21 @@ enum AccessibilityReader {
     /// 读取当前选中文本 —— 双路径回退。
     /// 先试 AX 直读（原生 app 走这条，0 延迟），失败回退到模拟 ⌘C 读剪贴板（Electron/Java 走这条，约 150ms 延迟）。
     /// 都失败返回 nil。**调用方需在 NSApp.activate 切焦点之前调，否则读到的是桌宠自己**
+    ///
+    /// ⚠️ QuickAskWindow 现在不直接用这个组合方法，而是分别调 `readSelectedTextViaAX()`（同步快路径）
+    /// 和 `readSelectedTextViaClipboardAsync()`（慢路径），以便"先弹窗再异步回填"。这里保留组合版给其他场景。
     @MainActor
     static func readSelectedTextAsync() async -> String? {
-        if let viaAX = readViaAX() {
+        if let viaAX = readSelectedTextViaAX() {
             return viaAX
         }
         // AX 拿不到 → 试剪贴板模拟（覆盖 Electron / Java / WebView 等"AX 残废"的 app）
-        return await readViaPasteboardSimulation()
+        return await readSelectedTextViaClipboardAsync()
     }
 
-    /// 路径 A：AXUIElement 直读 focused element 的 kAXSelectedTextAttribute
-    private static func readViaAX() -> String? {
+    /// 路径 A（同步，0 延迟）：AXUIElement 直读 focused element 的 kAXSelectedTextAttribute。
+    /// 原生 app 走这条。**调用方需在 NSApp.activate 之前调**，否则读到的是桌宠自己。
+    static func readSelectedTextViaAX() -> String? {
         guard isTrusted else { return nil }
 
         let systemWide = AXUIElementCreateSystemWide()
@@ -65,10 +69,17 @@ enum AccessibilityReader {
         return trimmed.isEmpty ? nil : text
     }
 
-    /// 路径 B：模拟 ⌘C → 等剪贴板写入 → 读 → 异步恢复原剪贴板。
-    /// 几乎任何能响应 ⌘C 的 app 都能拿到（覆盖 Electron / Java / 网页等 AX 不行的场景）
+    /// 路径 B（异步，~轮询 ≤350ms）：模拟 ⌘C → 轮询等剪贴板写入 → 读 → 异步恢复原剪贴板。
+    /// 几乎任何能响应 ⌘C 的 app 都能拿到（覆盖 Electron / Java / 网页等 AX 不行的场景）。
+    ///
+    /// **可靠性改造**：旧版固定等 150ms 且要求 `newText != backup`，慢 app 来不及写、或选区内容
+    /// 刚好跟剪贴板已有内容相同 → 漏读。现在改成**轮询**：每 30ms 查一次 `changeCount`，最多 ~350ms，
+    /// 一旦 changeCount 增长就立刻读（changeCount 是主信号，不再强制内容必须跟旧剪贴板不同），
+    /// 慢 app 不必傻等满 350ms、快 app 80ms 就返回。
+    ///
+    /// **调用方需在 NSApp.activate 之前调**：⌘C 会发给当前前台 app，桌宠抢了焦点就复制到自己了。
     @MainActor
-    private static func readViaPasteboardSimulation() async -> String? {
+    static func readSelectedTextViaClipboardAsync() async -> String? {
         guard isTrusted else { return nil }   // 模拟键盘也需要 Accessibility 权限
 
         let pb = NSPasteboard.general
@@ -77,17 +88,18 @@ enum AccessibilityReader {
 
         simulateCmdC()
 
-        // 等待 macOS 把选中内容写入剪贴板 —— 150ms 在主流 app 上够了
-        try? await Task.sleep(nanoseconds: 150_000_000)
-
+        // 轮询：每 30ms 查一次，最多 12 次（~360ms）。changeCount 一变就读，不傻等。
         var captured: String? = nil
-        if pb.changeCount > oldChangeCount,
-           let newText = pb.string(forType: .string),
-           !newText.isEmpty,
-           newText != backup {
-            let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                captured = newText
+        for _ in 0..<12 {
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            if pb.changeCount > oldChangeCount {
+                if let newText = pb.string(forType: .string) {
+                    let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        captured = newText
+                    }
+                }
+                break   // changeCount 已增长，无论拿没拿到文本都不再等
             }
         }
 
@@ -138,6 +150,30 @@ enum AccessibilityReader {
               let title = titleValue as? String,
               !title.isEmpty else { return nil }
         return title
+    }
+
+    /// 前台窗口当前打开的文档真实文件路径（仅文档类 app 暴露 kAXDocumentAttribute）。
+    /// 返回本地路径（如 /Users/x/report.docx）；网页 / Electron / 非文档 app 拿不到 → nil。
+    /// 用于"昨日回顾"甩出可 ⌘+点击直接打开的文档链接（v1.3 跨天续接）。
+    static func frontDocumentPath() -> String? {
+        guard isTrusted, let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        var focusedWindow: AnyObject?
+        guard AXUIElementCopyAttributeValue(axApp,
+                                            kAXFocusedWindowAttribute as CFString,
+                                            &focusedWindow) == .success,
+              let window = focusedWindow else { return nil }
+        var docValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(window as! AXUIElement,
+                                            kAXDocumentAttribute as CFString,
+                                            &docValue) == .success,
+              let docStr = docValue as? String,
+              !docStr.isEmpty else { return nil }
+        // kAXDocumentAttribute 通常是 file:// URL 字符串，转成本地路径；已经是普通路径就直接用
+        if let url = URL(string: docStr), url.isFileURL {
+            return url.path
+        }
+        return docStr.hasPrefix("/") ? docStr : nil
     }
 }
 

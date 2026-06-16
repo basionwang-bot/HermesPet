@@ -23,7 +23,7 @@ final class IntentSuggestionWindowController {
     static weak var shared: IntentSuggestionWindowController?
 
     private let window: NSWindow
-    private let hosting: NSHostingView<IntentSuggestionRoot>
+    private let hosting: NSHostingController<IntentSuggestionRoot>
     private let viewState = IntentSuggestionViewState()
     private var autoDismissTask: Task<Void, Never>?
 
@@ -56,13 +56,14 @@ final class IntentSuggestionWindowController {
         win.alphaValue = 0
         self.window = win
 
-        let host = NSHostingView(rootView: IntentSuggestionRoot(state: viewState))
-        host.frame = NSRect(x: 0, y: 0, width: initialWidth, height: cardHeight)
-        host.autoresizingMask = [.width, .height]
-        if #available(macOS 13.0, *) {
-            host.sizingOptions = []   // 阻止 SwiftUI 反向请求 setFrame（决策 #6）
-        }
-        win.contentView = host
+        // 决策 #1/#6 升级：裸 NSHostingView 即便 sizingOptions=[] 在 macOS 26 仍会经
+        // updateAnimatedWindowSize 反推 setFrame（2026-06-11 00:09 崩溃实锤）；只有
+        // NSHostingController + sizingOptions=[] 真正禁掉反推（照语音陪聊/迷你岛范本）
+        let host = NSHostingController(rootView: IntentSuggestionRoot(state: viewState))
+        if #available(macOS 13.0, *) { host.sizingOptions = [] }
+        win.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // 防御：铺满全窗，动态 setFrame 后内容跟随（autoresizingMask 收口）
+        win.setContentSize(NSSize(width: initialWidth, height: cardHeight))
         self.hosting = host
         Self.shared = self
 
@@ -303,7 +304,7 @@ private struct IntentSuggestionCardView: View {
             Button {
                 state.onDismiss()
             } label: {
-                Text("知道了")
+                Text(L("pet.suggest.dismiss"))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
@@ -322,7 +323,7 @@ private struct IntentSuggestionCardView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.right.circle.fill")
                         .font(.system(size: 11))
-                    Text("看看吧")
+                    Text(L("pet.suggest.accept"))
                 }
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white)
@@ -346,7 +347,7 @@ private struct IntentSuggestionCardView: View {
             case .claudeCode:
                 ClawdView(pose: .rest, height: height, isWalking: false,
                           palette: palette, animated: anim)
-            case .directAPI:
+            case .directAPI, .qwenCode:
                 CloudPetView(pose: .rest, height: height, isWalking: false,
                              glassesProgress: 0, palette: palette, animated: anim)
             case .openclaw:

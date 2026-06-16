@@ -9,11 +9,12 @@ final class IntelligenceOverlayController {
     static let shared = IntelligenceOverlayController()
 
     private var window: NSWindow?
-    private var hostingView: NSHostingView<IntelligenceGlowView>?
+    private var hostingView: NSHostingController<IntelligenceGlowView>?
 
     private init() {}
 
-    func show() {
+    /// - playSound: 是否播召唤音效。语音输入走 true（默认）；新用户引导入场当装饰光效走 false。
+    func show(playSound: Bool = true) {
         if window == nil { createWindow() }
         // 同步把 window 移到当前主屏的 frame，多屏场景也对得上
         if let screen = NSScreen.main {
@@ -24,7 +25,7 @@ final class IntelligenceOverlayController {
         window?.orderFront(nil)
 
         // 召唤音效 —— 由 SoundManager 统一管理（用户可在设置选 / 关 / 换自定义音频文件）
-        SoundManager.play(.voiceStart)
+        if playSound { SoundManager.play(.voiceStart) }
     }
 
     func hide() {
@@ -56,11 +57,13 @@ final class IntelligenceOverlayController {
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         w.isReleasedWhenClosed = false
 
-        let host = NSHostingView(rootView: IntelligenceGlowView(isActive: false))
-        host.frame = w.contentLayoutRect
-        host.autoresizingMask = [.width, .height]
+        // 决策 #6：裸 NSHostingView 当 contentView 在 macOS 26.5+ 反推约束崩；且 show() 每次还
+        // setFrame(screen.frame)（多屏切换），正是反推高发点 → 转 NSHostingController（rootView 仍可改，更新光环态）。
+        let host = NSHostingController(rootView: IntelligenceGlowView(isActive: false))
         if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        w.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]
+        w.setContentSize(screen.frame.size)
 
         self.window = w
         self.hostingView = host

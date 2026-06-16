@@ -13,12 +13,13 @@ enum IntentChannelPreference: String, CaseIterable {
         return IntentChannelPreference(rawValue: raw) ?? .auto
     }
 
-    /// 设置面板展示用
+    /// 设置面板展示用（双语；当前 Settings 用自己的 key，此处保留作公开 API）
+    @MainActor
     var displayName: String {
         switch self {
-        case .auto:   return "自动"
-        case .pet:    return "桌宠优先"
-        case .island: return "灵动岛优先"
+        case .auto:   return L("pet.channel.auto")
+        case .pet:    return L("pet.channel.pet")
+        case .island: return L("pet.channel.island")
         }
     }
 }

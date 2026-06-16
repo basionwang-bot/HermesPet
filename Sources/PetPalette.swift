@@ -61,8 +61,12 @@ struct PetPalette: Codable, Equatable {
 
     /// Claude Code · Clawd 螃蟹默认 Anthropic 橙 #DE886D
     static let clawdDefault    = PetPalette(primaryHex: "DE886D")
-    /// 在线 AI · 云朵默认 indigo #7367D9
+    /// 在线 AI · 云朵默认 indigo #7367D9（已弃用为 directAPI 默认；桌面漫步 .cloud 仍可能引用）
     static let cloudDefault    = PetPalette(primaryHex: "7367D9")
+    /// 在线 AI · 红色小怪兽（移植 Win 版 HermesPet Core 吉祥物）默认官方红 #FF4A1A
+    static let monsterDefault  = PetPalette(primaryHex: "FF4A1A")
+    /// QwenCode · 戴眼镜小怪兽默认青绿 #21B6A8（跟在线 AI 红怪兽区别）
+    static let qwenDefault     = PetPalette(primaryHex: "21B6A8")
     /// OpenClaw · fomo 九尾狐默认月光银白 #B4C5E8（参考图主体色调）
     static let fomoDefault     = PetPalette(primaryHex: "B4C5E8")
     /// Hermes · 金黄小马默认 #E8C97A
@@ -86,6 +90,7 @@ final class PetPaletteStore {
 
     var claudePalette: PetPalette
     var directAPIPalette: PetPalette
+    var qwenPalette: PetPalette
     var fomoPalette: PetPalette
     var hermesPalette: PetPalette
     var codexPalette: PetPalette
@@ -97,10 +102,17 @@ final class PetPaletteStore {
             return try? JSONDecoder().decode(Stored.self, from: data)
         }()
         self.claudePalette    = stored?.claude    ?? .clawdDefault
-        self.directAPIPalette = stored?.directAPI ?? .cloudDefault
+        self.directAPIPalette = stored?.directAPI ?? .monsterDefault
+        self.qwenPalette      = stored?.qwen      ?? .qwenDefault
         self.fomoPalette      = stored?.fomo      ?? .fomoDefault
         self.hermesPalette    = stored?.hermes    ?? .horseDefault
         self.codexPalette     = stored?.codex     ?? .terminalDefault
+
+        // 在线 AI 宠物从云朵换成红色小怪兽（移植 Win 版）：把还停在旧云朵 indigo 默认的用户迁到怪兽红。
+        // 用户若自定义过别的色（≠ 旧默认）则尊重保留。
+        if self.directAPIPalette == .cloudDefault {
+            self.directAPIPalette = .monsterDefault
+        }
     }
 
     /// 取某个 mode 对应的调色板
@@ -108,6 +120,7 @@ final class PetPaletteStore {
         switch mode {
         case .claudeCode: return claudePalette
         case .directAPI:  return directAPIPalette
+        case .qwenCode:   return qwenPalette
         case .openclaw:   return fomoPalette
         case .hermes:     return hermesPalette
         case .codex:      return codexPalette
@@ -119,6 +132,7 @@ final class PetPaletteStore {
         switch mode {
         case .claudeCode: claudePalette    = palette
         case .directAPI:  directAPIPalette = palette
+        case .qwenCode:   qwenPalette = palette
         case .openclaw:   fomoPalette      = palette
         case .hermes:     hermesPalette    = palette
         case .codex:      codexPalette     = palette
@@ -136,7 +150,8 @@ final class PetPaletteStore {
     func resetToDefault(for mode: AgentMode) {
         switch mode {
         case .claudeCode: claudePalette    = .clawdDefault
-        case .directAPI:  directAPIPalette = .cloudDefault
+        case .directAPI:  directAPIPalette = .monsterDefault
+        case .qwenCode:   qwenPalette = .qwenDefault
         case .openclaw:   fomoPalette      = .fomoDefault
         case .hermes:     hermesPalette    = .horseDefault
         case .codex:      codexPalette     = .terminalDefault
@@ -153,6 +168,8 @@ final class PetPaletteStore {
         var fomo: PetPalette?
         var hermes: PetPalette
         var codex: PetPalette
+        /// qwen palette —— 老版本 JSON 缺这个字段时 fallback 到 .qwenDefault
+        var qwen: PetPalette?
     }
 
     private static let storageKey = "petPalettes.v1"
@@ -163,7 +180,8 @@ final class PetPaletteStore {
             directAPI: directAPIPalette,
             fomo: fomoPalette,
             hermes: hermesPalette,
-            codex: codexPalette
+            codex: codexPalette,
+            qwen: qwenPalette
         )
         if let data = try? JSONEncoder().encode(s) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)
@@ -208,6 +226,19 @@ extension Color {
     /// 调暗
     func darkened(by amount: Double) -> Color {
         adjustBrightness(by: -amount)
+    }
+
+    /// 朝另一种颜色按比例混合（RGB 线性插值，amount=0 返回自身、=1 返回 other）。
+    /// 用于高光派生：对亮度已满的主色（如官方红 #FF4A1A）「混白」才提得亮，单纯加亮度无效。
+    func mixed(with other: Color, by amount: Double) -> Color {
+        guard let a = NSColor(self).usingColorSpace(.sRGB),
+              let b = NSColor(other).usingColorSpace(.sRGB) else { return self }
+        let t = CGFloat(max(0, min(1, amount)))
+        return Color(
+            red:   Double(a.redComponent   + (b.redComponent   - a.redComponent)   * t),
+            green: Double(a.greenComponent + (b.greenComponent - a.greenComponent) * t),
+            blue:  Double(a.blueComponent  + (b.blueComponent  - a.blueComponent)  * t)
+        )
     }
 
     private func adjustBrightness(by delta: Double) -> Color {

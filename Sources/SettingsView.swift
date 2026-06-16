@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import Carbon
 import UniformTypeIdentifiers
 
@@ -9,7 +10,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @Bindable var viewModel: ChatViewModel
 
-    @State private var selectedCategory: Category = .backend
+    @State private var selectedCategory: Category = .account
     @State private var showKey = false
     @State private var testing = false
     @State private var testResult: (success: Bool, message: String)?
@@ -19,37 +20,58 @@ struct SettingsView: View {
     @AppStorage(ChatFontScale.storageKey) private var chatFontScale: Double = ChatFontScale.default
     @AppStorage(DisplayMode.storageKey) private var displayModeRaw: String = DisplayMode.auto.rawValue
     @State private var pendingRestartFromDisplayMode = false
+    /// 灵动岛显示在哪块屏（多显示器）—— "follow" 跟随鼠标 / displayID 字符串固定到某块屏；默认 follow，即时生效不用重启
+    @AppStorage(IslandScreenChoice.storageKey) private var islandScreenChoiceRaw: String = IslandScreenChoice.followRaw
+    /// 插拔屏时强制刷新设置里的屏幕下拉列表（NSScreen.screens 变化不会自动触发 SwiftUI 重渲）
+    @State private var islandScreenListVersion = 0
     /// 桌宠桌面漫步大小档位（5 档：迷你 / 小 / 默认 / 大 / 特大）
     @AppStorage(PetWalkSizeScale.storageKey) private var petWalkSizeScale: Double = PetWalkSizeScale.default
+    @AppStorage("systemStatsEnabled") private var systemStatsEnabled: Bool = true
+    @AppStorage("islandHubApps") private var islandHubApps: Bool = true
+    @AppStorage("islandHubTokens") private var islandHubTokens: Bool = false   // 消耗面板发版前默认隐藏(token 估算先不暴露给终端用户)
+    @AppStorage("islandHubPets") private var islandHubPets: Bool = true
     /// 当前正在"查看 / 编辑配置"的 mode。
     /// **不绑定 viewModel.agentMode** —— 设置里调这个 Picker 不会切换正在进行的对话的 mode，
     /// 仅决定下面 hermesConfig / claudeCard / codexCard 显示哪一个。
     /// 之前直接 bind viewModel.agentMode 会破坏"对话 mode 锁死"的语义（已发消息的对话被设置面板改了 mode）
     @State private var configViewingMode: AgentMode = .hermes
+    /// 手风琴列表：当前展开（就地显示配置卡）的后端；nil = 全收起
+    @State private var expandedMode: AgentMode? = nil
     /// 全局调色板存储 —— ColorPicker 改色后通过它更新 + 持久化
     @State private var paletteStore = PetPaletteStore.shared
 
     enum Category: String, CaseIterable, Identifiable {
-        case backend, pet, sound, privacy, system, about
+        case account, backend, pet, island, sound, hotkeys, privacy, system, experimental, arena, about
         var id: String { rawValue }
 
+        @MainActor
         var label: String {
             switch self {
-            case .backend: return "AI 后端"
-            case .pet:     return "桌宠"
-            case .sound:   return "音效"
-            case .privacy: return "隐私"
-            case .system:  return "系统"
-            case .about:   return "关于"
+            case .backend: return L("settings.category.backend")
+            case .pet:     return L("settings.category.pet")
+            case .island:  return L("settings.category.island")
+            case .sound:   return L("settings.category.sound")
+            case .hotkeys: return L("settings.category.hotkeys")
+            case .privacy: return L("settings.category.privacy")
+            case .system:  return L("settings.category.system")
+            case .account: return L("settings.category.account")
+            case .experimental: return L("settings.category.experimental")
+            case .arena:   return L("settings.category.arena")
+            case .about:   return L("settings.category.about")
             }
         }
         var icon: String {
             switch self {
             case .backend: return "cpu"
             case .pet:     return "pawprint.fill"
+            case .island:  return "macbook.gen2"
             case .sound:   return "speaker.wave.2.fill"
+            case .hotkeys: return "keyboard.fill"
             case .privacy: return "lock.shield.fill"
             case .system:  return "gearshape.fill"
+            case .account: return "person.crop.circle.fill"
+            case .experimental: return "flask.fill"
+            case .arena:   return "flag.checkered"
             case .about:   return "info.circle.fill"
             }
         }
@@ -57,9 +79,14 @@ struct SettingsView: View {
             switch self {
             case .backend: return .blue
             case .pet:     return .pink
+            case .island:  return .purple
             case .sound:   return .orange
+            case .hotkeys: return .teal
             case .privacy: return .indigo
             case .system:  return .gray
+            case .account: return .blue
+            case .experimental: return .pink
+            case .arena:   return .yellow
             case .about:   return Color(white: 0.55)
             }
         }
@@ -71,7 +98,7 @@ struct SettingsView: View {
             Divider()
             detail
         }
-        .frame(width: 620, height: 460)
+        .frame(width: 620, height: 470)
     }
 
     // MARK: - 侧栏
@@ -118,17 +145,25 @@ struct SettingsView: View {
     private var detail: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text(selectedCategory.label)
-                    .font(.system(size: 21, weight: .semibold))
-                    .padding(.top, 2)
+                HStack(spacing: 11) {
+                    SettingsIconTile(icon: selectedCategory.icon, color: selectedCategory.color, size: 30)
+                    Text(selectedCategory.label)
+                        .font(.system(size: 22, weight: .bold))
+                }
+                .padding(.top, 2)
 
                 Group {
                     switch selectedCategory {
                     case .backend: backendSection
                     case .pet:     petSection
+                    case .island:  islandSection
                     case .sound:   soundSection
+                    case .hotkeys: hotkeysSection
                     case .privacy: privacySection
                     case .system:  systemSection
+                    case .account: AccountSettingsView(viewModel: viewModel)
+                    case .experimental: experimentalSection
+                    case .arena:   arenaSection
                     case .about:   aboutSection
                     }
                 }
@@ -143,69 +178,44 @@ struct SettingsView: View {
 
     // MARK: - AI 后端
 
-    /// AI 模式总开关 + 检测状态卡片（U1+U2+U3）。
-    /// 5 行 toggle：在线 AI 永久 ON，其他 4 个用户按需开。打开时自动检测本机有没有装对应 CLI/daemon
-    private var aiModeToggles: some View {
+    private var backendSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("AI 模式")
+            Text(L("settings.backend.aiMode.title"))
                 .font(.system(size: 13, weight: .medium))
-            Text("默认只开「在线 AI」。装了其他 AI 后，在这里启用。")
+            Text(L("settings.backend.aiMode.caption"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            VStack(spacing: 8) {
-                // 显示顺序：在线 AI 永远第一（兜底），然后 OpenClaw / Hermes / Claude Code / Codex
-                ForEach([AgentMode.directAPI, .openclaw, .hermes, .claudeCode, .codex]) { mode in
-                    ModeEnableRow(mode: mode)
-                }
-            }
-        }
-    }
-
-    private var backendSection: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            // U1: AI 模式总开关 5 行 toggle（新加在最顶部）
-            aiModeToggles
-
-            Divider()
-
-            // 配置查看器：选哪个 mode 就显示哪个 mode 的配置项（不切换正在进行的对话）
-            VStack(alignment: .leading, spacing: 8) {
-                Text("查看配置")
-                    .font(.system(size: 13, weight: .medium))
-                Picker(selection: $configViewingMode) {
-                    ForEach(AgentMode.allCases) { mode in
-                        Label(mode.label, systemImage: mode.iconName).tag(mode)
+            // ⭐ 一体化「AI 配置中心」：每个后端一行（图标/状态/开关），点行就地展开它的配置卡。
+            // 取代旧的"开关列表 + segmented Picker + 底部配置卡"三段割裂（要点两次才看到配置）。
+            // 显示顺序：在线 AI 永远第一（兜底），然后 QwenCode / OpenClaw / Hermes / Claude Code / Codex
+            ForEach([AgentMode.directAPI, .qwenCode, .openclaw, .hermes, .claudeCode, .codex]) { mode in
+                VStack(alignment: .leading, spacing: 0) {
+                    ModeEnableRow(mode: mode, isExpanded: expandedMode == mode) {
+                        if expandedMode == mode {
+                            expandedMode = nil
+                        } else {
+                            expandedMode = mode
+                            configViewingMode = mode   // 供展开的配置卡内 testConnection / 预设反查用
+                        }
                     }
-                } label: { EmptyView() }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                Text(modeFooterText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                // 提示用户「这里不切换对话 mode」
-                Text("提示：每个对话独立绑定 mode，发出第一条消息后就锁定。如需用其他模型，按 ⌘N 新建对话。")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 2)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
-            // 选中的 mode 的配置项
-            switch configViewingMode {
-            case .hermes:     hermesConfig
-            case .directAPI:  directAPIConfig
-            case .openclaw:   openclawConfig    // U4: Hermes 同款 Gateway 状态卡片 + 高级折叠区
-            case .claudeCode: claudeCard
-            case .codex:      codexCard
+                    if expandedMode == mode {
+                        VStack(alignment: .leading, spacing: 14) {
+                            configCard(for: mode)
+                            // 上下文窗口手动覆盖（自部署 / models.dev 没收录的模型用）
+                            ContextWindowOverrideField(mode: mode)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+                    }
+                }
             }
         }
         // 进入设置时把"查看配置"默认设到当前对话的 mode，方便用户直接编辑当前在用的那个
         .onAppear {
             configViewingMode = viewModel.agentMode
+            expandedMode = viewModel.agentMode   // 一体化列表：默认展开当前在用的后端
             // 反查"在线 AI"当前是哪个预设
             selectedProvider = ProviderPreset.detect(baseURL: viewModel.directAPIBaseURL)
             if selectedProvider.id != "custom" {
@@ -237,6 +247,19 @@ struct SettingsView: View {
     /// 当前选中的服务商预设（仅给「在线 AI」配置区用）。
     /// 初值在 .onAppear 里根据 viewModel.directAPIBaseURL 反查赋值
     @State private var selectedProvider: ProviderPreset = ProviderPreset.all[0]
+    /// QwenCode 傻瓜配置：服务商预设（选了自动填 base url + 默认模型，用户只填 Key）
+    @State private var qwenProviderName: String = "DeepSeek"
+    private var qwenProviders: [(name: String, url: String, model: String)] {
+        [("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
+         ("通义千问", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-plus"),
+         ("Kimi", "https://api.moonshot.cn/v1", "moonshot-v1-8k"),
+         ("智谱 GLM", "https://open.bigmodel.cn/api/paas/v4", "glm-4.5"),
+         (L("settings.backend.qwen.custom"), "", "")]
+    }
+    /// 在线 AI 自定义服务商：从 /v1/models 拉到的可用模型（一键填，不用用户记模型名）
+    @State private var directAvailableModels: [String] = []
+    @State private var directFetchingModels = false
+    @State private var directModelFetchError: String?
 
     // MARK: - Hermes 配置（本地 Gateway / 云端 / 自定义）
 
@@ -253,12 +276,20 @@ struct SettingsView: View {
     @AppStorage(HermesGatewayManager.autoStartKey) private var hermesAutoStart: Bool = true
     /// 1s 一次刷新 Gateway 状态卡片，让 spawn 进度可视
     @State private var gatewayStatusTick: Int = 0
+    /// 当前在跑的状态计时器 —— 持有引用才能 ① 防 onAppear 反复进入时叠加多个、② 卡片消失时停掉
+    /// （旧版只靠"切走预设自停"，用户停在本地档关掉设置窗后计时器会永远 1s 一跳）
+    @State private var gatewayStatusTimer: Timer? = nil
 
     // MARK: - OpenClaw 配置（U4：跟 Hermes 同款 Gateway 状态卡片 + 高级折叠区，不再沿用 directAPI 表单）
     @State private var openclawAvailableAgents: [String] = []
     @State private var openclawFetchingAgents = false
     @State private var openclawAgentFetchError: String?
     @State private var openclawAdvancedExpanded: Bool = false
+    // 一键安装并配置 OpenClaw（非交互 onboard）
+    @State private var openclawSetupAuth: String = ""
+    @State private var openclawSetupKey: String = ""
+    @State private var openclawInstalling: Bool = false
+    @State private var openclawSetupError: String? = nil
     @AppStorage(OpenClawGatewayManager.autoStartKey) private var openclawAutoStart: Bool = true
     @AppStorage("openclawAgentId") private var openclawAgentId: String = "openclaw"
     /// 用户手填的 token 覆盖（默认空 = 自动从 ~/.openclaw/openclaw.json 读）
@@ -268,13 +299,13 @@ struct SettingsView: View {
     private var hermesConfig: some View {
         VStack(alignment: .leading, spacing: 14) {
             // 预设 Picker：本地 / 云端 / 自定义，跟 directAPI 体验对齐
-            settingRow("部署方式") {
+            settingRow(L("settings.backend.hermes.deployMethod")) {
                 Picker(selection: $selectedHermesPreset) {
                     ForEach(ProviderPreset.hermesPresets) { preset in
-                        Text(preset.displayName).tag(preset)
+                        Text(preset.localizedDisplayName).tag(preset)
                     }
                     Divider()
-                    Text(ProviderPreset.custom.displayName).tag(ProviderPreset.custom)
+                    Text(ProviderPreset.custom.localizedDisplayName).tag(ProviderPreset.custom)
                 } label: { EmptyView() }
                     .labelsHidden()
                     .onChange(of: selectedHermesPreset) { _, newPreset in
@@ -288,8 +319,8 @@ struct SettingsView: View {
                 hermesGatewayStatusCard
                 hermesLocalAdvancedSection
             } else {
-                settingRow("API 地址") {
-                    TextField("https://your-gateway.example.com/v1", text: $viewModel.apiBaseURL)
+                settingRow(L("settings.backend.hermes.apiURL")) {
+                    TextField(L("settings.backend.hermes.urlPlaceholder"), text: $viewModel.apiBaseURL)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                         .onChange(of: viewModel.apiBaseURL) { _, _ in
@@ -321,15 +352,16 @@ struct SettingsView: View {
     /// 本地档：Gateway 运行状态卡片（H9 核心）
     /// 跟 directAPI 的 opencodeEngineCard 视觉对齐
     private var hermesGatewayStatusCard: some View {
+        let _ = gatewayStatusTick   // 建立 1s tick 依赖让 body 重渲重读 status（不改 identity，避免 .id 重建子树→onAppear 重启计时器自我繁殖）
         let status = HermesGatewayManager.shared.status
         let (dotColor, statusText, tone): (Color, String, Color) = {
             switch status {
-            case .starting:       return (.orange, "连接中…",       .secondary)
-            case .running:        return (.green,  "已连接",         .secondary)
-            case .external:       return (.green,  "已连接",         .secondary)
-            case .binaryMissing:  return (.gray,   "未安装",         .secondary)
-            case .failed:         return (.red,    "连接失败",       .red)
-            case .disabled:       return (.gray,   "已关闭自动连接",  .secondary)
+            case .starting:       return (.orange, L("settings.common.status.connecting"),    .secondary)
+            case .running:        return (.green,  L("settings.common.status.connected"),      .secondary)
+            case .external:       return (.green,  L("settings.common.status.connected"),      .secondary)
+            case .binaryMissing:  return (.gray,   L("settings.common.status.notInstalled"),   .secondary)
+            case .failed:         return (.red,    L("settings.common.status.connectFailed"),  .red)
+            case .disabled:       return (.gray,   L("settings.common.status.autoConnectOff"), .secondary)
             }
         }()
         return VStack(alignment: .leading, spacing: 8) {
@@ -337,7 +369,7 @@ struct SettingsView: View {
                 Image(systemName: "bolt.horizontal.circle.fill")
                     .font(.system(size: 13))
                     .foregroundStyle(.green)
-                Text("Hermes")
+                Text(L("settings.backend.hermes.statusName"))
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Circle()
@@ -358,7 +390,7 @@ struct SettingsView: View {
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderless)
-                .help("重新连接")
+                .help(L("settings.backend.reconnect"))
             }
 
             // 未安装时给安装入口
@@ -367,16 +399,16 @@ struct SettingsView: View {
                     Image(systemName: "info.circle.fill")
                         .font(.caption2)
                         .foregroundStyle(.orange)
-                    Text("电脑上还没安装 Hermes。")
+                    Text(L("settings.backend.hermes.notInstalledHint"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Link("查看安装方法 ›", destination: URL(string: "https://github.com/anomalyco/hermes-agent")!)
+                    Link(L("settings.backend.hermes.installGuide"), destination: URL(string: "https://github.com/anomalyco/hermes-agent")!)
                         .font(.caption2)
                 }
             }
 
             Toggle(isOn: $hermesAutoStart) {
-                Text("打开 HermesPet 时自动连接 Hermes")
+                Text(L("settings.backend.hermes.autoConnect"))
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
@@ -392,10 +424,12 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(.green.opacity(0.2), lineWidth: 0.5)
         )
-        // 1s tick 刷新 status（spawn 中的状态变化通过 @State 重新读 manager）
-        .id(gatewayStatusTick)
+        // 1s tick 刷新 status（spawn 中的状态变化通过 @State 重新读 manager；依赖建在 body 顶部，不再用 .id 重建子树）
         .onAppear {
             startGatewayStatusTimer()
+        }
+        .onDisappear {
+            stopGatewayStatusTimer()
         }
     }
 
@@ -411,7 +445,7 @@ struct SettingsView: View {
             }
             .padding(.top, 8)
         } label: {
-            Text("高级（API 密钥 / 模型名）")
+            Text(L("settings.backend.hermes.advancedLabel"))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -430,7 +464,7 @@ struct SettingsView: View {
             HStack(spacing: 6) {
                 Spacer().frame(width: 92)
                 Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(.tertiary)
-                Text("OpenClaw 是装在你电脑上的本地 AI，HermesPet 启动时会自动连接。免费、不联网、不需要密钥。")
+                Text(L("settings.backend.openclaw.hint"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -440,16 +474,17 @@ struct SettingsView: View {
 
     /// OpenClaw 连接状态卡片（小白文案：只显"已连接/连接中/未连接"，不显端口、不显技术词）
     private var openclawGatewayStatusCard: some View {
+        let _ = gatewayStatusTick   // 同 hermesGatewayStatusCard：建立 tick 依赖但不改 identity，避免计时器自我繁殖
         let status = OpenClawGatewayManager.shared.status
         let (dotColor, statusText, tone): (Color, String, Color) = {
             switch status {
-            case .starting:          return (.orange, "连接中…",        .secondary)
-            case .running:           return (.green,  "已连接",          .secondary)
-            case .binaryMissing:     return (.gray,   "未连接",          .secondary)
-            case .configMissing:     return (.orange, "需要完成初始化",   .orange)
-            case .endpointDisabled:  return (.orange, "正在自动配置…",    .orange)
-            case .failed:            return (.red,    "连接失败",        .red)
-            case .disabled:          return (.gray,   "已关闭自动连接",   .secondary)
+            case .starting:          return (.orange, L("settings.common.status.connecting"),        .secondary)
+            case .running:           return (.green,  L("settings.common.status.connected"),          .secondary)
+            case .binaryMissing:     return (.gray,   L("settings.backend.openclaw.status.notConnected"), .secondary)
+            case .configMissing:     return (.orange, L("settings.backend.openclaw.status.needInit"),  .orange)
+            case .endpointDisabled:  return (.orange, L("settings.backend.openclaw.status.autoConfiguring"), .orange)
+            case .failed:            return (.red,    L("settings.common.status.connectFailed"),       .red)
+            case .disabled:          return (.gray,   L("settings.common.status.autoConnectOff"),       .secondary)
             }
         }()
         let fomoTint = Color(red: 0.706, green: 0.773, blue: 0.910)
@@ -458,7 +493,7 @@ struct SettingsView: View {
                 Image(systemName: "bolt.circle.fill")
                     .font(.system(size: 13))
                     .foregroundStyle(fomoTint)
-                Text("OpenClaw")
+                Text(L("settings.backend.openclaw.statusName"))
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Circle()
@@ -479,51 +514,21 @@ struct SettingsView: View {
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderless)
-                .help("重新连接")
+                .help(L("settings.backend.reconnect"))
             }
 
             // 状态分支：给具体修复指引（小白能懂的语言）
             switch status {
             case .binaryMissing:
-                HStack(spacing: 4) {
-                    Image(systemName: "info.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Text("电脑上还没安装 OpenClaw。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString("npm install -g openclaw@latest && openclaw onboard --install-daemon", forType: .string)
-                    } label: {
-                        Text("复制安装命令")
-                            .font(.caption2)
-                    }
-                    .buttonStyle(.borderless)
-                }
+                openclawOneClickSetup(needsInstall: true)
             case .configMissing:
-                HStack(spacing: 4) {
-                    Image(systemName: "info.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Text("已安装，但还没完成初始化。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString("openclaw onboard --install-daemon", forType: .string)
-                    } label: {
-                        Text("复制初始化命令")
-                            .font(.caption2)
-                    }
-                    .buttonStyle(.borderless)
-                }
+                openclawOneClickSetup(needsInstall: false)
             case .endpointDisabled:
                 HStack(spacing: 4) {
                     Image(systemName: "info.circle.fill")
                         .font(.caption2)
                         .foregroundStyle(.orange)
-                    Text("正在自动配置，可点右上角刷新重试。")
+                    Text(L("settings.backend.openclaw.autoConfigRetry"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -532,7 +537,7 @@ struct SettingsView: View {
             }
 
             Toggle(isOn: $openclawAutoStart) {
-                Text("打开 HermesPet 时自动连接 OpenClaw")
+                Text(L("settings.backend.openclaw.autoConnect"))
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
@@ -548,23 +553,133 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 10)
                 .stroke(fomoTint.opacity(0.35), lineWidth: 0.5)
         )
-        .id(gatewayStatusTick)
         .onAppear {
             startGatewayStatusTimer()
+        }
+        .onDisappear {
+            stopGatewayStatusTimer()
         }
     }
 
     /// OpenClaw 高级设置（默认折叠 —— 一般用户不用打开）
+    /// 一键安装并配置 OpenClaw（非交互 onboard + 装 daemon），免去用户开终端走向导。
+    /// needsInstall=true 连 npm install 一起跑（没装）；false 只 onboard（装了没配）。
+    @ViewBuilder
+    private func openclawOneClickSetup(needsInstall: Bool) -> some View {
+        let opts = openclawAuthOptions()
+        let selected = opts.first(where: { $0.choice == openclawSetupAuth }) ?? opts.first
+        VStack(alignment: .leading, spacing: 8) {
+            Text(needsInstall ? L("settings.backend.openclaw.notInstalledHint")
+                              : L("settings.backend.openclaw.installedNotInit"))
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if openclawInstalling {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small).scaleEffect(0.7)
+                    Text(L("settings.backend.openclaw.setupRunning"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Text(L("settings.backend.openclaw.setupAuth")).font(.caption)
+                    Picker(selection: Binding(
+                        get: { openclawSetupAuth.isEmpty ? (opts.first?.choice ?? "") : openclawSetupAuth },
+                        set: { openclawSetupAuth = $0 }
+                    )) {
+                        ForEach(opts, id: \.choice) { opt in Text(opt.label).tag(opt.choice) }
+                    } label: { EmptyView() }
+                    .labelsHidden().fixedSize()
+                }
+                if let sel = selected, sel.needsKey {
+                    SecureField("API Key", text: $openclawSetupKey)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+                }
+                HStack(spacing: 8) {
+                    Button { runOpenclawSetup(needsInstall: needsInstall) } label: {
+                        Label(L("settings.backend.openclaw.oneClickSetup"), systemImage: "wand.and.stars")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(needsInstall
+                            ? "npm install -g openclaw@latest && openclaw onboard --install-daemon"
+                            : "openclaw onboard --install-daemon", forType: .string)
+                    } label: { Image(systemName: "doc.on.clipboard").font(.system(size: 11)) }
+                    .buttonStyle(.borderless)
+                    .help(L("settings.backend.openclaw.copyInstall"))
+                }
+                if let err = openclawSetupError {
+                    Text(err).font(.caption2).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// OpenClaw 一键配置的认证来源：优先复用已装的 Claude/Codex（零填 Key），否则选服务商填 Key。
+    private func openclawAuthOptions() -> [(label: String, choice: String, keyFlag: String?, needsKey: Bool)] {
+        var o: [(label: String, choice: String, keyFlag: String?, needsKey: Bool)] = []
+        if !(UserDefaults.standard.string(forKey: "claudeExecutablePath") ?? "").isEmpty {
+            o.append((label: L("settings.backend.openclaw.reuseClaude"), choice: "claude-cli", keyFlag: nil, needsKey: false))
+        }
+        if !(UserDefaults.standard.string(forKey: "codexExecutablePath") ?? "").isEmpty {
+            o.append((label: L("settings.backend.openclaw.reuseCodex"), choice: "codex-cli", keyFlag: nil, needsKey: false))
+        }
+        o.append((label: "DeepSeek",       choice: "deepseek-api-key", keyFlag: "--deepseek-api-key", needsKey: true))
+        o.append((label: "Kimi (Moonshot)", choice: "moonshot-api-key", keyFlag: "--moonshot-api-key", needsKey: true))
+        o.append((label: "小米 MiMo",       choice: "xiaomi-api-key",   keyFlag: "--xiaomi-api-key",   needsKey: true))
+        o.append((label: "OpenAI",         choice: "openai-api-key",   keyFlag: "--openai-api-key",   needsKey: true))
+        return o
+    }
+
+    /// 拼非交互 onboard 命令并在 App 内跑（spawn），跑完触发 Gateway 检测 → HermesPet 自动连上。
+    private func runOpenclawSetup(needsInstall: Bool) {
+        let opts = openclawAuthOptions()
+        let choice = openclawSetupAuth.isEmpty ? (opts.first?.choice ?? "") : openclawSetupAuth
+        guard let sel = opts.first(where: { $0.choice == choice }) else { return }
+        let key = openclawSetupKey.trimmingCharacters(in: .whitespaces)
+        if sel.needsKey && key.isEmpty {
+            openclawSetupError = L("settings.backend.openclaw.setupNeedKey")
+            return
+        }
+        // quickstart = 安全默认（loopback + 18789 + 自动 token，HermesPet 启动时自动读 token 连上）；
+        // skip-* 跳过频道/技能/搜索/钩子等非必要步骤，加速且少出错。
+        var cmd = needsInstall ? "npm install -g openclaw@latest && " : ""
+        cmd += "openclaw onboard --non-interactive --accept-risk --mode local --flow quickstart --auth-choice \(sel.choice)"
+        if let f = sel.keyFlag, !key.isEmpty { cmd += " \(f) \(key)" }
+        cmd += " --install-daemon --skip-channels --skip-skills --skip-search --skip-hooks --skip-ui --skip-bootstrap"
+        openclawSetupError = nil
+        openclawInstalling = true
+        Task {
+            let r = await CLIInstaller.run(command: cmd)
+            openclawInstalling = false
+            switch r {
+            case .success:
+                openclawSetupKey = ""
+                await OpenClawGatewayManager.shared.startIfAvailable()
+                viewModel.checkConnection()
+            case .missingNpm:
+                openclawSetupError = L("settings.backend.mode.installNeedNode")
+            case .failed:
+                openclawSetupError = L("settings.backend.openclaw.setupFailed")
+            }
+        }
+    }
+
     private var openclawAdvancedSection: some View {
         DisclosureGroup(isExpanded: $openclawAdvancedExpanded) {
             VStack(alignment: .leading, spacing: 14) {
-                settingRow("密钥（一般不用填）") {
+                settingRow(L("settings.backend.openclaw.tokenLabel")) {
                     HStack(spacing: 4) {
                         Group {
                             if showOpenclawToken {
-                                TextField("留空会自动读取", text: $openclawTokenOverride)
+                                TextField(L("settings.backend.openclaw.tokenPlaceholder"), text: $openclawTokenOverride)
                             } else {
-                                SecureField("留空会自动读取", text: $openclawTokenOverride)
+                                SecureField(L("settings.backend.openclaw.tokenPlaceholder"), text: $openclawTokenOverride)
                             }
                         }
                         .textFieldStyle(.roundedBorder)
@@ -580,7 +695,7 @@ struct SettingsView: View {
                     }
                 }
 
-                settingRow("AI 角色") {
+                settingRow(L("settings.backend.openclaw.agentLabel")) {
                     HStack(spacing: 6) {
                         TextField("openclaw", text: $openclawAgentId)
                             .textFieldStyle(.roundedBorder)
@@ -596,7 +711,7 @@ struct SettingsView: View {
                             }
                             .menuStyle(.borderlessButton)
                             .frame(width: 24)
-                            .help("从可用列表选")
+                            .help(L("settings.backend.openclaw.pickFromList"))
                         }
 
                         Button {
@@ -605,7 +720,7 @@ struct SettingsView: View {
                             if openclawFetchingAgents {
                                 ProgressView().controlSize(.small).scaleEffect(0.6)
                             } else {
-                                Text("刷新").font(.caption)
+                                Text(L("settings.common.refresh")).font(.caption)
                             }
                         }
                         .controlSize(.small)
@@ -624,7 +739,7 @@ struct SettingsView: View {
             }
             .padding(.top, 8)
         } label: {
-            Text("高级设置")
+            Text(L("settings.common.advanced"))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
         }
@@ -641,7 +756,7 @@ struct SettingsView: View {
                 openclawAvailableAgents = agents
                 openclawFetchingAgents = false
             } catch {
-                openclawAgentFetchError = "拉取失败：\(error.localizedDescription)"
+                openclawAgentFetchError = L("settings.backend.fetchFailed", error.localizedDescription)
                 openclawFetchingAgents = false
             }
         }
@@ -649,11 +764,11 @@ struct SettingsView: View {
 
     /// 拆出 Key 行 + 模型行 + 错误行作为独立组件，本地档高级区 + 云端档都共用
     private var hermesKeyRow: some View {
-        settingRow("API 密钥（选填）") {
+        settingRow(L("settings.backend.apiKey.optional")) {
             HStack(spacing: 4) {
                 Group {
-                    if showKey { TextField("未启用鉴权可留空", text: $viewModel.apiKey) }
-                    else { SecureField("未启用鉴权可留空", text: $viewModel.apiKey) }
+                    if showKey { TextField(L("settings.backend.apiKey.optionalPlaceholder"), text: $viewModel.apiKey) }
+                    else { SecureField(L("settings.backend.apiKey.optionalPlaceholder"), text: $viewModel.apiKey) }
                 }
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
@@ -665,15 +780,15 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help(showKey ? "隐藏密钥" : "显示密钥")
+                .help(showKey ? L("settings.backend.key.hide") : L("settings.backend.key.show"))
             }
         }
     }
 
     private var hermesModelRow: some View {
-        settingRow("模型") {
+        settingRow(L("settings.backend.model.title")) {
             HStack(spacing: 6) {
-                TextField("hermes-agent", text: $viewModel.modelName)
+                TextField(L("settings.backend.model.placeholder"), text: $viewModel.modelName)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
 
@@ -687,7 +802,7 @@ struct SettingsView: View {
                     }
                     .menuStyle(.borderlessButton)
                     .frame(width: 24)
-                    .help("从可用模型列表选")
+                    .help(L("settings.backend.model.pickFromList"))
                 }
 
                 Button {
@@ -701,7 +816,7 @@ struct SettingsView: View {
                 }
                 .controlSize(.small)
                 .disabled(hermesFetchingModels)
-                .help("从 /v1/models 拉取可用模型")
+                .help(L("settings.backend.model.fetchHelp"))
             }
         }
     }
@@ -722,25 +837,36 @@ struct SettingsView: View {
 
     /// 1s tick 重渲染 Gateway 状态卡片（spawn 进度可视化）
     private func startGatewayStatusTimer() {
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
-            // 离开当前 mode 就停（避免后台一直 tick）
-            if selectedHermesPreset.id != "hermes-local" {
-                timer.invalidate()
-                return
+        // 防叠加：两张卡片（Hermes 本地档 / OpenClaw）onAppear 都会进来，先停旧的再起新的
+        gatewayStatusTimer?.invalidate()
+        gatewayStatusTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            // Timer 闭包是 @Sendable，但在主 RunLoop 触发 → 显式 hop 回主 actor 再访问 @MainActor 状态（决策 #5）。
+            // 不把非 Sendable 的 timer 送进 assumeIsolated（会触发数据竞争告警），只回传是否该停，invalidate 留在外层
+            let shouldStop = MainActor.assumeIsolated { () -> Bool in
+                // 离开当前 mode 就停（避免后台一直 tick）
+                if selectedHermesPreset.id != "hermes-local" { return true }
+                gatewayStatusTick &+= 1
+                return false
             }
-            gatewayStatusTick &+= 1
+            if shouldStop { timer.invalidate() }
         }
+    }
+
+    /// 卡片消失（切标签页 / 关设置窗）就停 —— 否则用户停在本地档时计时器会在后台永远 1s 一跳
+    private func stopGatewayStatusTimer() {
+        gatewayStatusTimer?.invalidate()
+        gatewayStatusTimer = nil
     }
 
     /// Hermes 底部说明文字，按预设档位区分
     private var hermesHintText: String {
         switch selectedHermesPreset.id {
         case "hermes-local":
-            return "Hermes 是装在你电脑上的本地 AI，HermesPet 启动时会自动连接。免费、不联网、不需要密钥。"
+            return L("settings.backend.hermes.hint.local")
         case "hermes-cloud":
-            return "填上你服务器上 Hermes 的地址 + 模型名即可。鉴权方式按你部署时设的。"
+            return L("settings.backend.hermes.hint.cloud")
         default:
-            return "任意 OpenAI 兼容服务都能用 —— 自部署 vLLM / Ollama / LM Studio / 中转代理皆可。"
+            return L("settings.backend.hermes.hint.custom")
         }
     }
 
@@ -775,15 +901,134 @@ struct SettingsView: View {
                 let models = try await client.fetchModels()
                 hermesAvailableModels = models
                 if models.isEmpty {
-                    hermesModelFetchError = "服务端 /v1/models 返回空列表"
+                    hermesModelFetchError = L("settings.backend.hermes.modelFetchEmpty")
                 } else if viewModel.modelName.isEmpty || !models.contains(viewModel.modelName) {
                     // 当前 modelName 不在列表里 → 自动选第一个
                     viewModel.modelName = models[0]
                 }
             } catch {
-                hermesModelFetchError = "拉取失败：\(error.localizedDescription)"
+                hermesModelFetchError = L("settings.backend.fetchFailed", error.localizedDescription)
             }
             hermesFetchingModels = false
+        }
+    }
+
+    /// 从在线 AI 当前配置的 baseURL `/v1/models` 拉模型列表（让自定义服务商「省心」：一键填模型名，
+    /// 也让新模型自动出现、过时模型名自愈）。用户填好 baseURL+Key 后点刷新触发；空/失败有提示。
+    private func fetchDirectModels() {
+        directFetchingModels = true
+        directModelFetchError = nil
+        let client = APIClient(source: .direct)
+        Task {
+            do {
+                let models = try await client.fetchModels()
+                directAvailableModels = models
+                if models.isEmpty {
+                    directModelFetchError = L("settings.backend.hermes.modelFetchEmpty")
+                } else if viewModel.directAPIModel.isEmpty || !models.contains(viewModel.directAPIModel) {
+                    // 当前模型名为空 / 不在列表 → 自动填第一个（过时名自愈）
+                    viewModel.directAPIModel = models[0]
+                }
+            } catch {
+                directModelFetchError = L("settings.backend.fetchFailed", error.localizedDescription)
+            }
+            directFetchingModels = false
+        }
+    }
+
+    /// 按后端返回对应配置卡（一体化列表展开时就地显示）。
+    /// HTTP 类后端（directAPI/hermes/qwenCode）顶部加「配置档案」条 —— 多套配置一键切换。
+    @ViewBuilder
+    private func configCard(for mode: AgentMode) -> some View {
+        switch mode {
+        case .hermes:
+            VStack(alignment: .leading, spacing: 12) { aiProfileBar(for: .hermes); hermesConfig }
+        case .directAPI:
+            VStack(alignment: .leading, spacing: 12) { aiProfileBar(for: .directAPI); directAPIConfig }
+        case .qwenCode:
+            VStack(alignment: .leading, spacing: 12) { aiProfileBar(for: .qwenCode); qwenCodeConfig }
+        case .openclaw:   openclawConfig
+        case .claudeCode: claudeCard
+        case .codex:      codexCard
+        }
+    }
+
+    /// 「配置档案」条：某后端的多套命名配置，点击切换激活、＋新建（从预设/自定义）、删除。
+    /// 切换前先把当前档的表单改动同步回档（syncActiveFromFields），避免切走丢改动。
+    @ViewBuilder
+    private func aiProfileBar(for backend: AgentMode) -> some View {
+        let store = AIProfileStore.shared
+        let list = store.profiles(for: backend)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(L("settings.backend.profiles.title"))
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Menu {
+                    ForEach(ProviderPreset.all) { preset in
+                        Button(preset.localizedDisplayName) {
+                            let p = store.makeProfile(from: preset, backend: backend)
+                            store.add(p); store.activate(p, viewModel: viewModel)
+                            configViewingMode = backend
+                        }
+                    }
+                    Divider()
+                    Button(L("settings.backend.profiles.custom")) {
+                        let p = store.makeCustomProfile(backend: backend)
+                        store.add(p); store.activate(p, viewModel: viewModel)
+                        configViewingMode = backend
+                    }
+                } label: {
+                    Label(L("settings.backend.profiles.new"), systemImage: "plus.circle")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            ForEach(list) { p in
+                HStack(spacing: 8) {
+                    Image(systemName: store.isActive(p) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(store.isActive(p) ? backendTint(backend) : Color.secondary)
+                    Text(p.name).font(.system(size: 12)).lineLimit(1)
+                    Spacer()
+                    if !(backend == .directAPI && list.count <= 1) {
+                        Button {
+                            store.delete(p)
+                            if let a = store.activeProfile(for: backend) {
+                                store.activate(a, viewModel: viewModel)
+                            }
+                            configViewingMode = backend
+                        } label: {
+                            Image(systemName: "trash").font(.system(size: 10)).foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(L("common.delete"))
+                    }
+                }
+                .padding(.vertical, 5)
+                .padding(.horizontal, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(store.isActive(p) ? backendTint(backend).opacity(0.12) : Color.clear)
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.syncActiveFromFields(backend: backend, viewModel: viewModel)
+                    store.activate(p, viewModel: viewModel)
+                    configViewingMode = backend
+                }
+            }
+            Divider().padding(.top, 4)
+        }
+    }
+
+    private func backendTint(_ m: AgentMode) -> Color {
+        switch m {
+        case .hermes:    return .green
+        case .directAPI: return .indigo
+        case .qwenCode:  return .teal
+        default:         return .secondary
         }
     }
 
@@ -792,13 +1037,13 @@ struct SettingsView: View {
     private var directAPIConfig: some View {
         VStack(alignment: .leading, spacing: 14) {
             // 服务商预设 Picker（去掉了"opencode 引擎"诊断卡片和重复说明 —— 小白只需要填 Key 就能用）
-            settingRow("服务商") {
+            settingRow(L("settings.backend.direct.provider")) {
                 Picker(selection: $selectedProvider) {
                     ForEach(ProviderPreset.all) { preset in
-                        Text(preset.displayName).tag(preset)
+                        Text(preset.localizedDisplayName).tag(preset)
                     }
                     Divider()
-                    Text(ProviderPreset.custom.displayName).tag(ProviderPreset.custom)
+                    Text(ProviderPreset.custom.localizedDisplayName).tag(ProviderPreset.custom)
                 } label: { EmptyView() }
                     .labelsHidden()
                     .onChange(of: selectedProvider) { _, newPreset in
@@ -808,14 +1053,14 @@ struct SettingsView: View {
 
             // 自定义时才显示完整 URL 编辑框；预设隐藏避免误改
             if selectedProvider.id == "custom" {
-                settingRow("API 地址") {
-                    TextField("https://api.example.com/v1", text: $viewModel.directAPIBaseURL)
+                settingRow(L("settings.backend.direct.apiURL")) {
+                    TextField(L("settings.backend.direct.urlPlaceholder"), text: $viewModel.directAPIBaseURL)
                         .textFieldStyle(.roundedBorder)
                         .font(.system(size: 12, design: .monospaced))
                 }
             }
 
-            settingRow("API 密钥") {
+            settingRow(L("settings.backend.direct.apiKey")) {
                 HStack(spacing: 4) {
                     Group {
                         if showKey { TextField(keyPlaceholder, text: $viewModel.directAPIKey) }
@@ -831,21 +1076,54 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
-                    .help(showKey ? "隐藏密钥" : "显示密钥")
+                    .help(showKey ? L("settings.backend.key.hide") : L("settings.backend.key.show"))
                 }
             }
             if selectedProvider.id == "custom" {
-                settingRow("模型") {
-                    TextField("gpt-4o-mini", text: $viewModel.directAPIModel)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                settingRow(L("settings.backend.direct.model")) {
+                    HStack(spacing: 6) {
+                        TextField(L("settings.backend.direct.modelPlaceholder"), text: $viewModel.directAPIModel)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+
+                        // 已拉取到模型 → 给个下拉一键选（不用记模型名）
+                        if !directAvailableModels.isEmpty {
+                            Menu {
+                                ForEach(directAvailableModels, id: \.self) { name in
+                                    Button(name) { viewModel.directAPIModel = name }
+                                }
+                            } label: {
+                                Image(systemName: "list.bullet")
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 24)
+                            .help(L("settings.backend.model.pickFromList"))
+                        }
+
+                        // 一键从该服务商 /v1/models 拉取可用模型
+                        Button {
+                            fetchDirectModels()
+                        } label: {
+                            if directFetchingModels {
+                                ProgressView().controlSize(.small).scaleEffect(0.6)
+                            } else {
+                                Image(systemName: "arrow.clockwise")
+                            }
+                        }
+                        .controlSize(.small)
+                        .disabled(directFetchingModels)
+                        .help(L("settings.backend.model.fetchHelp"))
+                    }
+                }
+                if let err = directModelFetchError {
+                    hermesModelFetchErrorRow(err)
                 }
             } else {
-                settingRow("回复偏好") {
+                settingRow(L("settings.backend.direct.responsePref")) {
                     VStack(alignment: .leading, spacing: 6) {
                         Picker(selection: $viewModel.directAPIResponsePreference) {
                             ForEach(DirectResponsePreference.allCases) { preference in
-                                Text(preference.label).tag(preference)
+                                Text(preference.localizedLabel).tag(preference)
                             }
                         } label: { EmptyView() }
                         .pickerStyle(.segmented)
@@ -860,7 +1138,7 @@ struct SettingsView: View {
                     }
                 }
 
-                settingRow("当前模型") {
+                settingRow(L("settings.backend.direct.currentModel")) {
                     Text(selectedProvider.model(for: viewModel.directAPIResponsePreference))
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.secondary)
@@ -872,6 +1150,58 @@ struct SettingsView: View {
 
             // 底部提示：服务商注册入口 + 备选模型
             providerHint
+        }
+    }
+
+    // MARK: - QwenCode 配置（直连阿里 DashScope OpenAI 兼容端点；纯模型，可进舰队多路并发分担负载）
+
+    private var qwenCodeConfig: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            modeInfoCard(
+                icon: "q.circle.fill",
+                iconColor: .teal,
+                title: L("settings.backend.qwen.title"),
+                body: L("settings.backend.qwen.hint"),
+                tint: .teal
+            )
+            // 可选的傻瓜填 Key（没在终端登录过 qwen 的用户用）：选服务商 + 填 Key 即可
+            settingRow(L("settings.backend.direct.provider")) {
+                Picker(selection: $qwenProviderName) {
+                    ForEach(qwenProviders, id: \.name) { p in Text(p.name).tag(p.name) }
+                } label: { EmptyView() }
+                    .labelsHidden()
+                    .onChange(of: qwenProviderName) { _, n in
+                        if let p = qwenProviders.first(where: { $0.name == n }), !p.url.isEmpty {
+                            viewModel.qwenBaseURL = p.url
+                            viewModel.qwenModel = p.model
+                        }
+                    }
+            }
+            settingRow(L("settings.backend.direct.apiKey")) {
+                HStack(spacing: 4) {
+                    Group {
+                        if showKey { TextField("sk-...", text: $viewModel.qwenAPIKey) }
+                        else { SecureField("sk-...", text: $viewModel.qwenAPIKey) }
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    Button { showKey.toggle() } label: {
+                        Image(systemName: showKey ? "eye.slash" : "eye").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(showKey ? L("settings.backend.key.hide") : L("settings.backend.key.show"))
+                }
+            }
+            settingRow(L("settings.backend.direct.apiURL")) {
+                TextField("https://api.deepseek.com/v1", text: $viewModel.qwenBaseURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            }
+            settingRow(L("settings.backend.direct.model")) {
+                TextField("deepseek-chat", text: $viewModel.qwenModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+            }
         }
     }
 
@@ -932,11 +1262,11 @@ struct SettingsView: View {
     private var keyPlaceholder: String {
         switch selectedProvider.id {
         case "deepseek": return "sk-xxxxxx (DeepSeek)"
-        case "zhipu":    return "xxxxx.xxxxx (智谱)"
+        case "zhipu":    return "xxxxx.xxxxx (Zhipu)"
         case "moonshot": return "sk-xxxxxx (Moonshot)"
         case "minimax":  return "sk-xxxxxx (MiniMax)"
         case "openai":   return "sk-xxxxxx (OpenAI)"
-        default: return "your-secret-key"
+        default: return L("settings.backend.direct.keyPlaceholder.default")
         }
     }
 
@@ -947,24 +1277,24 @@ struct SettingsView: View {
             Image(systemName: "info.circle").font(.system(size: 10)).foregroundStyle(.tertiary)
             switch selectedProvider.id {
             case "custom":
-                Text("自定义 OpenAI 兼容服务（自部署 / 中转代理）")
+                Text(L("settings.backend.direct.hint.custom"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             default:
                 if viewModel.directAPIKey.isEmpty {
-                    Text("当前服务商尚未配置 Key")
+                    Text(L("settings.backend.direct.hint.noKey"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                if let url = selectedProvider.signupURL {
-                    Text("还没 API Key？")
+                if let urlStr = selectedProvider.signupURL, let url = URL(string: urlStr) {
+                    Text(L("settings.backend.direct.hint.needKey"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Link("点这里获取 ›", destination: URL(string: url)!)
+                    Link(L("settings.backend.direct.hint.getKey"), destination: url)
                         .font(.caption)
                 }
                 if !selectedProvider.altModels.isEmpty {
-                    Text("· 备选：\(selectedProvider.altModels.joined(separator: " / "))")
+                    Text(L("settings.backend.direct.hint.altModels", selectedProvider.altModels.joined(separator: " / ")))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -990,17 +1320,17 @@ struct SettingsView: View {
                 Image(systemName: "cube.transparent.fill")
                     .font(.system(size: 13))
                     .foregroundStyle(.indigo)
-                Text("opencode 引擎 v1.15.1")
+                Text(L("settings.backend.opencode.title"))
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Circle()
                     .fill(isReady ? .green : .orange)
                     .frame(width: 7, height: 7)
-                Text(isReady ? "运行中\(portText)" : "启动中…")
+                Text(isReady ? L("settings.backend.opencode.running", portText) : L("settings.backend.opencode.starting"))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-            Text("在线 AI 模式现已升级为 agent runtime —— 能读写本地文件 / 跑命令 / 联网搜索，跟 Claude Code / Codex 同档。装上 HermesPet 即可使用，不依赖任何外部 CLI。")
+            Text(L("settings.backend.opencode.desc"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1009,7 +1339,7 @@ struct SettingsView: View {
                     Image(systemName: "gift.fill")
                         .font(.caption2)
                         .foregroundStyle(.green)
-                    Text("还没配 Key？现在用 opencode 内置免费模型 deepseek-v4-flash-free")
+                    Text(L("settings.backend.opencode.freeModel"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -1022,10 +1352,10 @@ struct SettingsView: View {
                         .font(.caption2)
                         .foregroundStyle(.orange)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("当前模型有 reasoning_content 字段，可能偶尔无响应")
+                        Text(L("settings.backend.opencode.reasoningWarn.title"))
                             .font(.caption2)
                             .foregroundStyle(.orange)
-                        Text("opencode v1.15.1 跟 DeepSeek V4 / Kimi K2.x / OpenAI o1+ 等推理模型的 reasoning_content 字段适配中（PR #25110）。建议先用「moonshot-v1-32k」/「gpt-5.4」这类非推理模型，agent 能力完整稳定。后续 HermesPet 会内置 ReasoningProxy 彻底修。")
+                        Text(L("settings.backend.opencode.reasoningWarn.body"))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1055,7 +1385,7 @@ struct SettingsView: View {
                     } else {
                         Image(systemName: "antenna.radiowaves.left.and.right")
                     }
-                    Text(testing ? "测试中…" : "测试连接")
+                    Text(testing ? L("settings.backend.test.testing") : L("settings.backend.test.button"))
                 }
             }
             .controlSize(.small)
@@ -1064,7 +1394,7 @@ struct SettingsView: View {
             if let result = testResult {
                 Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
                     .foregroundStyle(result.success ? .green : .red)
-                Text(result.success ? "已连接" : result.message)
+                Text(result.success ? L("settings.backend.test.connected") : result.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1079,8 +1409,8 @@ struct SettingsView: View {
             mode: .claudeCode,
             icon: "terminal.fill",
             tint: .orange,
-            title: "通过 claude CLI 调用 Claude Code",
-            body: "能读写文件、运行命令、分析图片。需要先在终端用 npm / brew 等装好 claude CLI。",
+            title: L("settings.backend.claude.title"),
+            body: L("settings.backend.claude.body"),
             installURL: "https://docs.claude.com/en/docs/agents-and-tools/claude-code/overview"
         )
     }
@@ -1090,8 +1420,8 @@ struct SettingsView: View {
             mode: .codex,
             icon: "wand.and.stars",
             tint: .cyan,
-            title: "通过 codex CLI 调用 OpenAI Codex",
-            body: "强项是写代码 + 生成图片。生图自动显示在对话气泡里。需要装好 codex CLI 并用 codex login 登录 OpenAI 账号。",
+            title: L("settings.backend.codex.title"),
+            body: L("settings.backend.codex.body"),
             installURL: "https://github.com/openai/codex"
         )
     }
@@ -1130,18 +1460,53 @@ struct SettingsView: View {
             // 当前检测到的路径 + 重新检测按钮
             cliDetectionRow(mode: mode, tint: tint)
 
+            // 订阅月费（仅用于灵动岛「Token 消耗」的省钱对比，不影响 token 计费）
+            subscriptionFeeRow(mode: mode, tint: tint)
+
+            // 自动探测失败时的兜底：手动指定可执行路径（issue #23）
+            CLIManualPathField(mode: mode) { redetectCLI(mode: mode) }
+
             // 安装指南链接
             HStack(spacing: 4) {
                 Image(systemName: "arrow.up.right.square")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
-                Text("还没装？")
+                Text(L("settings.backend.cli.notInstalledQ"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Link("安装指南 ›", destination: URL(string: installURL)!)
+                Link(L("settings.backend.cli.installGuide"), destination: URL(string: installURL)!)
                     .font(.caption)
             }
         }
+    }
+
+    /// 订阅月费输入（Claude Code / Codex）—— 填了之后灵动岛「Token 消耗」卡片会按
+    /// "这些 token 走 API 要花多少" 对比你的月费，算出省了多少。只影响"省钱"统计，不影响计费本身。
+    @ViewBuilder
+    private func subscriptionFeeRow(mode: AgentMode, tint: Color) -> some View {
+        let key = (mode == .claudeCode) ? TokenUsageStore.claudeFeeKey : TokenUsageStore.codexFeeKey
+        HStack(spacing: 8) {
+            Image(systemName: "creditcard")
+                .font(.system(size: 12))
+                .foregroundStyle(tint)
+            Text(L("settings.backend.cli.subFee"))
+                .font(.caption)
+            Spacer()
+            TextField("0", text: Binding(
+                get: {
+                    let v = UserDefaults.standard.double(forKey: key)
+                    return v > 0 ? String(format: "%g", v) : ""
+                },
+                set: { UserDefaults.standard.set(Double($0.trimmingCharacters(in: .whitespaces)) ?? 0, forKey: key) }
+            ))
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 72)
+            .multilineTextAlignment(.trailing)
+            Text(L("settings.backend.cli.subFeeUnit"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .help(L("settings.backend.cli.subFee.help"))
     }
 
     /// 单行 UI：左侧显示当前检测状态（路径 / "未找到" / "检测中…"），右侧"重新检测"按钮
@@ -1157,12 +1522,12 @@ struct SettingsView: View {
                 .foregroundStyle(storedPath.isEmpty ? Color.secondary : Color.green)
 
             if cliDetectingMode == mode {
-                Text("检测中…")
+                Text(L("settings.backend.cli.detecting"))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)
                 ProgressView().controlSize(.small).scaleEffect(0.6)
             } else if storedPath.isEmpty {
-                Text("未检测到")
+                Text(L("settings.backend.cli.notDetected"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
@@ -1180,7 +1545,7 @@ struct SettingsView: View {
             } label: {
                 HStack(spacing: 3) {
                     Image(systemName: "arrow.clockwise")
-                    Text("重新检测")
+                    Text(L("settings.backend.cli.redetect"))
                 }
             }
             .controlSize(.small)
@@ -1192,6 +1557,100 @@ struct SettingsView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(Color.secondary.opacity(0.06))
         )
+    }
+
+    /// 手动指定 CLI 路径的输入框（issue #23）—— 自动探测失败 / 用户想强制指定时用。
+    /// 存到 `claudeExecutablePathManual` / `codexExecutablePathManual`，CLIAvailability 检测时最高优先级。
+    private struct CLIManualPathField: View {
+        let mode: AgentMode
+        /// 应用后回调（父视图触发重新检测 + 刷新连接状态）
+        let onApply: () -> Void
+
+        @State private var path: String = ""
+
+        private var key: String {
+            (mode == .claudeCode) ? "claudeExecutablePathManual" : "codexExecutablePathManual"
+        }
+        private var placeholder: String {
+            "/usr/local/bin/" + (mode == .claudeCode ? "claude" : "codex")
+        }
+
+        var body: some View {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        TextField(placeholder, text: $path)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                            .onSubmit(apply)
+                        Button(L("settings.backend.cli.manualApply"), action: apply)
+                            .controlSize(.small)
+                    }
+                    Text(L("settings.backend.cli.manualHint"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 4)
+            } label: {
+                Text(L("settings.backend.cli.manualPath"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear { path = UserDefaults.standard.string(forKey: key) ?? "" }
+        }
+
+        private func apply() {
+            UserDefaults.standard.set(
+                path.trimmingCharacters(in: .whitespacesAndNewlines),
+                forKey: key
+            )
+            onApply()
+        }
+    }
+
+    /// 上下文窗口手动覆盖输入框 —— 留空走 models.dev 自动查；自部署/冷门模型查不到时手填。
+    /// 存 UserDefaults（按 mode），0 = 清除覆盖（回到自动）。
+    private struct ContextWindowOverrideField: View {
+        let mode: AgentMode
+        @State private var text: String = ""
+
+        private var key: String { TokenEstimator.overrideKey(for: mode) }
+
+        var body: some View {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        TextField(L("settings.backend.ctxWindow.placeholder"), text: $text)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(maxWidth: 150)
+                            .onSubmit(apply)
+                        Text("tokens").font(.caption2).foregroundStyle(.secondary)
+                        Button(L("settings.backend.cli.manualApply"), action: apply)
+                            .controlSize(.small)
+                    }
+                    Text(L("settings.backend.ctxWindow.hint"))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 4)
+            } label: {
+                Text(L("settings.backend.ctxWindow.label"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .onAppear {
+                let v = UserDefaults.standard.integer(forKey: key)
+                text = v > 0 ? "\(v)" : ""
+            }
+        }
+
+        private func apply() {
+            let n = Int(text.filter { $0.isNumber }) ?? 0
+            UserDefaults.standard.set(n, forKey: key)   // 0 = 清除覆盖
+        }
     }
 
     /// 当前正在检测哪个 mode 的 CLI（用于按钮 disable / "检测中…"显示）
@@ -1247,11 +1706,16 @@ struct SettingsView: View {
 
     private var petSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // 养成卡（第 0 步地基的可见出口：等级 / 经验 / 心情 / 战绩随干活增长）
+            PetProgressCard()
+
+            Divider()
+
             captionToggle(
                 icon: "sparkles",
                 iconColor: .pink,
-                title: "桌宠动效",
-                caption: "灵动岛图标的呼吸、眨眼、完成跳跃等微动画",
+                title: L("settings.pet.animation.title"),
+                caption: L("settings.pet.animation.caption"),
                 isOn: Binding(
                     get: { !viewModel.quietMode },
                     set: { viewModel.quietMode = !$0 }
@@ -1260,11 +1724,52 @@ struct SettingsView: View {
 
             Divider()
 
+            // 灵动岛系统信息 —— 右耳轮播 内存/CPU/网速/温度，hover 展开看全部
+            captionToggle(
+                icon: "gauge.with.dots.needle.bottom.50percent",
+                iconColor: .teal,
+                title: L("settings.pet.systemStats.title"),
+                caption: L("settings.pet.systemStats.caption"),
+                isOn: $systemStatsEnabled
+            )
+
+            // 控制中心子分区：展开面板里要不要「应用启动器」/「宠物乐园」标签（系统状态恒在）
+            if systemStatsEnabled {
+                captionToggle(
+                    icon: "square.grid.2x2.fill",
+                    iconColor: .indigo,
+                    title: L("settings.pet.islandApps.title"),
+                    caption: L("settings.pet.islandApps.caption"),
+                    isOn: $islandHubApps
+                )
+                // Token 消耗「计费 + 省钱」标签：发版前暂封印(token 估算先不暴露给终端用户)。
+                // 恢复：放开下面 + 把 islandHubTokens 两处 default 改回 true。
+                // captionToggle(
+                //     icon: "dollarsign.circle.fill",
+                //     iconColor: .green,
+                //     title: L("settings.pet.islandTokens.title"),
+                //     caption: L("settings.pet.islandTokens.caption"),
+                //     isOn: $islandHubTokens
+                // )
+                // 乐园（宠物养成/形象）暂封印（2026-06-06）：方案未达满意，先不暴露开关。
+                // 恢复：放开下面 + SystemStatsViews.sections 里的 .pets。
+                // captionToggle(
+                //     icon: "pawprint.fill",
+                //     iconColor: .pink,
+                //     title: L("settings.pet.islandPets.title"),
+                //     caption: L("settings.pet.islandPets.caption"),
+                //     isOn: $islandHubPets
+                // )
+                let _ = islandHubPets
+            }
+
+            Divider()
+
             // 桌面漫步统一区 —— 覆盖四种桌宠（每个 mode 一种形象）
             VStack(alignment: .leading, spacing: 6) {
-                Label("桌面漫步", systemImage: "figure.walk")
+                Label(L("settings.pet.walk.sectionTitle"), systemImage: "figure.walk")
                     .font(.system(size: 13, weight: .medium))
-                Text("从灵动岛跳出，沿菜单栏正下方左右走动。Claude 🦞 / 在线 AI ☁️ / OpenClaw 🦊 / Hermes 🐴 / Codex 💻 五种桌宠，跟着当前 AI 模式切换。")
+                Text(L("settings.pet.walk.sectionCaption"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -1272,44 +1777,54 @@ struct SettingsView: View {
             captionToggle(
                 icon: "figure.walk",
                 iconColor: petColor,
-                title: "启用桌面漫步",
-                caption: "总开关。关掉后四种桌宠都不会出现",
+                title: L("settings.pet.walk.enableTitle"),
+                caption: L("settings.pet.walk.enableCaption"),
                 isOn: $viewModel.clawdWalkEnabled
+            )
+
+            captionToggle(
+                icon: "pin.fill",
+                iconColor: petColor,
+                title: L("settings.pet.pinned.title"),
+                caption: L("settings.pet.pinned.caption"),
+                isOn: $viewModel.petPinnedEnabled,
+                disabled: !viewModel.clawdWalkEnabled
             )
 
             captionToggle(
                 icon: "infinity",
                 iconColor: petColor,
-                title: "Claude / Hermes / Codex · 自由活动",
-                caption: "Claude / Hermes / Codex 模式下跳过 3 分钟空闲等待，桌宠一直在屏幕上玩。在线 AI / OpenClaw 模式云朵和 fomo 切过去就立刻出来，不受此项影响",
+                title: L("settings.pet.freeRoam.title"),
+                caption: L("settings.pet.freeRoam.caption"),
                 isOn: $viewModel.clawdFreeRoamEnabled,
-                disabled: !viewModel.clawdWalkEnabled
+                disabled: !viewModel.clawdWalkEnabled || viewModel.petPinnedEnabled
             )
 
             captionToggle(
                 icon: "sparkles.rectangle.stack",
                 iconColor: petColor,
-                title: "桌面巡视（嗅文件）",
-                caption: "漫步期间偶尔下到桌面，挑个图标用 Hermes 给一句短评。四种桌宠都会参与，需要 Finder 自动化权限",
+                title: L("settings.pet.patrol.title"),
+                caption: L("settings.pet.patrol.caption"),
                 isOn: $viewModel.clawdDesktopPatrolEnabled,
-                disabled: !viewModel.clawdWalkEnabled
+                disabled: !viewModel.clawdWalkEnabled || viewModel.petPinnedEnabled
             )
 
             Divider()
 
             // 桌宠形象调色 —— 主色定制（派生色自动跟随）
             VStack(alignment: .leading, spacing: 10) {
-                Label("桌宠形象调色", systemImage: "paintpalette.fill")
+                Label(L("settings.pet.palette.title"), systemImage: "paintpalette.fill")
                     .font(.system(size: 13, weight: .medium))
-                Text("调主色 → 顶高光 / 底阴影自动派生。鬃毛 / 翅膀 / 火焰 / LED 等保留默认色不变。")
+                Text(L("settings.pet.palette.caption"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
 
-                paletteRow(label: "Claude · Clawd 🦞", mode: .claudeCode)
-                paletteRow(label: "在线 AI · 云朵 ☁️", mode: .directAPI)
-                paletteRow(label: "OpenClaw · fomo 🦊", mode: .openclaw)
-                paletteRow(label: "Hermes · 小马 🐴", mode: .hermes)
-                paletteRow(label: "Codex · coco 🤖", mode: .codex)
+                paletteRow(label: L("settings.pet.palette.claude"), mode: .claudeCode)
+                paletteRow(label: L("settings.pet.palette.directAPI"), mode: .directAPI)
+                paletteRow(label: L("settings.pet.palette.openclaw"), mode: .openclaw)
+                paletteRow(label: L("settings.pet.palette.hermes"), mode: .hermes)
+                paletteRow(label: L("settings.pet.palette.codex"), mode: .codex)
+                paletteRow(label: L("settings.pet.palette.qwen"), mode: .qwenCode)
             }
             .padding(12)
             .background(Color.secondary.opacity(0.06))
@@ -1318,7 +1833,7 @@ struct SettingsView: View {
             // 桌宠大小档位
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Label("桌宠大小", systemImage: "arrow.up.left.and.arrow.down.right")
+                    Label(L("settings.pet.size.title"), systemImage: "arrow.up.left.and.arrow.down.right")
                         .font(.system(size: 13, weight: .medium))
                     Spacer()
                     Text("\(Int(petWalkSizeScale * 100))%")
@@ -1327,9 +1842,9 @@ struct SettingsView: View {
                         .monospacedDigit()
                 }
 
-                Picker("桌宠大小档位", selection: $petWalkSizeScale) {
+                Picker(L("settings.pet.size.title"), selection: $petWalkSizeScale) {
                     ForEach(PetWalkSizeScale.presets, id: \.self) { scale in
-                        Text(PetWalkSizeScale.label(for: scale)).tag(scale)
+                        Text(petSizeLabel(scale)).tag(scale)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -1339,7 +1854,7 @@ struct SettingsView: View {
                     NotificationCenter.default.post(name: PetWalkSizeScale.didChangeNotification, object: nil)
                 }
 
-                Text("仅作用于桌面漫步形象。灵动岛桌宠受刘海物理高度约束，大小不变。")
+                Text(L("settings.pet.size.caption"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1351,12 +1866,12 @@ struct SettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 8) {
-                Label("交互（四种桌宠通用）", systemImage: "hand.tap")
+                Label(L("settings.pet.interaction.title"), systemImage: "hand.tap")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
-                interactionTip("单击 / 双击", "打开聊天窗（不切换模式）")
-                interactionTip("鼠标 hover", "暂停漫步")
-                interactionTip("拖文件给它", "桌宠吃掉并交给 AI 看（仅 Claude 模式）")
+                interactionTip(L("settings.pet.interaction.click.trigger"), L("settings.pet.interaction.click.effect"))
+                interactionTip(L("settings.pet.interaction.hover.trigger"), L("settings.pet.interaction.hover.effect"))
+                interactionTip(L("settings.pet.interaction.drag.trigger"), L("settings.pet.interaction.drag.effect"))
             }
             .padding(12)
             .background(Color.secondary.opacity(0.06))
@@ -1382,7 +1897,7 @@ struct SettingsView: View {
             .labelsHidden()
             .frame(width: 44)
 
-            Button("重置默认") {
+            Button(L("settings.pet.palette.resetDefault")) {
                 paletteStore.resetToDefault(for: mode)
             }
             .font(.system(size: 11))
@@ -1447,9 +1962,9 @@ struct SettingsView: View {
                     .font(.system(size: 13))
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("每个事件可独立选音效或关闭")
+                    Text(L("settings.sound.intro.title"))
                         .font(.system(size: 12, weight: .medium))
-                    Text("默认是 macOS 系统内置音，也可以点「自定义…」选你自己的 mp3 / wav / m4a / aiff。选「🔇 静音」即可关掉某事件。")
+                    Text(L("settings.sound.intro.caption"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1475,7 +1990,7 @@ struct SettingsView: View {
 
     private func soundRow(event: SoundEvent, binding: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(event.displayTitle).font(.system(size: 13, weight: .medium))
+            Text(L(event.titleKey)).font(.system(size: 13, weight: .medium))
 
             HStack(spacing: 8) {
                 // 当前选的是自定义文件 —— 显示文件名 chip + ✕（移回静音）
@@ -1486,8 +2001,8 @@ struct SettingsView: View {
                 } else {
                     // 系统音 Picker（含 "🔇 静音" 在最上）
                     Picker("", selection: binding) {
-                        ForEach(Self.systemSounds, id: \.0) { (value, label) in
-                            Text(label).tag(value)
+                        ForEach(Self.systemSounds, id: \.0) { (value, labelKey) in
+                            Text(L(labelKey)).tag(value)
                         }
                     }
                     .labelsHidden()
@@ -1497,11 +2012,11 @@ struct SettingsView: View {
                 Button {
                     pickCustomSoundFile(for: binding)
                 } label: {
-                    Label("自定义…", systemImage: "folder.badge.plus")
+                    Label(L("settings.sound.custom"), systemImage: "folder.badge.plus")
                         .font(.system(size: 11))
                 }
                 .controlSize(.small)
-                .help("从本地选择一个音频文件（mp3 / wav / m4a / aiff）")
+                .help(L("settings.sound.customHelp"))
 
                 Button {
                     SoundManager.play(rawValue: binding.wrappedValue)
@@ -1511,13 +2026,13 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .help("试听")
+                .help(L("settings.sound.preview"))
                 .disabled(binding.wrappedValue.isEmpty)
 
                 Spacer()
             }
 
-            Text(event.displayCaption).font(.caption).foregroundStyle(.secondary)
+            Text(L(event.captionKey)).font(.caption).foregroundStyle(.secondary)
         }
     }
 
@@ -1540,7 +2055,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary.opacity(0.6))
             }
             .buttonStyle(.borderless)
-            .help("移除自定义音效（恢复静音，可再选系统音）")
+            .help(L("settings.sound.removeCustomHelp"))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
@@ -1557,8 +2072,8 @@ struct SettingsView: View {
     @MainActor
     private func pickCustomSoundFile(for binding: Binding<String>) {
         let panel = NSOpenPanel()
-        panel.title = "选择提示音"
-        panel.prompt = "选择"
+        panel.title = L("settings.sound.picker.title")
+        panel.prompt = L("settings.sound.picker.prompt")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -1588,14 +2103,110 @@ struct SettingsView: View {
 
     /// Wave C4：主出场偏好 —— "auto" / "pet" / "island"
     @AppStorage("intentChannelPreference") private var intentChannelPreferenceRaw: String = "auto"
-    /// Wave C5：每分钟最多反馈次数 —— 1=安静 / 2=适中 / 4=频繁
-    @AppStorage("intentFeedbackPerMinute") private var intentFeedbackPerMinute: Int = 2
+    /// Wave C5：每分钟最多反馈次数 —— 1=安静 / 2=适中 / 4=频繁（v1.3「不刻意」默认安静）
+    @AppStorage("intentFeedbackPerMinute") private var intentFeedbackPerMinute: Int = 1
 
     /// Wave E1：今日观察列表数据。每次打开设置 / 用户操作（删除/拉黑/刷新）后重新拉
     @State private var intentObservations: [UserIntent] = []
     @State private var showObservationList: Bool = false
     /// Wave E2/E3：用户软黑名单（bundle ID 数组）。@State 镜像 + UserDefaults.array(forKey:) 同步
     @State private var userBlacklist: [String] = []
+
+    /// v1.3 Phase 3：成长轨迹（daily_journal 时间线）
+    @State private var journalEntries: [DailyJournalEntry] = []
+    @State private var showGrowthTimeline: Bool = false
+    @State private var expandedJournalDate: String? = nil
+    @State private var showClearJournalConfirm: Bool = false
+
+    /// v1.3 Phase 4-B：日报 / 回顾风格（全局单选，默认温暖陪伴）
+    @AppStorage("briefingStyle") private var briefingStyleRaw: String = BriefingStyle.warm.rawValue
+
+    /// v1.3 Phase 4a：跨模式共享记忆（user-memory.md）。默认关，纯 opt-in。
+    @AppStorage("userMemoryEnabled") private var userMemoryEnabled: Bool = false
+    @State private var userMemoryText: String = ""
+    @State private var userMemoryDirty: Bool = false
+    @State private var showClearMemoryConfirm: Bool = false
+
+    private var arenaSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "flag.checkered").foregroundStyle(.yellow)
+                Text(L("settings.arena.intro"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L("settings.arena.meeting.title")).font(.system(size: 13, weight: .medium))
+                Text(L("settings.arena.meeting.caption"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    NotificationCenter.default.post(name: .init("HermesPetOpenArena"), object: nil)
+                } label: {
+                    Label(L("settings.arena.open"), systemImage: "flag.checkered")
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+            }
+            Spacer()
+        }
+    }
+
+    private var experimentalSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // 顶部说明：实验性功能默认全关，不开则日常使用完全不涉及
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "flask.fill")
+                    .foregroundStyle(.pink)
+                Text(L("settings.experimental.intro"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            // 屏幕接管 / AI 操作软件
+            captionToggle(
+                icon: "macwindow.on.rectangle",
+                iconColor: .pink,
+                title: L("settings.experimental.takeover.title"),
+                caption: L("settings.experimental.takeover.caption"),
+                isOn: Binding(
+                    get: { ExperimentalStore.shared.screenTakeoverEnabled },
+                    set: { ExperimentalStore.shared.screenTakeoverEnabled = $0 }
+                )
+            )
+
+            Divider()
+
+            // 全量模式 / AI 公司舰队（一句话派活 → 满屏 agent 并发 → 质检 → 收进博物馆）
+            captionToggle(
+                icon: "bolt.fill",
+                iconColor: .pink,
+                title: L("settings.experimental.fleet.title"),
+                caption: L("settings.experimental.fleet.caption"),
+                isOn: Binding(
+                    get: { ExperimentalStore.shared.fleetModeEnabled },
+                    set: { ExperimentalStore.shared.fleetModeEnabled = $0 }
+                )
+            )
+
+            Divider()
+
+            // 画布模式（从「系统」分栏移过来，实验性功能集中管理）
+            captionToggle(
+                icon: "rectangle.3.group",
+                iconColor: .pink,
+                title: L("settings.system.canvas.title"),
+                caption: L("settings.system.canvas.caption"),
+                isOn: $canvasModeEnabled
+            )
+
+            Spacer()
+        }
+    }
 
     private var privacySection: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1604,8 +2215,8 @@ struct SettingsView: View {
             captionToggle(
                 icon: "checkmark.shield.fill",
                 iconColor: .orange,
-                title: "工具调用前向我确认",
-                caption: "AI 想读写文件 / 跑命令时，灵动岛展开卡片让你点 Allow / Always / Deny。\n默认关（AI 全部放行）；开启后下一次新对话生效。仅「在线 AI」模式生效（v1.3）。",
+                title: L("settings.privacy.permissionUI.title"),
+                caption: L("settings.privacy.permissionUI.caption"),
                 isOn: $viewModel.permissionUIEnabled
             )
 
@@ -1614,18 +2225,18 @@ struct SettingsView: View {
             captionToggle(
                 icon: "eye.fill",
                 iconColor: .indigo,
-                title: "记录我的活动",
-                caption: "持续记录在用什么 app、窗口、键盘节奏，让 AI 能真正知道你在做什么。\n所有数据本地存储，不上传任何云。首次启用会请求 macOS 辅助功能权限。",
+                title: L("settings.privacy.activity.title"),
+                caption: L("settings.privacy.activity.caption"),
                 isOn: $viewModel.activityRecordingEnabled
             )
 
             // 隐私保障说明卡片
             VStack(alignment: .leading, spacing: 6) {
-                privacyTip(icon: "lock.fill", text: "数据仅本地存储于 ~/.hermespet/activity.sqlite")
-                privacyTip(icon: "keyboard", text: "只统计按键次数，不记录键盘内容")
-                privacyTip(icon: "bubble.left.and.bubble.right.fill", text: "你跟 AI 说的话被记下来给早报用（AI 回答不记）")
-                privacyTip(icon: "key.fill", text: "1Password / 钥匙串等敏感 app 自动跳过")
-                privacyTip(icon: "trash", text: "可随时一键清空，原始事件 48h 自动清理")
+                privacyTip(icon: "lock.fill", text: L("settings.privacy.activity.tip.local"))
+                privacyTip(icon: "keyboard", text: L("settings.privacy.activity.tip.keyboard"))
+                privacyTip(icon: "bubble.left.and.bubble.right.fill", text: L("settings.privacy.activity.tip.chat"))
+                privacyTip(icon: "key.fill", text: L("settings.privacy.activity.tip.sensitive"))
+                privacyTip(icon: "trash", text: L("settings.privacy.activity.tip.cleanup"))
             }
             .padding(12)
             .background(Color.indigo.opacity(0.06))
@@ -1637,20 +2248,69 @@ struct SettingsView: View {
             // 让用户明确选择哪家服务商能看到这些数据
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label("早报由谁生成", systemImage: "newspaper.fill")
+                    Label(L("settings.privacy.briefing.backendLabel"), systemImage: "newspaper.fill")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Picker("", selection: $viewModel.morningBriefingBackend) {
                         // M5: 早报后端只能选 enabled 的 mode（选 disabled 的也用不了）
                         ForEach(AgentMode.allCases.filter { EnabledModesStore.shared.isEnabled($0) }) { mode in
-                            Text(mode.label).tag(mode)
+                            Text(L(mode.labelKey)).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)
                     .frame(width: 140)
                 }
-                Text("早报会把你昨天的活动摘要发给这个 AI 总结。Hermes 模式可走自托管，最隐私；Claude/Codex 智能更强但数据会过它们的服务器。")
+                Text(L("settings.privacy.briefing.backendCaption"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            // 会议纪要整理后端 —— 整理是纯文本任务，默认「在线 AI」最快（Claude/Codex 起子进程慢）
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label(L("settings.privacy.meeting.backendLabel"), systemImage: "waveform.badge.mic")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: $viewModel.meetingSummaryBackend) {
+                        ForEach(AgentMode.allCases.filter { EnabledModesStore.shared.isEnabled($0) }) { mode in
+                            Text(L(mode.labelKey)).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
+                }
+                Text(L("settings.privacy.meeting.backendCaption"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            // 日报 / 回顾风格（Phase 4-B）—— 全局口吻，早报和周期回顾共用
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label(L("settings.privacy.briefing.styleLabel"), systemImage: "paintpalette.fill")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { BriefingStyle(rawValue: briefingStyleRaw) ?? .warm },
+                        set: { briefingStyleRaw = $0.rawValue }
+                    )) {
+                        ForEach(BriefingStyle.allCases) { style in
+                            Text(L(style.labelKey)).tag(style)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 140)
+                }
+                Text(L("settings.privacy.briefing.styleCaption"))
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1661,7 +2321,7 @@ struct SettingsView: View {
             // 今日统计（实时）
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Label("今日活动", systemImage: "chart.bar.fill")
+                    Label(L("settings.privacy.todayActivity.label"), systemImage: "chart.bar.fill")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -1672,13 +2332,13 @@ struct SettingsView: View {
                             .font(.system(size: 11))
                     }
                     .buttonStyle(.plain)
-                    .help("刷新")
+                    .help(L("settings.common.refresh"))
                 }
 
                 if activityTodayStats.isEmpty {
                     Text(viewModel.activityRecordingEnabled
-                         ? "还没有数据 —— 用一会儿电脑再回来看"
-                         : "活动记录已关闭")
+                         ? L("settings.privacy.todayActivity.noDataEnabled")
+                         : L("settings.privacy.todayActivity.recordingOff"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .padding(.vertical, 8)
@@ -1695,7 +2355,7 @@ struct SettingsView: View {
                         }
                     }
                     if activityTodayStats.count > 5 {
-                        Text("还有 \(activityTodayStats.count - 5) 个 app...")
+                        Text(L("settings.privacy.todayActivity.moreApps", activityTodayStats.count - 5))
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
@@ -1710,34 +2370,44 @@ struct SettingsView: View {
                 Button(role: .destructive) {
                     showClearActivityConfirm = true
                 } label: {
-                    Label("清空所有活动记录", systemImage: "trash")
+                    Label(L("settings.privacy.clearActivity.button"), systemImage: "trash")
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.bordered)
                 .confirmationDialog(
-                    "确定清空所有活动记录吗？",
+                    L("settings.privacy.clearActivity.confirmTitle"),
                     isPresented: $showClearActivityConfirm,
                     titleVisibility: .visible
                 ) {
-                    Button("清空", role: .destructive) {
+                    Button(L("settings.common.confirmClear"), role: .destructive) {
                         ActivityRecorder.shared.clearAll()
                         refreshActivityStats()
                     }
-                    Button("取消", role: .cancel) {}
+                    Button(L("settings.common.reset"), role: .cancel) {}
                 } message: {
-                    Text("会删除所有原始事件、会话块和每日统计。此操作不可撤销。")
+                    Text(L("settings.privacy.clearActivity.confirmMessage"))
                 }
             }
 
             // —— v1.3 意图感知 ——
             Divider()
             userIntentSection
+
+            // —— v1.3 成长轨迹（日报归档时间线）——
+            Divider()
+            growthTimelineSection
+
+            // —— v1.3 共享记忆（跨模式 user-memory.md）——
+            Divider()
+            userMemorySection
         }
         .onAppear {
             refreshActivityStats()
             refreshIntentStats()
             loadBlacklist()
             loadObservations()
+            loadJournals()
+            loadUserMemory()
         }
     }
 
@@ -1747,8 +2417,8 @@ struct SettingsView: View {
             captionToggle(
                 icon: "brain.head.profile",
                 iconColor: .purple,
-                title: "意图感知（实验性）",
-                caption: "按回车 / ⌘S / ⌘C / ⌘V / 切应用 / Spotlight 时静默截当前屏 OCR，记录你在做什么。\n同 app 同窗口 5 分钟只采 1 次。所有 OCR 走本地 Vision，不联网。30 天后自动压缩。",
+                title: L("settings.privacy.intent.title"),
+                caption: L("settings.privacy.intent.caption"),
                 isOn: Binding(
                     get: { userIntentEnabled },
                     set: { newVal in
@@ -1761,12 +2431,12 @@ struct SettingsView: View {
 
             // 隐私说明卡片 —— Wave E4 扩到 6 条，覆盖"存储 / 网络 / 黑名单 / 单条删 / 反馈可关 / 自动过期"
             VStack(alignment: .leading, spacing: 6) {
-                privacyTip(icon: "lock.fill", text: "OCR 文本仅本地存储于 ~/.hermespet/activity.sqlite")
-                privacyTip(icon: "wifi.slash", text: "OCR 走本地 Vision Framework，零网络请求，零 token 消耗")
-                privacyTip(icon: "eye.slash.fill", text: "1Password / 微信 / 支付宝等敏感 app 自动跳过")
-                privacyTip(icon: "hand.raised.fill", text: "可逐条删除单次观察 / 可把任意 app 加入黑名单")
-                privacyTip(icon: "speaker.slash.fill", text: "AI 反馈通道可关、可调频率，桌宠永远静默观察")
-                privacyTip(icon: "clock.arrow.circlepath", text: "30 天后 OCR 全文 gzip 压缩 / 180 天后整条删除")
+                privacyTip(icon: "lock.fill", text: L("settings.privacy.intent.tip.local"))
+                privacyTip(icon: "wifi.slash", text: L("settings.privacy.intent.tip.offline"))
+                privacyTip(icon: "eye.slash.fill", text: L("settings.privacy.intent.tip.sensitive"))
+                privacyTip(icon: "hand.raised.fill", text: L("settings.privacy.intent.tip.delete"))
+                privacyTip(icon: "speaker.slash.fill", text: L("settings.privacy.intent.tip.feedback"))
+                privacyTip(icon: "clock.arrow.circlepath", text: L("settings.privacy.intent.tip.expire"))
             }
             .padding(12)
             .background(Color.purple.opacity(0.06))
@@ -1779,14 +2449,14 @@ struct SettingsView: View {
 
                 // 主出场偏好（Wave C4）
                 HStack {
-                    Label("AI 出场偏好", systemImage: "rectangle.3.group.fill")
+                    Label(L("settings.privacy.intent.channelLabel"), systemImage: "rectangle.3.group.fill")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Picker("", selection: $intentChannelPreferenceRaw) {
-                        Text("自动").tag("auto")
-                        Text("桌宠优先").tag("pet")
-                        Text("灵动岛优先").tag("island")
+                        Text(L("settings.privacy.intent.channel.auto")).tag("auto")
+                        Text(L("settings.privacy.intent.channel.pet")).tag("pet")
+                        Text(L("settings.privacy.intent.channel.island")).tag("island")
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 240)
@@ -1795,14 +2465,14 @@ struct SettingsView: View {
 
                 // 反馈频率（Wave C5）
                 HStack {
-                    Label("反馈频率", systemImage: "speedometer")
+                    Label(L("settings.privacy.intent.freqLabel"), systemImage: "speedometer")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Picker("", selection: $intentFeedbackPerMinute) {
-                        Text("安静").tag(1)
-                        Text("适中").tag(2)
-                        Text("频繁").tag(4)
+                        Text(L("settings.privacy.intent.freq.quiet")).tag(1)
+                        Text(L("settings.privacy.intent.freq.medium")).tag(2)
+                        Text(L("settings.privacy.intent.freq.frequent")).tag(4)
                     }
                     .pickerStyle(.segmented)
                     .frame(width: 240)
@@ -1811,11 +2481,11 @@ struct SettingsView: View {
 
                 // 今日采样数
                 HStack {
-                    Label("今天已采样", systemImage: "camera.viewfinder")
+                    Label(L("settings.privacy.intent.todaySampled"), systemImage: "camera.viewfinder")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("\(userIntentTodayCount) 次")
+                    Text(L("settings.privacy.intent.todaySampled.count", userIntentTodayCount))
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundStyle(.primary)
                     Button {
@@ -1842,30 +2512,30 @@ struct SettingsView: View {
                     Button {
                         exportIntentsToJSON()
                     } label: {
-                        Label("导出 JSON", systemImage: "square.and.arrow.up")
+                        Label(L("settings.privacy.intent.exportJSON"), systemImage: "square.and.arrow.up")
                             .font(.system(size: 12))
                     }
                     .buttonStyle(.bordered)
                     Button(role: .destructive) {
                         showClearIntentConfirm = true
                     } label: {
-                        Label("清空意图记录", systemImage: "trash")
+                        Label(L("settings.privacy.intent.clearButton"), systemImage: "trash")
                             .font(.system(size: 12))
                     }
                     .buttonStyle(.bordered)
                     .confirmationDialog(
-                        "确定清空所有意图记录吗？",
+                        L("settings.privacy.intent.clearConfirmTitle"),
                         isPresented: $showClearIntentConfirm,
                         titleVisibility: .visible
                     ) {
-                        Button("清空", role: .destructive) {
+                        Button(L("settings.common.confirmClear"), role: .destructive) {
                             ActivityRecorder.shared.queryStore.clearUserIntents()
                             refreshIntentStats()
                             loadObservations()
                         }
-                        Button("取消", role: .cancel) {}
+                        Button(L("settings.common.reset"), role: .cancel) {}
                     } message: {
-                        Text("会删除所有屏幕 OCR 采样记录。此操作不可撤销。")
+                        Text(L("settings.privacy.intent.clearConfirmMessage"))
                     }
                 }
             }
@@ -1874,9 +2544,9 @@ struct SettingsView: View {
 
     /// 刷新"今日意图采样次数"
     private func refreshIntentStats() {
-        // 复用最近 24h 查询（够近似今日，省得加一个新 SQL）
-        let intents = ActivityRecorder.shared.queryStore.recentUserIntents(withinMinutes: 24 * 60, limit: 10000)
-        userIntentTodayCount = intents.count
+        // 直接走 SELECT COUNT(*)，不再拉全表行 + 整屏 OCR 文本（旧写法在采样多时主线程卡顿）。
+        // COUNT 还更准（当日凌晨起算，而非近 24h 近似）
+        userIntentTodayCount = ActivityRecorder.shared.queryStore.todayIntentCount()
     }
 
     // MARK: - Wave E1：今日观察列表
@@ -1896,7 +2566,7 @@ struct SettingsView: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                         .frame(width: 12)
-                    Label("今日观察", systemImage: "list.bullet.below.rectangle")
+                    Label(L("settings.privacy.observation.title"), systemImage: "list.bullet.below.rectangle")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -1912,7 +2582,7 @@ struct SettingsView: View {
 
             if showObservationList {
                 if intentObservations.isEmpty {
-                    Text("今天还没有观察记录")
+                    Text(L("settings.privacy.observation.empty"))
                         .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                         .padding(.vertical, 12)
@@ -1946,7 +2616,7 @@ struct SettingsView: View {
                     Text(item.appName ?? "?")
                         .font(.system(size: 11, weight: .medium))
                     if item.isBlacklisted {
-                        Text("· 仅 meta")
+                        Text(L("settings.privacy.observation.metaOnly"))
                             .font(.system(size: 9))
                             .foregroundStyle(.tertiary)
                     }
@@ -1971,13 +2641,13 @@ struct SettingsView: View {
                     Button {
                         addToBlacklist(bundleID: bid, appName: item.appName)
                     } label: {
-                        Label("以后别记 \(item.appName ?? bid)", systemImage: "eye.slash")
+                        Label(L("settings.privacy.observation.dontRecord", item.appName ?? bid), systemImage: "eye.slash")
                     }
                 }
                 Button(role: .destructive) {
                     deleteObservation(id: item.id)
                 } label: {
-                    Label("删除这条", systemImage: "trash")
+                    Label(L("settings.privacy.observation.deleteThis"), systemImage: "trash")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -1998,7 +2668,7 @@ struct SettingsView: View {
     private var observationSummary: String {
         let count = intentObservations.count
         let uniqueApps = Set(intentObservations.compactMap { $0.appBundleID }).count
-        return "\(count) 次 · 跨 \(uniqueApps) 个应用"
+        return L("settings.privacy.observation.summary", count, uniqueApps)
     }
 
     private func observationTime(_ item: UserIntent) -> String {
@@ -2020,17 +2690,283 @@ struct SettingsView: View {
         refreshIntentStats()
     }
 
+    // MARK: - v1.3 Phase 3：成长轨迹（daily_journal 时间线）
+
+    /// 折叠的"成长轨迹"区块 —— 每天的回顾会存成一条日报，攒成使用轨迹。
+    /// 点日期行展开看当天回顾全文；可单条删 / 一键清空。全部本地存储。
+    private var growthTimelineSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showGrowthTimeline.toggle()
+                    if showGrowthTimeline { loadJournals() }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: showGrowthTimeline ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 12)
+                    Label(L("settings.privacy.growth.title"), systemImage: "chart.line.uptrend.xyaxis")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if showGrowthTimeline && !journalEntries.isEmpty {
+                        Text(L("settings.privacy.growth.days", journalEntries.count))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if showGrowthTimeline {
+                Text(L("settings.privacy.growth.caption"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if journalEntries.isEmpty {
+                    Text(L("settings.privacy.growth.empty"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity)
+                } else {
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(journalEntries) { entry in
+                                journalRow(entry)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(maxHeight: 280)
+                    .background(Color.primary.opacity(0.03))
+                    .cornerRadius(6)
+
+                    HStack {
+                        Spacer()
+                        Button(role: .destructive) {
+                            showClearJournalConfirm = true
+                        } label: {
+                            Label(L("settings.privacy.growth.clearButton"), systemImage: "trash")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .confirmationDialog(
+                            L("settings.privacy.growth.clearConfirmTitle"),
+                            isPresented: $showClearJournalConfirm,
+                            titleVisibility: .visible
+                        ) {
+                            Button(L("settings.common.confirmClear"), role: .destructive) {
+                                ActivityRecorder.shared.queryStore.clearDailyJournal()
+                                loadJournals()
+                            }
+                            Button(L("settings.common.reset"), role: .cancel) {}
+                        } message: {
+                            Text(L("settings.privacy.growth.clearConfirmMessage"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// 单条日报行：日期 + 一行预览，点开展开当天回顾全文；尾部菜单可删这天
+    private func journalRow(_ entry: DailyJournalEntry) -> some View {
+        let expanded = expandedJournalDate == entry.date
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(entry.date)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 74, alignment: .leading)
+                Text(journalPreview(entry))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.primary)
+                    .lineLimit(expanded ? nil : 1)
+                Spacer(minLength: 4)
+                Menu {
+                    Button(role: .destructive) {
+                        deleteJournal(date: entry.date)
+                    } label: {
+                        Label(L("settings.privacy.growth.deleteThisDay"), systemImage: "trash")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 22)
+            }
+            if expanded {
+                Text(strippedJournal(entry.summaryMarkdown))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 82)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.02))
+        .cornerRadius(4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                expandedJournalDate = expanded ? nil : entry.date
+            }
+        }
+    }
+
+    /// 去掉正文里的 ```docs 围栏（那是给聊天渲染可点卡片用的，纯文本预览里不显示）
+    private func strippedJournal(_ md: String) -> String {
+        guard let start = md.range(of: "```docs") else {
+            return md.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        var result = String(md[..<start.lowerBound])
+        // 跳过到对应的结尾 ``` 之后（若有）
+        if let end = md.range(of: "```", range: start.upperBound..<md.endIndex) {
+            result += String(md[end.upperBound...])
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 一行预览：取首个非空行，去掉 markdown 标记符号，截 60 字
+    private func journalPreview(_ entry: DailyJournalEntry) -> String {
+        let text = strippedJournal(entry.summaryMarkdown)
+        let firstLine = text
+            .components(separatedBy: "\n")
+            .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? ""
+        let cleaned = firstLine
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#>*-· "))
+            .replacingOccurrences(of: "**", with: "")
+        return String(cleaned.prefix(60))
+    }
+
+    private func loadJournals() {
+        journalEntries = ActivityRecorder.shared.queryStore.recentDailyJournals(limit: 60)
+    }
+
+    private func deleteJournal(date: String) {
+        ActivityRecorder.shared.queryStore.deleteDailyJournal(date: date)
+        loadJournals()
+    }
+
+    // MARK: - v1.3 Phase 4a：共享记忆（跨模式 user-memory.md）
+
+    /// 共享记忆区：总开关 + 可编辑全文 + 保存 / 清空。
+    /// 一份所有 AI 共享的"用户记忆"，每天早报时自动修订；用户也可手写让所有 AI 都知道的事。
+    private var userMemorySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            captionToggle(
+                icon: "brain.fill",
+                iconColor: .teal,
+                title: L("settings.privacy.memory.title"),
+                caption: L("settings.privacy.memory.caption"),
+                isOn: Binding(
+                    get: { userMemoryEnabled },
+                    set: { userMemoryEnabled = $0 }
+                )
+            )
+
+            if userMemoryEnabled {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Label(L("settings.privacy.memory.contentLabel"), systemImage: "doc.text")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(L("settings.privacy.memory.charCount", userMemoryText.count, UserMemoryStore.maxChars))
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    TextEditor(text: $userMemoryText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(height: 160)
+                        .padding(6)
+                        .background(Color.primary.opacity(0.03))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(.primary.opacity(0.1), lineWidth: 0.5)
+                        )
+                        .onChange(of: userMemoryText) { _, _ in userMemoryDirty = true }
+
+                    if userMemoryText.trimmingCharacters(in: .whitespaces).isEmpty {
+                        Text(L("settings.privacy.memory.empty"))
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+
+                    HStack {
+                        Button {
+                            saveUserMemory()
+                        } label: {
+                            Label(L("settings.privacy.memory.save"), systemImage: "checkmark")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(!userMemoryDirty)
+
+                        Spacer()
+
+                        Button(role: .destructive) {
+                            showClearMemoryConfirm = true
+                        } label: {
+                            Label(L("settings.privacy.memory.clear"), systemImage: "trash")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .confirmationDialog(
+                            L("settings.privacy.memory.clearConfirmTitle"),
+                            isPresented: $showClearMemoryConfirm,
+                            titleVisibility: .visible
+                        ) {
+                            Button(L("settings.common.confirmClear"), role: .destructive) {
+                                UserMemoryStore.shared.clear()
+                                loadUserMemory()
+                            }
+                            Button(L("settings.common.reset"), role: .cancel) {}
+                        } message: {
+                            Text(L("settings.privacy.memory.clearConfirmMessage"))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func loadUserMemory() {
+        userMemoryText = UserMemoryStore.shared.load()
+        userMemoryDirty = false
+    }
+
+    private func saveUserMemory() {
+        UserMemoryStore.shared.save(userMemoryText)
+        loadUserMemory()   // 回读（应用了截断等），并清 dirty
+    }
+
     // MARK: - Wave E2 + E3：黑名单
 
     /// 黑名单管理 section（仅有自定义黑名单时显示）
     private var blacklistSection: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Label("已屏蔽的应用", systemImage: "eye.slash.fill")
+                Label(L("settings.privacy.blacklist.title"), systemImage: "eye.slash.fill")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("\(userBlacklist.count) 个")
+                Text(L("settings.privacy.blacklist.count", userBlacklist.count))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -2119,7 +3055,7 @@ struct SettingsView: View {
 
         // NSSavePanel 让用户选保存位置
         let panel = NSSavePanel()
-        panel.title = "导出今日意图记录"
+        panel.title = L("settings.privacy.export.panelTitle")
         let fileFmt = DateFormatter()
         fileFmt.dateFormat = "yyyy-MM-dd"
         panel.nameFieldStringValue = "HermesPet-intents-\(fileFmt.string(from: Date())).json"
@@ -2148,9 +3084,16 @@ struct SettingsView: View {
     }
 
     private func refreshActivityStats() {
-        // 让 recorder 先把当前会话和当天 stats 落盘，再查
-        ActivityRecorder.shared.queryStore.aggregateDailyStats(for: Date())
-        activityTodayStats = ActivityRecorder.shared.queryStore.dailyStats(for: Date())
+        // 在主 actor 取 store 引用（ActivityStore 是 @unchecked Sendable，可跨线程），
+        // SQLite 聚合 + 查询挪到后台跑，结果回主 actor 赋值，避免打开隐私页时主线程同步阻塞（perf）
+        let store = ActivityRecorder.shared.queryStore
+        Task {
+            let stats = await Task.detached(priority: .userInitiated) { () -> [AppDailyStat] in
+                store.aggregateDailyStats(for: Date())   // async 入队，串行队列保序，dailyStats 读到聚合后的数据
+                return store.dailyStats(for: Date())
+            }.value
+            activityTodayStats = stats
+        }
     }
 
     private func formatDuration(_ seconds: Int) -> String {
@@ -2162,12 +3105,33 @@ struct SettingsView: View {
         return "\(s)s"
     }
 
+    // MARK: - 灵动岛 / 灵动胶囊
+
+    /// 独立分类：所有跟「顶部胶囊形态 + 摆位」相关的设置。
+    /// 后续灵动岛功能扩展（特效开关、动效强度等）都加到这里，跟系统设置解耦。
+    private var islandSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // —— 显示模式（刘海 / 悬浮胶囊 / 自动）——
+            displayModeRow
+
+            Divider()
+
+            // —— 多显示器：固定到哪块屏 ——
+            islandScreenRow
+        }
+    }
+
     // MARK: - 系统
 
     private var systemSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // —— 灵动岛显示模式 ——
-            displayModeRow
+            // —— 手机连接地址（测试用：实时显示手机 App 该填的局域网地址）——
+            phoneLinkRow
+
+            Divider()
+
+            // —— 语言（v1.4 中英双语，应用内即时切换）——
+            languageRow
 
             Divider()
 
@@ -2176,7 +3140,7 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "textformat.size")
                         .foregroundStyle(.indigo)
-                    Text("聊天字号")
+                    Text(L("settings.system.fontSize.title"))
                         .font(.system(size: 13, weight: .medium))
                     Spacer()
                     Text("\(Int(chatFontScale * 100))%")
@@ -2185,15 +3149,24 @@ struct SettingsView: View {
                         .monospacedDigit()
                 }
 
-                Picker("聊天字号档位", selection: $chatFontScale) {
-                    ForEach(ChatFontScale.presets, id: \.self) { scale in
-                        Text(scaleLabel(scale)).tag(scale)
-                    }
+                // 滑块（左右拖拽，比 10 档 segmented 省空间）—— 映射到 presets 的离散档位
+                HStack(spacing: 10) {
+                    Image(systemName: "textformat.size").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Slider(
+                        value: Binding(
+                            get: {
+                                Double(ChatFontScale.presets.enumerated()
+                                    .min(by: { abs($0.element - chatFontScale) < abs($1.element - chatFontScale) })?.offset ?? 3)
+                            },
+                            set: { chatFontScale = ChatFontScale.presets[min(max(Int($0.rounded()), 0), ChatFontScale.presets.count - 1)] }
+                        ),
+                        in: 0...Double(ChatFontScale.presets.count - 1),
+                        step: 1
+                    )
+                    Image(systemName: "textformat.size").font(.system(size: 17)).foregroundStyle(.secondary)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
 
-                Text("仅缩放消息正文、代码块、表格、选项卡片。也可在聊天窗口里用 ⌘+ / ⌘- / ⌘0 直接调。")
+                Text(L("settings.system.fontSize.caption"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2204,8 +3177,8 @@ struct SettingsView: View {
             captionToggle(
                 icon: "power.circle.fill",
                 iconColor: .blue,
-                title: "开机自动启动",
-                caption: "登录系统后自动以菜单栏 app 形式启动",
+                title: L("settings.system.launchAtLogin.title"),
+                caption: L("settings.system.launchAtLogin.caption"),
                 isOn: Binding(
                     get: { viewModel.isLaunchAtLoginOn },
                     set: { viewModel.setLaunchAtLogin($0) }
@@ -2217,8 +3190,8 @@ struct SettingsView: View {
             captionToggle(
                 icon: "dock.rectangle",
                 iconColor: .indigo,
-                title: "在 Dock 显示图标",
-                caption: "默认菜单栏 agent 风格不占 Dock。打开后会显示应用图标，Cmd+Tab 也能切到 HermesPet。切换即时生效，无需重启。",
+                title: L("settings.system.dockIcon.title"),
+                caption: L("settings.system.dockIcon.caption"),
                 isOn: $viewModel.showDockIcon
             )
 
@@ -2227,42 +3200,100 @@ struct SettingsView: View {
             captionToggle(
                 icon: "hand.tap.fill",
                 iconColor: .purple,
-                title: "触觉反馈",
-                caption: "切 mode / 截屏 / 按住语音 / 任务完成时给 trackpad 一次轻微震动",
+                title: L("settings.system.haptic.title"),
+                caption: L("settings.system.haptic.caption"),
                 isOn: $viewModel.hapticEnabled
             )
+        }
+    }
 
-            Divider()
-                .padding(.vertical, 4)
+    // MARK: - 手机连接地址（测试辅助）
+    //
+    // 测试阶段手机要连电脑，但电脑 Wi-Fi 的 IP 是动态的、会变。
+    // 这里实时显示「手机该填的地址」，IP 变了 3 秒内自动更新，省得每次去查文件。
 
-            // 实验性功能区
-            HStack(spacing: 6) {
-                Image(systemName: "flask.fill").font(.caption2).foregroundStyle(.orange)
-                Text("实验性功能")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
+    private var phoneLinkRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "iphone")
+                    .foregroundStyle(.green)
+                Text("手机连接地址（测试）")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
             }
-            .padding(.bottom, 2)
 
-            captionToggle(
-                icon: "rectangle.3.group",
-                iconColor: .pink,
-                title: "画布模式",
-                caption: "用 Codex 自动批量生成产品图集（电商主图风格）。生成需 5~10 分钟，依赖 codex CLI。功能仍在打磨，不需要可保持关闭。",
-                isOn: $canvasModeEnabled
-            )
+            // 每 3 秒重算一次：换了 Wi-Fi、IP 变了，这里会自动跟着变
+            TimelineView(.periodic(from: .now, by: 3)) { _ in
+                let addr = phoneEndpoint()
+                HStack(spacing: 10) {
+                    Text(addr)
+                        .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(addr, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("复制地址")
+                }
+                .padding(10)
+                .background(Color.green.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            Text("在手机 App「设置 → 我的电脑」里填这个地址。换了 Wi-Fi 地址会变，这里实时显示。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 当前手机该连的局域网地址（IP:端口）。端口为 0 表示服务还没起来。
+    @MainActor private func phoneEndpoint() -> String {
+        let ip = CommandServer.localIPAddress() ?? "未联网"
+        let port = CommandServer.shared.port
+        return port > 0 ? "\(ip):\(port)" : "\(ip)（服务未启动）"
+    }
+
+    /// 语言选择（中文 / English）—— 切换即时生效。
+    /// 在 body 调 L(...) → Observation 自动追踪 LocaleManager.language → 切语言自动重渲染。
+    private var languageRow: some View {
+        @Bindable var locale = LocaleManager.shared
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "globe")
+                    .foregroundStyle(.teal)
+                Text(L("system.language.title"))
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+            }
+
+            Picker(L("system.language.title"), selection: $locale.language) {
+                ForEach(AppLanguage.allCases) { lang in
+                    Text(lang.displayName).tag(lang)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text(L("system.language.caption"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     /// 字号档位 segmented Picker 的显示文字
     private func scaleLabel(_ scale: Double) -> String {
         switch scale {
-        case 0.85: return "小"
-        case 1.0:  return "标准"
-        case 1.15: return "大"
-        case 1.30: return "更大"
-        case 1.50: return "巨大"
+        case 0.85: return L("settings.system.fontSize.small")
+        case 1.0:  return L("settings.system.fontSize.standard")
+        case 1.15: return L("settings.system.fontSize.large")
+        case 1.30: return L("settings.system.fontSize.larger")
+        case 1.50: return L("settings.system.fontSize.huge")
         default:   return "\(Int(scale * 100))%"
         }
     }
@@ -2274,15 +3305,16 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: "macbook.gen2")
                     .foregroundStyle(.purple)
-                Text("灵动岛显示")
+                Text(L("settings.system.display.title"))
                     .font(.system(size: 13, weight: .medium))
                 Spacer()
             }
 
-            Picker("灵动岛显示", selection: $displayModeRaw) {
-                Text("跟随屏幕").tag(DisplayMode.auto.rawValue)
-                Text("刘海").tag(DisplayMode.notch.rawValue)
-                Text("悬浮胶囊").tag(DisplayMode.floating.rawValue)
+            Picker(L("settings.system.display.title"), selection: $displayModeRaw) {
+                Text(L("settings.system.display.auto")).tag(DisplayMode.auto.rawValue)
+                Text(L("settings.system.display.notch")).tag(DisplayMode.notch.rawValue)
+                Text(L("settings.system.display.floating")).tag(DisplayMode.floating.rawValue)
+                Text(L("settings.system.display.mini")).tag(DisplayMode.mini.rawValue)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -2290,21 +3322,82 @@ struct SettingsView: View {
                 pendingRestartFromDisplayMode = true
             }
 
-            Text("无刘海屏（Air / Intel Mac / 外接显示器）建议选「悬浮胶囊」，胶囊会浮在菜单栏下方 + 跟当前桌宠主色发光。切换后需要重启应用生效。")
+            Text(L("settings.system.display.caption"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .alert("需要重启应用", isPresented: $pendingRestartFromDisplayMode) {
-            Button("稍后") {
+        .alert(L("settings.system.display.restartTitle"), isPresented: $pendingRestartFromDisplayMode) {
+            Button(L("settings.system.display.restartLater")) {
                 pendingRestartFromDisplayMode = false
             }
-            Button("立刻重启") {
+            Button(L("settings.system.display.restartNow")) {
                 relaunchApp()
             }
         } message: {
-            Text("灵动岛显示模式切换需要重启应用才能生效。")
+            Text(L("settings.system.display.restartMessage"))
         }
+    }
+
+    /// 「灵动岛显示在哪块屏」选择器（多显示器）。
+    /// 第一项「跟随我所在的屏幕」= 鼠标在哪块屏灵动岛就在哪块；后面把当前接着的每块屏列出来供固定。
+    /// 即时生效（无需重启）：选完发通知，DynamicIslandController 立即重摆位。
+    private var islandScreenRow: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.on.rectangle")
+                    .foregroundStyle(.purple)
+                Text(L("settings.system.islandScreen.title"))
+                    .font(.system(size: 13, weight: .medium))
+                Spacer()
+            }
+
+            Picker(L("settings.system.islandScreen.title"), selection: $islandScreenChoiceRaw) {
+                Text(L("settings.system.islandScreen.follow")).tag(IslandScreenChoice.followRaw)
+                ForEach(islandScreenOptions, id: \.id) { opt in
+                    Text(opt.name).tag(opt.id)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .onChange(of: islandScreenChoiceRaw) { _, _ in
+                NotificationCenter.default.post(name: IslandScreenChoice.changedNotification, object: nil)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
+                islandScreenListVersion += 1   // 插拔屏 → 刷新下拉
+            }
+
+            Text(L("settings.system.islandScreen.caption"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 当前可固定的屏幕项（随插拔屏刷新）。若用户当前固定的屏已断开，额外补一项占位，保持 Picker 选中态不丢。
+    private var islandScreenOptions: [(id: String, name: String)] {
+        _ = islandScreenListVersion   // 读一下建立依赖，插拔屏时强制重算
+        var opts: [(id: String, name: String)] = NSScreen.screens.compactMap { screen in
+            guard let did = screen.displayID else { return nil }
+            return (id: String(did), name: islandScreenDisplayName(screen))
+        }
+        // 固定的屏被拔掉 → 补占位项，避免下拉显示空白（用户能看到"之前选的屏断了"再改）
+        if islandScreenChoiceRaw != IslandScreenChoice.followRaw,
+           !opts.contains(where: { $0.id == islandScreenChoiceRaw }) {
+            opts.append((id: islandScreenChoiceRaw, name: L("settings.system.islandScreen.disconnected")))
+        }
+        return opts
+    }
+
+    /// 屏幕显示名：优先系统 localizedName（macOS 14+），否则按是否带刘海给个友好名。
+    private func islandScreenDisplayName(_ screen: NSScreen) -> String {
+        if #available(macOS 14.0, *) {
+            let n = screen.localizedName
+            if !n.isEmpty { return n }
+        }
+        return screen.safeAreaInsets.top > 0
+            ? L("settings.system.islandScreen.builtin")
+            : L("settings.system.islandScreen.external")
     }
 
     /// 重启 app：用 NSWorkspace 重新打开自己 + terminate 当前进程
@@ -2343,7 +3436,7 @@ struct SettingsView: View {
                     Text("v\(UpdateChecker.shared.currentVersion)")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.secondary)
-                    Text("macOS 顶部刘海桌宠 · AI 聊天客户端")
+                    Text(L("settings.about.tagline"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -2357,12 +3450,8 @@ struct SettingsView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                ForEach(HotkeyAction.allCases) { action in
-                    hotkeyRow(action)
-                }
-                aboutRow(icon: "folder.fill", label: "存储位置", value: "~/.hermespet/")
+                aboutRow(icon: "folder.fill", label: L("settings.about.storageLocation"), value: "~/.hermespet/")
             }
-            .id(hotkeyRefreshID)
 
             Divider()
 
@@ -2400,16 +3489,16 @@ struct SettingsView: View {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(dotColor)
                     .frame(width: 16)
-                Text("官方版本验证")
+                Text(L("settings.about.auth.title"))
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
                 Circle().fill(dotColor).frame(width: 8, height: 8)
-                Text(result.shortLabel)
+                Text(authShortLabel(result))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(headlineColor)
             }
 
-            Text(result.detailText)
+            Text(authDetailText(result))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2419,7 +3508,7 @@ struct SettingsView: View {
                 Image(systemName: "lock.shield.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(.indigo)
-                Text("官方下载源")
+                Text(L("settings.about.auth.officialSource"))
                     .font(.system(size: 11, weight: .medium))
                 Spacer()
                 Link("GitHub Releases", destination: URL(string: CodeSignVerifier.officialReleasesURL)!)
@@ -2431,7 +3520,7 @@ struct SettingsView: View {
                 Image(systemName: "info.circle")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
-                Text("HermesPet 由 Basion 独立开发并开源，原作者 GitHub: @basionwang-bot。除官方仓库的 Releases 外，其他渠道（个人转发 / 第三方网盘）的 DMG 不保证安全和正版，建议核对上方签名。")
+                Text(L("settings.about.auth.disclaimer"))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2449,6 +3538,33 @@ struct SettingsView: View {
         )
     }
 
+    /// 官方版本验证的状态短标签（i18n）—— 对应 CodeSignVerifier.Result
+    private func authShortLabel(_ r: CodeSignVerifier.Result) -> String {
+        switch r {
+        case .officialSignature:   return L("settings.about.auth.status.official.short")
+        case .adHocSignature:      return L("settings.about.auth.status.adhoc.short")
+        case .thirdPartySignature: return L("settings.about.auth.status.thirdParty.short")
+        case .unsigned:            return L("settings.about.auth.status.unsigned.short")
+        case .unknown:             return L("settings.about.auth.status.unknown.short")
+        }
+    }
+
+    /// 官方版本验证的详细说明（i18n，动态 Team ID / 原因用 %@ 占位）
+    private func authDetailText(_ r: CodeSignVerifier.Result) -> String {
+        switch r {
+        case .officialSignature:
+            return L("settings.about.auth.status.official.detail", CodeSignVerifier.officialTeamID)
+        case .adHocSignature:
+            return L("settings.about.auth.status.adhoc.detail")
+        case .thirdPartySignature(let id):
+            return L("settings.about.auth.status.thirdParty.detail", id)
+        case .unsigned:
+            return L("settings.about.auth.status.unsigned.detail")
+        case .unknown(let reason):
+            return L("settings.about.auth.status.unknown.detail", reason)
+        }
+    }
+
     /// 问题反馈区 —— 扫描 ~/Library/Logs/DiagnosticReports/ 找 HermesPet 崩溃日志，
     /// 一键复制 + 跳转 GitHub issue 让用户提交（零后端 / 零隐私顾虑）
     @ViewBuilder
@@ -2459,14 +3575,14 @@ struct SettingsView: View {
                 Image(systemName: "exclamationmark.bubble.fill")
                     .foregroundStyle(.orange)
                     .frame(width: 16)
-                Text("问题反馈")
+                Text(L("settings.about.feedback.title"))
                     .font(.system(size: 12, weight: .medium))
                 Spacer()
             }
 
             if let crash = reporter.latestCrash {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("检测到最近一次崩溃")
+                    Text(L("settings.about.feedback.crashDetected"))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.primary)
                     Text("v\(crash.appVersion) · \(crash.exceptionType)")
@@ -2479,7 +3595,7 @@ struct SettingsView: View {
                         Button {
                             reporter.reportToGitHub(crash)
                         } label: {
-                            Label("一键上报到 GitHub", systemImage: "paperplane.fill")
+                            Label(L("settings.about.feedback.reportGitHub"), systemImage: "paperplane.fill")
                                 .font(.system(size: 12, weight: .medium))
                         }
                         .buttonStyle(.borderedProminent)
@@ -2488,14 +3604,14 @@ struct SettingsView: View {
                         Button {
                             reporter.revealInFinder(crash)
                         } label: {
-                            Label("在访达中显示", systemImage: "folder")
+                            Label(L("settings.about.feedback.revealFinder"), systemImage: "folder")
                                 .font(.system(size: 12))
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                     }
                     if reporter.allCrashes.count > 1 {
-                        Text("（共 \(reporter.allCrashes.count) 条历史崩溃，最早 \(relativeTime(from: reporter.allCrashes.last!.date))）")
+                        Text(L("settings.about.feedback.history", reporter.allCrashes.count, relativeTime(from: reporter.allCrashes.last!.date)))
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
@@ -2507,14 +3623,14 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                    Text("暂未检测到崩溃日志 ✨")
+                    Text(L("settings.about.feedback.noCrash"))
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
                         reporter.openBlankIssue()
                     } label: {
-                        Label("直接提 issue", systemImage: "arrow.up.right.square")
+                        Label(L("settings.about.feedback.openIssue"), systemImage: "arrow.up.right.square")
                             .font(.system(size: 11))
                     }
                     .buttonStyle(.bordered)
@@ -2522,7 +3638,7 @@ struct SettingsView: View {
                 }
             }
 
-            Text("点「一键上报」会自动复制完整崩溃日志到剪贴板 + 打开 GitHub issue 页面，粘贴后描述一下崩溃前的操作就能发出。日志只发到你看到的 GitHub issue，不会上传任何第三方后端。")
+            Text(L("settings.about.feedback.note"))
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .padding(.top, 2)
@@ -2536,7 +3652,7 @@ struct SettingsView: View {
                 Image(systemName: "person.fill")
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
-                Text("作者")
+                Text(L("settings.about.credits.author"))
                     .font(.system(size: 12))
                 Spacer()
                 Link("Basion", destination: URL(string: "https://github.com/basionwang-bot")!)
@@ -2547,7 +3663,7 @@ struct SettingsView: View {
                 Image(systemName: "heart.fill")
                     .foregroundStyle(.pink.opacity(0.85))
                     .frame(width: 16)
-                Text("社区贡献者")
+                Text(L("settings.about.credits.contributors"))
                     .font(.system(size: 12))
                 Spacer()
                 VStack(alignment: .trailing, spacing: 4) {
@@ -2562,7 +3678,7 @@ struct SettingsView: View {
                              destination: URL(string: "https://github.com/CoimgRain")!)
                     }
                     .font(.system(size: 11, weight: .medium))
-                    Link("查看全部贡献者",
+                    Link(L("settings.about.credits.allContributors"),
                          destination: URL(string: "https://github.com/basionwang-bot/HermesPet/graphs/contributors")!)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
@@ -2573,14 +3689,14 @@ struct SettingsView: View {
                 Image(systemName: "star.bubble.fill")
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
-                Text("代码仓库")
+                Text(L("settings.about.credits.repo"))
                     .font(.system(size: 12))
                 Spacer()
                 Link("GitHub", destination: URL(string: "https://github.com/basionwang-bot/HermesPet")!)
                     .font(.system(size: 12))
             }
 
-            Text("感谢所有提交 issue / PR 的朋友。如果这个项目对你有用，欢迎在 GitHub 给个 Star ⭐️")
+            Text(L("settings.about.credits.thanks"))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
@@ -2599,18 +3715,18 @@ struct SettingsView: View {
                     .frame(width: 16)
                 if checker.hasUpdate, let latest = checker.latestVersion {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("有新版本 v\(latest) 可用")
+                        Text(L("settings.about.update.available", latest))
                             .font(.system(size: 13, weight: .medium))
-                        Text("当前 v\(checker.currentVersion)")
+                        Text(L("settings.about.update.current", checker.currentVersion))
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("已是最新版本")
+                        Text(L("settings.about.update.upToDate"))
                             .font(.system(size: 13))
                         if let at = checker.lastCheckedAt {
-                            Text("最近检查：\(relativeTime(from: at))")
+                            Text(L("settings.about.update.lastChecked", relativeTime(from: at)))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
@@ -2629,7 +3745,7 @@ struct SettingsView: View {
                     Button {
                         Task { await checker.downloadAndInstall() }
                     } label: {
-                        Label("下载并安装", systemImage: "arrow.down.app.fill")
+                        Label(L("settings.about.update.downloadInstall"), systemImage: "arrow.down.app.fill")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.borderedProminent)
@@ -2638,7 +3754,7 @@ struct SettingsView: View {
                     Button {
                         Task { await checker.check(silently: false) }
                     } label: {
-                        Label(checker.isChecking ? "检查中..." : "检查更新",
+                        Label(checker.isChecking ? L("settings.about.update.checking") : L("settings.about.update.checkUpdate"),
                               systemImage: "arrow.clockwise")
                             .font(.system(size: 12))
                     }
@@ -2668,7 +3784,7 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.top, 4)
                 } label: {
-                    Text("更新内容")
+                    Text(L("settings.about.update.notes"))
                         .font(.system(size: 12, weight: .medium))
                 }
                 .padding(.leading, 26)
@@ -2679,18 +3795,86 @@ struct SettingsView: View {
     /// "刚刚" / "5 分钟前" / "2 小时前" / "昨天" 相对时间
     private func relativeTime(from date: Date) -> String {
         let f = RelativeDateTimeFormatter()
-        f.locale = Locale(identifier: "zh_CN")
+        // Phase 5-4：相对时间跟随界面语言（原硬编码 zh_CN，英文界面也会输出中文「3分钟前」）
+        f.locale = Locale(identifier: LocaleManager.currentLanguage() == .zh ? "zh_CN" : "en_US")
         f.unitsStyle = .full
         return f.localizedString(for: date, relativeTo: Date())
     }
 
+    /// 桌宠尺寸档位名（i18n）—— PetWalkSizeScale.label 是中文，UI 这里走 L()
+    private func petSizeLabel(_ scale: Double) -> String {
+        switch scale {
+        case 0.7:  return L("settings.pet.size.mini")
+        case 0.85: return L("settings.pet.size.small")
+        case 1.0:  return L("settings.pet.size.default")
+        case 1.2:  return L("settings.pet.size.large")
+        case 1.5:  return L("settings.pet.size.huge")
+        default:   return "\(Int(scale * 100))%"
+        }
+    }
+
+    // MARK: - 快捷键栏（v1.3.1：从「关于」栏独立出来 + 冲突提示 + 恢复默认）
+
+    /// 快捷键设置栏：说明 + 6 个动作的录制行（带冲突提示）+ 恢复默认按钮
+    private var hotkeysSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(L("settings.hotkey.caption"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(HotkeyAction.allCases) { action in
+                    hotkeyRow(action)
+                }
+            }
+            .id(hotkeyRefreshID)
+
+            HStack {
+                Spacer()
+                Button {
+                    for action in HotkeyAction.allCases {
+                        action.save(action.defaultHotkey)
+                    }
+                    hotkeyRefreshID = UUID()
+                    NotificationCenter.default.post(name: .hermesPetHotkeysChanged, object: nil)
+                } label: {
+                    Label(L("settings.hotkey.reset"), systemImage: "arrow.counterclockwise")
+                        .font(.system(size: 12))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    /// 当前哪些动作的快捷键彼此重复 —— 按 storageValue 分组，出现 ≥2 次的组内动作都标冲突。
+    /// 用 hotkeyRefreshID 触发的 view 重建天然重算（设置面板只有 6 个动作，O(n²) 可忽略）。
+    private func conflictingHotkeyActions() -> Set<HotkeyAction> {
+        var byValue: [String: [HotkeyAction]] = [:]
+        for action in HotkeyAction.allCases {
+            byValue[action.currentHotkey.storageValue, default: []].append(action)
+        }
+        var result: Set<HotkeyAction> = []
+        for (_, actions) in byValue where actions.count > 1 {
+            result.formUnion(actions)
+        }
+        return result
+    }
+
     private func hotkeyRow(_ action: HotkeyAction) -> some View {
-        HStack(spacing: 10) {
+        let isConflict = conflictingHotkeyActions().contains(action)
+        return HStack(spacing: 10) {
             Image(systemName: action.icon)
                 .foregroundStyle(.secondary)
                 .frame(width: 16)
-            Text(action.title)
+            Text(L(action.titleKey))
                 .font(.system(size: 12))
+            if isConflict {
+                Text(L("settings.hotkey.conflict"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.orange)
+            }
             Spacer()
             HotkeyRecorderButton(
                 hotkey: action.currentHotkey,
@@ -2730,36 +3914,39 @@ struct SettingsView: View {
         }
     }
 
+    /// 第二项是 L10n key —— 在 Picker 的 ForEach 里用 L(key) 翻译（static let 无法直接调 @MainActor 的 L()）
     static let systemSounds: [(String, String)] = [
-        ("",          "🔇 静音"),
-        ("Funk",      "Funk · 低音 duang"),
-        ("Hero",      "Hero · 上扬咚叮"),
-        ("Glass",     "Glass · 清脆叮"),
-        ("Tink",      "Tink · 短叮"),
-        ("Ping",      "Ping · 清脆乒"),
-        ("Pop",       "Pop · 爆破"),
-        ("Submarine", "Submarine · 低沉钟"),
-        ("Sosumi",    "Sosumi · 经典"),
-        ("Bottle",    "Bottle · 瓶口"),
-        ("Blow",      "Blow · 吹气"),
-        ("Frog",      "Frog · 蛙鸣"),
-        ("Purr",      "Purr · 猫呼噜"),
-        ("Basso",     "Basso · 低沉错误"),
-        ("Morse",     "Morse · 电报")
+        ("",          "settings.sound.option.mute"),
+        ("Funk",      "settings.sound.option.funk"),
+        ("Hero",      "settings.sound.option.hero"),
+        ("Glass",     "settings.sound.option.glass"),
+        ("Tink",      "settings.sound.option.tink"),
+        ("Ping",      "settings.sound.option.ping"),
+        ("Pop",       "settings.sound.option.pop"),
+        ("Submarine", "settings.sound.option.submarine"),
+        ("Sosumi",    "settings.sound.option.sosumi"),
+        ("Bottle",    "settings.sound.option.bottle"),
+        ("Blow",      "settings.sound.option.blow"),
+        ("Frog",      "settings.sound.option.frog"),
+        ("Purr",      "settings.sound.option.purr"),
+        ("Basso",     "settings.sound.option.basso"),
+        ("Morse",     "settings.sound.option.morse")
     ]
 
     private var modeFooterText: String {
         switch configViewingMode {
         case .hermes:
-            return "Hermes 是装在你电脑上的本地 AI，免费、不联网"
+            return L("settings.backend.footer.hermes")
         case .directAPI:
-            return "直接用云端 AI（DeepSeek / 智谱 / Kimi 等），需要填密钥"
+            return L("settings.backend.footer.directAPI")
         case .openclaw:
-            return "OpenClaw 是装在你电脑上的本地 AI，免费、不联网"
+            return L("settings.backend.footer.openclaw")
         case .claudeCode:
-            return "用 Claude Code 帮你改文件、跑命令、读代码"
+            return L("settings.backend.footer.claudeCode")
         case .codex:
-            return "用 Codex 帮你写代码 + 生成图片"
+            return L("settings.backend.footer.codex")
+        case .qwenCode:
+            return L("settings.backend.qwen.hint")
         }
     }
 
@@ -2774,17 +3961,17 @@ struct SettingsView: View {
         Task {
             if source == .direct {
                 if viewModel.directAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    testResult = (false, "请先选择服务商")
+                    testResult = (false, L("settings.backend.test.needProvider"))
                 } else if viewModel.directAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    testResult = (false, "请先填写 API Key")
+                    testResult = (false, L("settings.backend.test.needKey"))
                 } else if viewModel.directAPIModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    testResult = (false, "请先选择模型")
+                    testResult = (false, L("settings.backend.test.needModel"))
                 } else {
                     do {
                         _ = try await client.sendMessage(messages: [
                             ChatMessage(role: .user, content: "ping")
                         ])
-                        testResult = (true, "Key 与模型可用")
+                        testResult = (true, L("settings.backend.test.keyModelOK"))
                     } catch {
                         testResult = (false, directTestErrorMessage(error))
                     }
@@ -2792,14 +3979,14 @@ struct SettingsView: View {
             } else {
                 do {
                     let ok = try await client.checkHealth()
-                    testResult = (ok, ok ? "Hermes API 在线" : "健康检查未通过")
+                    testResult = (ok, ok ? L("settings.backend.test.hermesOnline") : L("settings.backend.test.healthFailed"))
                 } catch {
                     // 健康检查不通 → 退一步发一条 ping 试试。有些自部署的 Hermes /health 没开
                     do {
                         _ = try await client.sendMessage(messages: [
                             ChatMessage(role: .user, content: "ping")
                         ])
-                        testResult = (true, "连接成功")
+                        testResult = (true, L("settings.backend.test.success"))
                     } catch {
                         testResult = (false, error.localizedDescription)
                     }
@@ -2813,11 +4000,11 @@ struct SettingsView: View {
         if case APIError.httpError(let code, let body) = error {
             switch code {
             case 401, 403:
-                return "API Key 不属于当前服务商或无权限"
+                return L("settings.backend.test.err.keyInvalid")
             case 404:
-                return "模型不存在或 API 地址不正确"
+                return L("settings.backend.test.err.modelNotFound")
             case 429:
-                return "请求过于频繁或额度不足"
+                return L("settings.backend.test.err.rateLimited")
             default:
                 let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
@@ -2866,7 +4053,7 @@ private final class HotkeyRecorderNSButton: NSButton {
 
     private var isRecording = false {
         didSet {
-            title = isRecording ? "按下新快捷键…" : hotkey.displayText
+            title = isRecording ? L("settings.about.hotkey.recording") : hotkey.displayText
             contentTintColor = isRecording ? NSColor.controlAccentColor : nil
             if isRecording {
                 installKeyMonitor()
@@ -2920,10 +4107,13 @@ private final class HotkeyRecorderNSButton: NSButton {
             return
         }
 
-        let next = Hotkey(
-            keyCode: keyCode,
-            modifiers: HotkeyFormatter.carbonModifiers(from: event.modifierFlags)
-        )
+        let mods = HotkeyFormatter.carbonModifiers(from: event.modifierFlags)
+        // 全局热键必须至少含一个 ⌘ / ⌃ / ⌥，否则普通打字会被劫持。
+        // 缺少硬修饰键（裸键 / 仅 ⇧）→ 忽略本次按键、继续录制，等用户按上修饰键。
+        let hasHardModifier = (mods & (UInt32(cmdKey) | UInt32(controlKey) | UInt32(optionKey))) != 0
+        guard hasHardModifier else { return }
+
+        let next = Hotkey(keyCode: keyCode, modifiers: mods)
         hotkey = next
         isRecording = false
         onCapture?(next)
@@ -2940,49 +4130,73 @@ private final class HotkeyRecorderNSButton: NSButton {
 /// - 未装时显示"未安装"+ 复制命令按钮
 struct ModeEnableRow: View {
     let mode: AgentMode
+    /// 一体化列表：是否当前展开（控制箭头方向）
+    var isExpanded: Bool = false
+    /// 点击行（图标/名字/状态/箭头区，非 Toggle）→ 展开/收起配置卡
+    var onTapRow: () -> Void = {}
 
     @State private var isEnabled: Bool = false
-    @State private var statusText: String = "检测中…"
+    @State private var statusText: String = ""
     @State private var statusColor: Color = .secondary
     @State private var isDetecting: Bool = false
     @State private var notInstalled: Bool = false
+    @State private var installing: Bool = false
 
     var body: some View {
         HStack(spacing: 12) {
-            // mini icon
-            Image(systemName: mode.iconName)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 24, height: 24)
-                .foregroundStyle(modeColor)
-                .background(modeColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
+            // 点击区（图标 + 名字状态 + 箭头）→ 展开/收起该后端的配置卡
+            HStack(spacing: 12) {
+                Image(systemName: mode.iconName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .foregroundStyle(modeColor)
+                    .background(modeColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 6))
 
-            // 名称 + 状态副标题
-            VStack(alignment: .leading, spacing: 2) {
-                Text(mode.label).font(.system(size: 13, weight: .medium))
-                HStack(spacing: 4) {
-                    if isDetecting {
-                        ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 10, height: 10)
-                    }
-                    Text(statusText)
-                        .font(.system(size: 11))
-                        .foregroundStyle(statusColor)
-                        .lineLimit(1)
-                    if notInstalled, let cmd = installCommand {
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(cmd, forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.clipboard").font(.system(size: 10))
+                // 名称 + 状态副标题
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L(mode.labelKey)).font(.system(size: 13, weight: .medium))
+                    HStack(spacing: 4) {
+                        if isDetecting {
+                            ProgressView().controlSize(.small).scaleEffect(0.6).frame(width: 10, height: 10)
                         }
-                        .buttonStyle(.borderless)
-                        .help("复制安装命令：\(cmd)")
+                        Text(statusText)
+                            .font(.system(size: 11))
+                            .foregroundStyle(statusColor)
+                            .lineLimit(1)
+                        if installing {
+                            ProgressView().controlSize(.small).scaleEffect(0.55).frame(width: 10, height: 10)
+                            Text(L("settings.backend.mode.installing"))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        } else if notInstalled, let cmd = installCommand {
+                            // ⭐ 一键安装：App 内 spawn 安装命令，免去用户开终端
+                            Button { runInstall(cmd) } label: {
+                                Image(systemName: "arrow.down.circle.fill").font(.system(size: 12))
+                            }
+                            .buttonStyle(.borderless)
+                            .help(L("settings.backend.mode.installHelp"))
+                            // 复制命令（手动装的 fallback）
+                            Button {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(cmd, forType: .string)
+                            } label: {
+                                Image(systemName: "doc.on.clipboard").font(.system(size: 10))
+                            }
+                            .buttonStyle(.borderless)
+                            .help(L("settings.backend.mode.copyInstallHelp", cmd))
+                        }
                     }
                 }
+
+                Spacer()
+
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.tertiary)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { onTapRow() }
 
-            Spacer()
-
-            // Toggle 开关
+            // Toggle 开关（独立，点它只开关、不展开）
             if mode == .directAPI {
                 Toggle("", isOn: .constant(true)).labelsHidden().disabled(true)
             } else {
@@ -2995,12 +4209,10 @@ struct ModeEnableRow: View {
                             detect()
                         } else {
                             EnabledModesStore.shared.disable(mode)
-                            statusText = "已关闭"
+                            statusText = L("settings.backend.mode.disabled")
                             statusColor = .secondary
                             notInstalled = false
                         }
-                        // 上面 statusText 在 setter 闭包里改，但 .onAppear 已经把 statusText 锁到 onAppear 那一刻的值。
-                        // 实际生效路径在 setter 外（每次 toggle 切换都触发 onAppear 重渲）—— 不动逻辑
                     }
                 )).labelsHidden()
             }
@@ -3014,12 +4226,12 @@ struct ModeEnableRow: View {
         .onAppear {
             isEnabled = EnabledModesStore.shared.isEnabled(mode)
             if mode == .directAPI {
-                statusText = "总是开启"
+                statusText = L("settings.backend.mode.alwaysOn")
                 statusColor = .green
             } else if isEnabled {
                 detect()
             } else {
-                statusText = "未启用"
+                statusText = L("settings.backend.mode.notEnabled")
                 statusColor = .secondary
             }
         }
@@ -3033,17 +4245,42 @@ struct ModeEnableRow: View {
         case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
+        case .qwenCode:   return .teal
         }
     }
 
-    /// 安装命令（用户没装 CLI/daemon 时点复制按钮拿到）
+    /// 安装命令（用户没装 CLI/daemon 时：一键安装 spawn 它，或复制到终端手动装）
     private var installCommand: String? {
         switch mode {
         case .directAPI: return nil   // 永远可用
+        case .qwenCode:  return "npm install -g @qwen-code/qwen-code"
         case .openclaw:  return "npm install -g openclaw@latest && openclaw onboard --install-daemon"
         case .hermes:    return "pip install hermes-agent"
         case .claudeCode: return "npm install -g @anthropic-ai/claude-code"
         case .codex:     return "npm install -g @openai/codex"
+        }
+    }
+
+    /// 一键安装：HermesPet 内 spawn 安装命令跑完，再自动重检测 → 变"已连接✓"。
+    /// 没 npm / 失败时给提示并保留"复制命令手动装"的兜底。
+    private func runInstall(_ cmd: String) {
+        installing = true
+        Task {
+            let result = await CLIInstaller.run(command: cmd)
+            installing = false
+            switch result {
+            case .success:
+                await CLIAvailability.invalidateCache()
+                detect()   // 重测 → 装好了就变 已连接✓
+            case .missingNpm:
+                statusText = L("settings.backend.mode.installNeedNode")
+                statusColor = .orange
+                notInstalled = true
+            case .failed:
+                statusText = L("settings.backend.mode.installFailed")
+                statusColor = .red
+                notInstalled = true
+            }
         }
     }
 
@@ -3054,7 +4291,7 @@ struct ModeEnableRow: View {
         Task { @MainActor in
             switch mode {
             case .directAPI:
-                statusText = "总是开启"
+                statusText = L("settings.backend.mode.alwaysOn")
                 statusColor = .green
             case .openclaw:
                 if OpenClawGatewayManager.shared.status == .binaryMissing ||
@@ -3065,7 +4302,7 @@ struct ModeEnableRow: View {
                 renderOpenClawStatus()
             case .hermes:
                 if HermesGatewayManager.shared.status == .binaryMissing {
-                    statusText = "未安装"
+                    statusText = L("settings.backend.mode.status.notInstalled")
                     statusColor = .orange
                     notInstalled = true
                 } else {
@@ -3076,20 +4313,31 @@ struct ModeEnableRow: View {
             case .claudeCode:
                 let ok = await CLIAvailability.claudeAvailable()
                 if ok {
-                    statusText = "已就绪"
+                    statusText = L("settings.backend.mode.ready")
                     statusColor = .green
                 } else {
-                    statusText = "未安装"
+                    statusText = L("settings.backend.mode.status.notInstalled")
                     statusColor = .orange
                     notInstalled = true
                 }
             case .codex:
                 let ok = await CLIAvailability.codexAvailable()
                 if ok {
-                    statusText = "已就绪"
+                    statusText = L("settings.backend.mode.ready")
                     statusColor = .green
                 } else {
-                    statusText = "未安装"
+                    statusText = L("settings.backend.mode.status.notInstalled")
+                    statusColor = .orange
+                    notInstalled = true
+                }
+            case .qwenCode:
+                // 本机 qwen CLI：跟 Claude/Codex 一样探测是否装好
+                let ok = await CLIAvailability.qwenAvailable()
+                if ok {
+                    statusText = L("settings.backend.mode.ready")
+                    statusColor = .green
+                } else {
+                    statusText = L("settings.backend.mode.status.notInstalled")
                     statusColor = .orange
                     notInstalled = true
                 }
@@ -3101,26 +4349,26 @@ struct ModeEnableRow: View {
     private func renderOpenClawStatus() {
         switch OpenClawGatewayManager.shared.status {
         case .running:
-            statusText = "已连接"
+            statusText = L("settings.common.status.connected")
             statusColor = .green
         case .starting:
-            statusText = "连接中…"
+            statusText = L("settings.common.status.connecting")
             statusColor = .secondary
         case .binaryMissing:
-            statusText = "未安装"
+            statusText = L("settings.common.status.notInstalled")
             statusColor = .orange
             notInstalled = true
         case .configMissing:
-            statusText = "需要完成初始化"
+            statusText = L("settings.backend.openclaw.status.needInit")
             statusColor = .orange
         case .endpointDisabled:
-            statusText = "正在自动配置…"
+            statusText = L("settings.backend.openclaw.status.autoConfiguring")
             statusColor = .orange
         case .failed:
-            statusText = "连接失败"
+            statusText = L("settings.common.status.connectFailed")
             statusColor = .red
         case .disabled:
-            statusText = "已关闭自动连接"
+            statusText = L("settings.common.status.autoConnectOff")
             statusColor = .secondary
         }
     }
@@ -3128,20 +4376,20 @@ struct ModeEnableRow: View {
     private func renderHermesStatus() {
         switch HermesGatewayManager.shared.status {
         case .running, .external:
-            statusText = "已连接"
+            statusText = L("settings.common.status.connected")
             statusColor = .green
         case .starting:
-            statusText = "连接中…"
+            statusText = L("settings.common.status.connecting")
             statusColor = .secondary
         case .binaryMissing:
-            statusText = "未安装"
+            statusText = L("settings.common.status.notInstalled")
             statusColor = .orange
             notInstalled = true
         case .failed:
-            statusText = "连接失败"
+            statusText = L("settings.common.status.connectFailed")
             statusColor = .red
         case .disabled:
-            statusText = "已关闭自动连接"
+            statusText = L("settings.common.status.autoConnectOff")
             statusColor = .secondary
         }
     }

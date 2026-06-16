@@ -161,36 +161,23 @@ final class HermesGatewayManager: @unchecked Sendable {
 
     // MARK: - Internal
 
-    /// 找 hermes binary：常见安装路径 + 用户 shell PATH（pyenv / brew / venv 各种情况兜底）
+    /// 找 hermes binary。
+    /// 旧版自己拼了一套弱探测（`zsh -l` 不加载 `.zshrc` + `waitUntilExit` 无超时 + 候选表漏 venv），
+    /// 是"有时候检测不到"的病根之一。现统一复用 `CLIAvailability` 的健壮四层探测（带 `-lic` + 超时 + 脚印）。
     private func locateHermesBinary() -> String? {
         let fm = FileManager.default
-        let candidates = [
+        // 快路径：命中常见软链 / venv 本体就不必启 shell，省启动开销（venv 路径 clawd-on-desk 也查）
+        let fast = [
+            "\(NSHomeDirectory())/.hermes/hermes-agent/venv/bin/hermes",
             "\(NSHomeDirectory())/.local/bin/hermes",
             "/opt/homebrew/bin/hermes",
             "/usr/local/bin/hermes"
         ]
-        for path in candidates where fm.isExecutableFile(atPath: path) {
+        for path in fast where fm.isExecutableFile(atPath: path) {
             return path
         }
-        // 兜底：用 /usr/bin/env 调起一个最小 shell 跑 which hermes
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        task.arguments = ["-l", "-c", "which hermes 2>/dev/null"]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            let path = (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !path.isEmpty, fm.isExecutableFile(atPath: path) {
-                return path
-            }
-        } catch {
-            return nil
-        }
-        return nil
+        // 慢路径兜底：CLIAvailability 健壮四层（zsh/bash -lic 加载 .zshrc + 全面路径扫描 + 脚印 + 超时）
+        return CLIAvailability.locateBinary(command: "hermes")
     }
 
     /// ping `localhost:8642/health` —— 已经有 gateway 在跑（用户终端手起 / launchd service）

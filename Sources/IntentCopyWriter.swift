@@ -105,79 +105,59 @@ enum IntentCopyWriter {
     // MARK: - 模板池（按 kind × mode 二维）
 
     private static func composeByMode(kind: IntentSignalKind, mode: AgentMode, noun: String?) -> String {
-        let pool = templatePool(kind: kind, mode: mode, noun: noun)
-        return pool.randomElement() ?? "看到了"
+        // 1) 取出该 (kind, mode) 的台词池 key，读双语表后按 `|` split 成多句
+        let key = poolKey(kind: kind, mode: mode, hasNoun: noun != nil)
+        let pool = L(key).split(separator: "|").map(String.init)
+        guard let picked = pool.randomElement() else { return L("pet.intent.fallback") }
+        // 2) 带 %@ 占位的池：选中那句后再插值（占位只在有 noun 的 kind 出现）。
+        //    无占位的句子 String(format:) 是 no-op，安全。
+        if let n = noun {
+            return String(format: picked, n)
+        }
+        return picked
     }
 
-    /// (kind, mode) → 至少 3 句模板的池。
-    /// 模板里 {noun} 占位会被替换；如果传入的 noun 为 nil，相关需要 noun 的模板池里直接用兜底句。
-    private static func templatePool(kind: IntentSignalKind, mode: AgentMode, noun: String?) -> [String] {
+    /// (kind, mode) → 台词池在 L10nPet 里的 key。
+    /// 含名词的 kind（copiedError / screenKeyword）在 noun==nil 时返回兜底句 key（无 %@）。
+    /// directAPI 与 openclaw 共用一套"软乎体"池（cloud）。
+    private static func poolKey(kind: IntentSignalKind, mode: AgentMode, hasNoun: Bool) -> String {
         switch kind {
-        // MARK: copiedError
         case .copiedError:
-            guard let n = noun else { return ["看到报错了"] }   // 兜底（实际不会到这，前置门槛已挡）
+            guard hasNoun else { return "pet.intent.copiedError.fallback" }   // 实际不会到这，前置门槛已挡
             switch mode {
-            case .hermes:
-                return ["注意到 \(n)", "你复制了 \(n)", "嗯，\(n)"]
-            case .directAPI, .openclaw:
-                return ["咦，\(n)？", "\(n) 这个…", "看到 \(n) 了"]
-            case .claudeCode:
-                return ["横眼看 \(n)", "嗯？\(n)", "\(n) 哦"]
-            case .codex:
-                return ["→ \(n)", "\(n) ←", "err: \(n)"]
+            case .hermes:                 return "pet.intent.copiedError.hermes"
+            case .directAPI, .openclaw, .qwenCode:   return "pet.intent.copiedError.cloud"
+            case .claudeCode:             return "pet.intent.copiedError.claude"
+            case .codex:                  return "pet.intent.copiedError.codex"
             }
-
-        // MARK: windowTitleDebug
         case .windowTitleDebug:
             switch mode {
-            case .hermes:
-                return ["你在调试", "调试模式？", "在 debug"]
-            case .directAPI, .openclaw:
-                return ["调试呢～", "在 debug？", "调试模式"]
-            case .claudeCode:
-                return ["调 bug 呢", "debug 中", "在抓虫"]
-            case .codex:
-                return ["→ debug", "断点中", "debug…"]
+            case .hermes:                 return "pet.intent.debug.hermes"
+            case .directAPI, .openclaw, .qwenCode:   return "pet.intent.debug.cloud"
+            case .claudeCode:             return "pet.intent.debug.claude"
+            case .codex:                  return "pet.intent.debug.codex"
             }
-
-        // MARK: windowTitleStackOverflow
         case .windowTitleStackOverflow:
             switch mode {
-            case .hermes:
-                return ["查 SO 呢", "Stack Overflow？", "去 SO 找答案"]
-            case .directAPI, .openclaw:
-                return ["SO 走起", "查 SO 呢", "翻 SO？"]
-            case .claudeCode:
-                return ["上 SO 啦", "SO 翻翻", "横着翻 SO"]
-            case .codex:
-                return ["→ SO", "SO 查询", "stackoverflow"]
+            case .hermes:                 return "pet.intent.so.hermes"
+            case .directAPI, .openclaw, .qwenCode:   return "pet.intent.so.cloud"
+            case .claudeCode:             return "pet.intent.so.claude"
+            case .codex:                  return "pet.intent.so.codex"
             }
-
-        // MARK: windowTitleDoc
         case .windowTitleDoc:
             switch mode {
-            case .hermes:
-                return ["在翻文档", "查文档呢？", "看文档？"]
-            case .directAPI, .openclaw:
-                return ["翻文档哎", "看文档？", "查文档呢"]
-            case .claudeCode:
-                return ["翻翻文档", "横着翻文档", "查文档"]
-            case .codex:
-                return ["→ docs", "docs?", "→ 文档"]
+            case .hermes:                 return "pet.intent.doc.hermes"
+            case .directAPI, .openclaw, .qwenCode:   return "pet.intent.doc.cloud"
+            case .claudeCode:             return "pet.intent.doc.claude"
+            case .codex:                  return "pet.intent.doc.codex"
             }
-
-        // MARK: screenKeyword
         case .screenKeyword:
-            guard let n = noun else { return ["屏幕有报错"] }  // 兜底
+            guard hasNoun else { return "pet.intent.screen.fallback" }   // 兜底
             switch mode {
-            case .hermes:
-                return ["屏幕上 \(n)", "看到 \(n)", "注意到 \(n)"]
-            case .directAPI, .openclaw:
-                return ["\(n) 这个…", "咦，\(n)", "我看到 \(n)"]
-            case .claudeCode:
-                return ["横看 \(n)", "嗯？\(n)", "\(n) 哦"]
-            case .codex:
-                return ["→ \(n)", "\(n)?", "屏: \(n)"]
+            case .hermes:                 return "pet.intent.screen.hermes"
+            case .directAPI, .openclaw, .qwenCode:   return "pet.intent.screen.cloud"
+            case .claudeCode:             return "pet.intent.screen.claude"
+            case .codex:                  return "pet.intent.screen.codex"
             }
         }
     }

@@ -41,11 +41,18 @@ final class DynamicIslandController {
     private var isMouseHovering: Bool = false
     /// positionWindow 算完几何后缓存到这里，computeHitRectInScreen 用它算 hit 区屏幕坐标
     private var cachedNotchHeight: CGFloat = 32
+    /// 灵动岛当前所在屏的 displayID —— 鼠标跨到别的屏时跟它比，不同才搬窗口（避免每次鼠标移动都 setFrame）
+    private var currentDisplayID: CGDirectDisplayID?
+    /// 当前是否「跟随鼠标所在屏」模式（设置项缓存，避免每次 mouseMoved 都读 UserDefaults；切换时由通知刷新）。
+    /// 仅 follow 模式才需要在鼠标跨屏时搬窗口；pinned 模式钉死在指定屏，不跟。
+    private var screenChoiceIsFollow: Bool = IslandScreenChoice.current.isFollow
 
     // MARK: - 形态参数（要改观感就调这四个）
 
-    /// 默认（idle）状态：露在刘海下方的高度（极少，让耳朵"融入"刘海高度）
-    private let idleDrop: CGFloat = 4
+    /// 默认（idle）状态：露在刘海下方的高度。
+    /// 归 0：黑色块跟菜单栏底边**齐平**、不在菜单栏下方凸出一截（用户：凸出来强迫症难受）。
+    /// 桌宠靠 idleStateRow 的 offset 在这块齐平黑色里下压定位（不靠加高黑色来避刘海）。
+    private let idleDrop: CGFloat = 0
     /// 默认（idle）状态：横向比刘海多出多少（两侧各加一半 = 每个"耳朵"的宽度）
     private let idleExtraWidth: CGFloat = 80
 
@@ -122,6 +129,27 @@ final class DynamicIslandController {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.handleScreenParamsChanged() }
         }
+
+        // 语音陪聊卡片呼出 → 灵动岛淡出让位；退出 → 淡回来（只改 alpha，不碰 frame，守决策 #1）
+        NotificationCenter.default.addObserver(
+            forName: .init("HermesPetVoiceChatActive"),
+            object: nil, queue: .main
+        ) { [weak self] note in
+            let active = note.userInfo?["active"] as? Bool ?? false
+            MainActor.assumeIsolated { self?.fadeForVoiceChat(active: active) }
+        }
+
+        // 设置里改「灵动岛显示在哪块屏」→ 刷新缓存 + 立即重摆位（无需重启）
+        NotificationCenter.default.addObserver(
+            forName: IslandScreenChoice.changedNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.screenChoiceIsFollow = IslandScreenChoice.current.isFollow
+                self.handleScreenParamsChanged()   // 重摆位 + 广播给附属卡片
+            }
+        }
     }
 
     /// 屏幕参数变化处理：重新算 NSWindow frame + 广播给所有依赖灵动岛位置的子模块
@@ -143,6 +171,20 @@ final class DynamicIslandController {
     /// 全局鼠标移动 / 点击都走这里。判断鼠标在 hit area 屏幕矩形内 → 更新 hover 状态 / 触发 click
     private func handleMouseEvent(type: NSEvent.EventType) {
         let mouseLoc = NSEvent.mouseLocation   // 屏幕坐标
+
+        // 跟随当前屏：鼠标移动到另一块屏 → 把灵动岛整体搬过去，并广播让桌宠 / 附属卡片一起跟过去。
+        // 只在 mouseMoved 检测（leftMouseDown 不搬，避免点击瞬间窗口跳走）；
+        // 用 displayID 比较，只有真跨屏才 setFrame，普通移动不触发（不会每帧搬窗口）。
+        // 走 handleScreenParamsChanged（= positionWindow + 广播 HermesPetScreenParamsChanged）：
+        // positionWindow 是 NSHostingController + sizingOptions=[] 的安全 setFrame 通道
+        // （见 init 注释 / 决策 #1：这条路径才允许灵动岛 NSWindow 改 frame）。
+        if type == .mouseMoved, screenChoiceIsFollow {
+            let idUnderCursor = NSScreen.screens.first(where: { $0.frame.contains(mouseLoc) })?.displayID
+            if let idUnderCursor, idUnderCursor != currentDisplayID {
+                handleScreenParamsChanged()   // 搬灵动岛(内部更新 currentDisplayID) + 广播给桌宠/卡片
+            }
+        }
+
         let hitRect = computeHitRectInScreen(forHovered: isMouseHovering)
         let inside = hitRect.contains(mouseLoc)
 
@@ -203,6 +245,14 @@ final class DynamicIslandController {
         pillWindow.orderOut(nil)
     }
 
+    /// 语音陪聊卡片呼出/退出时，淡出/淡入灵动岛（只动 alpha，守决策 #1 不碰 frame）。
+    private func fadeForVoiceChat(active: Bool) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.35
+            pillWindow.animator().alphaValue = active ? 0 : 1
+        }
+    }
+
     func updateStatus(_ status: ChatViewModel.ConnectionStatus) {
         NotificationCenter.default.post(
             name: .init("HermesPetStatusChanged"),
@@ -214,10 +264,11 @@ final class DynamicIslandController {
     // MARK: - Positioning
 
     private func positionWindow(animated: Bool = false) {
-        // 优先选「带刘海」的屏（外接显示器场景下 NSScreen.main 不一定是 MacBook 自带屏）
-        let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 })
-            ?? NSScreen.main
-        guard let screen = screen else { return }
+        // 选屏走 HermesIslandGeometry.targetScreen()（单一权威源）：
+        // 跟随开启 → 鼠标当前所在屏；关闭 → 带刘海的内置屏。灵动岛 + 附属卡片共用同一逻辑。
+        guard let screen = HermesIslandGeometry.targetScreen() else { return }
+        // 记录灵动岛现在落在哪块屏 —— handleMouseEvent 拿它判断鼠标是否跨屏了
+        currentDisplayID = screen.displayID
 
         let screenFrame = screen.frame
         let safeArea = screen.safeAreaInsets
@@ -245,7 +296,8 @@ final class DynamicIslandController {
         let actualNotchHeight: CGFloat = {
             switch effectiveMode {
             case .notch:    return hasNotch ? safeArea.top : 28
-            case .floating: return 28
+            // 悬浮「灵动胶囊」形态：它就浮在菜单栏里（菜单栏 ~24pt），做更薄更贴菜单栏 → 22pt
+            case .floating: return 22
             }
         }()
         // 缓存给 computeHitRectInScreen 用（NSEvent monitor 自检 hit area 时算屏幕坐标）
@@ -343,6 +395,14 @@ struct DynamicIslandPillView: View {
     @State private var idleExtraWidth: CGFloat = 70
     @State private var hoverDrop: CGFloat = 14
     @State private var hoverExtraWidth: CGFloat = 4
+    /// 悬浮（floating）胶囊 idle 高度 —— 固定做得比菜单栏矮，配合 `floatingTopMargin` 上边距，
+    /// 让胶囊"待在菜单栏里、上下都留白"（用户要求）。**只用于 floating**，刘海形态用 notchHeight+idleDrop。
+    private let floatingIdleHeight: CGFloat = 20
+    /// 悬浮胶囊距屏幕顶的上边距（菜单栏里留白）
+    private let floatingTopMargin: CGFloat = 4
+    /// 刘海形态「控制中心展开时」的下露高度 —— 强制回到标准左耳/右耳态：桌宠/指标清楚落在刘海下方、
+    /// 跟下面黑框自然衔接（平时静止是 idleDrop=0 齐平菜单栏，一展开切到这个，避免贴顶被刘海挡，用户反馈）。
+    private let panelOpenDrop: CGFloat = 11
     /// 卡片内容顶部额外 padding —— 在 notchHeight 之上再往下移文字，远离摄像头/刘海视觉区。
     /// 之前文字紧贴刘海下沿，物理摄像头镜头位置会切到第一行字。
     private let contentTopPad: CGFloat = 4
@@ -416,6 +476,10 @@ struct DynamicIslandPillView: View {
     /// Wave C 边界：UserIntent 总开关，关掉时连陪伴语也不显示（避免旧数据残留误导）
     @AppStorage("userIntentEnabled") private var userIntentEnabled: Bool = false
 
+    /// 「灵动岛系统信息」总开关：idle 右耳轮播 CPU/内存/网速/温度 + hover 展开 2×2 面板。
+    /// 关闭时右耳回落到连接对勾、hover 回落到 mode 名片，并停掉采样省电
+    @AppStorage("systemStatsEnabled") private var systemStatsEnabled: Bool = true
+
     /// hover 时显示的陪伴语 —— 每次 isHovering 从 false→true 时随机换一句
     /// 池子按时段（早/午/下午/晚上/深夜）+ 通用混合，让"AI 在场"感更鲜活
     @State private var hoverCaption: String = "陪着你呢"
@@ -429,9 +493,18 @@ struct DynamicIslandPillView: View {
     // MARK: - o) 5 段音量条实时电平
     @State private var voiceLevel: Float = 0
 
+    /// 会议录音「收起到灵动岛」态 —— **独立于 taskStatus**，避免后台 AI 任务（HermesPetTaskStarted →
+    /// taskStatus=.working）把录音声波顶掉且回不来。渲染时 meetingCollapsed 优先于 taskStatus。
+    /// 会议音量单独存这里，不跟 voiceLevel（push-to-talk 用）抢。
+    @State private var meetingCollapsed: Bool = false
+    @State private var meetingLevel: Float = 0
+
     /// permission 卡片显示中 —— 灵动岛要冻结在 **idle 形态**（带耳朵的横条，width=280），
     /// 跟下方 PermissionWindow（280pt 宽）左右对齐，看起来是一体的 UI
     @State private var permissionActive: Bool = false
+    /// 系统信息「控制中心」面板是否已展开。展开期间灵动岛**不再因 hover 而展开成大水滴**，
+    /// 保持 idle 紧凑态 —— 否则面板顶部要么被灵动岛悬停内容压住、要么留一大块空（用户反馈：缩上去后顶部空着不协调）。
+    @State private var statsPanelOpen: Bool = false
 
     /// 通知态 / hover / 工具调用中 / diff 摘要中 / 错误态 / Wave B 短反馈 → 都让胶囊"展开"成 hover 水滴形态。
     /// **注意 permissionActive 不进 isExpanded**：permission 卡片宽 280pt 跟 idle 形态等宽，
@@ -439,8 +512,11 @@ struct DynamicIslandPillView: View {
     ///
     /// **transientLabelVisible 必须进 isExpanded**（之前漏了，bug 修复）：
     /// 不撑开时 idleDrop 只有 4pt，文字塞不下 → 被刘海/摄像头视觉区遮住
+    ///
+    /// **statsPanelOpen 时屏蔽 hover 展开**：控制中心面板开着时灵动岛保持 idle 紧凑、不随 hover 变大，
+    /// 面板顶部就能恒定只让出 idle 那一点高度，不空不挤（其它触发态——通知/工具/错误等——仍照常展开）。
     private var isExpanded: Bool {
-        isHovering || isShowingNotification
+        (isHovering && !statsPanelOpen) || isShowingNotification
             || currentToolKind != nil
             || diffSummaryVisible
             || isInErrorState
@@ -477,7 +553,10 @@ struct DynamicIslandPillView: View {
         notchWidth + (isExpanded ? hoverExtraWidth : idleExtraWidth)
     }
     private var currentHeight: CGFloat {
-        notchHeight + (isExpanded ? hoverDrop : idleDrop)
+        if isExpanded { return notchHeight + hoverDrop }
+        if isFloating { return floatingIdleHeight }   // 悬浮胶囊：固定矮高度，待在菜单栏里
+        // 刘海：控制中心展开 → 标准耳朵态(下露 panelOpenDrop，露在刘海下方)；平时 → 齐平菜单栏(idleDrop 0)
+        return notchHeight + (statsPanelOpen ? panelOpenDrop : idleDrop)
     }
     private var currentRadius: CGFloat {
         // permission 卡片显示中 → 底部直角，跟卡片顶部无缝衔接形成"灵动岛变形成大形态"
@@ -487,6 +566,10 @@ struct DynamicIslandPillView: View {
 
     var body: some View {
         pillBodyWithStateObservers
+        // 会议录音收起态：灵动岛右侧声波（独立 modifier，避免撑爆 body 的 type-check）
+        .modifier(MeetingIslandObservers(meetingCollapsed: $meetingCollapsed, meetingLevel: $meetingLevel))
+        // 系统信息采样器启停（独立 modifier，避免给已超长的 observer 链再加 onChange 触发 type-check 超时）
+        .modifier(SystemStatsLifecycle(enabled: systemStatsEnabled))
         // ⚠️ .onHover 移到 pillBody 内部跟 .contentShape 同一层（见 pillBody 末尾）。
         // 原因：SwiftUI macOS 26 上 .onHover 不严格遵循 contentShape，会用 view layout frame
         // 整 280×74pt NSWindow 判断 → idle 时鼠标在 NotchShape 视觉区下方的透明区也触发 hover。
@@ -497,13 +580,16 @@ struct DynamicIslandPillView: View {
             let count = (note.userInfo?["count"] as? Int) ?? 0
             notificationCount = count
             // 自定义文字（错误时也用这个通道）
-            notificationText = (note.userInfo?["text"] as? String) ?? "截图已添加"
+            notificationText = (note.userInfo?["text"] as? String) ?? L("island.pill.screenshotAdded")
             withAnimation(AnimTok.bouncy) {
                 isShowingNotification = true
             }
-            // 错误提示停留更久，方便用户读
-            let isError = notificationText.contains("⚠️") || notificationText.contains("失败")
-            let durationNs: UInt64 = isError ? 3_000_000_000 : 1_600_000_000
+            // 错误提示停留更久，方便用户读。错误横幅统一带「⚠️」前缀（emoji 跨语言一致），
+            // 只判断它即可，不依赖中文关键词（i18n 后「失败/权限」会变英文）。
+            // 调用方可显式传 durationMs（如记忆首次告知要停久点让人读完）覆盖默认时长。
+            let isError = notificationText.contains("⚠️")
+            let defaultNs: UInt64 = isError ? 3_000_000_000 : 1_600_000_000
+            let durationNs: UInt64 = (note.userInfo?["durationMs"] as? Int).map { UInt64($0) * 1_000_000 } ?? defaultNs
             notificationTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: durationNs)
                 if !Task.isCancelled {
@@ -583,13 +669,13 @@ struct DynamicIslandPillView: View {
         .onChange(of: elapsedSeconds) { _, secs in
             switch (currentMode, secs) {
             // Clawd（claudeCode）—— 严肃工程师人设
-            case (.claudeCode, 30):  ClawdBubbleOverlayController.show("等等，快好了…")
-            case (.claudeCode, 90):  ClawdBubbleOverlayController.show("emm，再花点时间")
-            case (.claudeCode, 180): ClawdBubbleOverlayController.show("这个真的有点复杂…")
+            case (.claudeCode, 30):  ClawdBubbleOverlayController.show(L("island.pill.bubble.claude.30"))
+            case (.claudeCode, 90):  ClawdBubbleOverlayController.show(L("island.pill.bubble.claude.90"))
+            case (.claudeCode, 180): ClawdBubbleOverlayController.show(L("island.pill.bubble.claude.180"))
             // CloudPet（directAPI）—— 云端 / 飘逸人设
-            case (.directAPI, 30):   ClawdBubbleOverlayController.show("云端有点慢呢…")
-            case (.directAPI, 90):   ClawdBubbleOverlayController.show("这朵云有点大…")
-            case (.directAPI, 180):  ClawdBubbleOverlayController.show("这片云遮了好久…")
+            case (.directAPI, 30):   ClawdBubbleOverlayController.show(L("island.pill.bubble.cloud.30"))
+            case (.directAPI, 90):   ClawdBubbleOverlayController.show(L("island.pill.bubble.cloud.90"))
+            case (.directAPI, 180):  ClawdBubbleOverlayController.show(L("island.pill.bubble.cloud.180"))
             default: break
             }
         }
@@ -641,8 +727,8 @@ struct DynamicIslandPillView: View {
                 }
                 // 失败 → 按 mode 冒不同人设气泡
                 switch currentMode {
-                case .claudeCode: ClawdBubbleOverlayController.show("糟糕 😵", duration: 2.2)
-                case .directAPI:  ClawdBubbleOverlayController.show("云飘走了 😢", duration: 2.2)
+                case .claudeCode: ClawdBubbleOverlayController.show(L("island.pill.bubble.claude.fail"), duration: 2.2)
+                case .directAPI:  ClawdBubbleOverlayController.show(L("island.pill.bubble.cloud.fail"), duration: 2.2)
                 default: break   // Hermes / Codex 暂不冒
                 }
             }
@@ -755,12 +841,21 @@ struct DynamicIslandPillView: View {
                 permissionActive = false
             }
         }
+        // 控制中心面板开/关 → 开时灵动岛保持 idle 紧凑（不随 hover 变大），跟面板"交接"
+        .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetStatsPanelOpen"))) { note in
+            let open = (note.userInfo?["open"] as? Bool) ?? false
+            withAnimation(.spring(response: 0.5, dampingFraction: 0.9, blendDuration: 0.2)) {
+                statsPanelOpen = open
+            }
+        }
         .onAppear {
             let hasKey = !(UserDefaults.standard.string(forKey: "apiKey") ?? "").isEmpty
             status = hasKey ? .connected : .unknown
             // Wave A3：从 ActivityStore 拉一次今日已观察总数（PillView 启动时只跑一次）
             // 后续每条新意图通过 HermesPetIntentRecorded 通知里的 todayCount 增量更新
             todayIntentCount = ActivityRecorder.shared.queryStore.todayIntentCount()
+            // 灵动岛系统信息：开启则启动 2s 采样中枢
+            if systemStatsEnabled { SystemMonitor.shared.start() }
         }
     }
 
@@ -772,29 +867,84 @@ struct DynamicIslandPillView: View {
         case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
+        case .qwenCode:   return .teal
         }
     }
 
     // MARK: - 各形态卡片（拆出来让 SwiftUI 编译器能 type-check 大 body）
 
+    /// 胶囊背景 —— 全部在胶囊**内部**做（只改 NotchShape 填充/描边，绝不 setFrame、不开独立窗口），守决策 #1。
+    /// **分形态区别对待（用户要求）**：
+    ///   - 刘海（notch）形态：纯黑，跟物理刘海无缝，**不加任何彩色特效**。
+    ///   - 悬浮（floating）「灵动胶囊」形态：浮在菜单栏里，特效**做足**（见 `floatingCapsuleEffects`）。
+    private var capsuleBackground: some View {
+        NotchShape(cornerRadius: currentRadius, isFloating: isFloating)
+            .fill(capsuleBaseShading)
+            .overlay { floatingCapsuleEffects }
+    }
+
+    /// 悬浮「灵动胶囊」形态（floating，无物理刘海、浮在菜单栏中央）专属特效 —— 借鉴 Win 版、做足：
+    ///   ① mode 主色辉光：底缘最浓、向上晕染（plusLighter 叠加发光），展开/工作时更亮
+    ///   ② 玻璃高光描边：顶亮底淡的发丝白描边
+    ///   ③ mode 主色描边：更亮，存在感更强
+    /// 刘海形态 / permission 衔接态都**不加**（保持纯黑无缝）。
+    @ViewBuilder
+    private var floatingCapsuleEffects: some View {
+        if isFloating && !permissionActive {
+            let shape = NotchShape(cornerRadius: currentRadius, isFloating: true)
+            let tint = modeTint(currentMode)
+            let glow: Double = isExpanded ? 0.50 : 0.26
+            ZStack {
+                shape
+                    .fill(
+                        LinearGradient(
+                            colors: [tint.opacity(glow), tint.opacity(glow * 0.32), .clear],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .blendMode(.plusLighter)
+                shape.stroke(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.34), Color.white.opacity(0.04)],
+                        startPoint: .top, endPoint: .bottom
+                    ),
+                    lineWidth: 1
+                )
+                shape.stroke(tint.opacity(isExpanded ? 0.88 : 0.62), lineWidth: 1)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// 胶囊基础填充。错误态 = 暗琥珀渐变；floating = 极淡炭灰→黑（出体积）；notch = 纯黑（保顶部无缝）。
+    private var capsuleBaseShading: LinearGradient {
+        if isInErrorState {
+            return LinearGradient(
+                colors: [Color(red: 0.58, green: 0.34, blue: 0.06), Color(red: 0.44, green: 0.25, blue: 0.04)],
+                startPoint: .top, endPoint: .bottom
+            )
+        }
+        if isFloating {
+            return LinearGradient(colors: [Color(white: 0.14), Color.black],
+                                  startPoint: .top, endPoint: .bottom)
+        }
+        return LinearGradient(colors: [Color.black, Color.black],
+                              startPoint: .top, endPoint: .bottom)
+    }
+
     /// 胶囊本体 + 截屏闪光叠加 —— 抽出来让 SwiftUI 编译器在 body 里只面对 modifier 链
     private var pillBody: some View {
         VStack(spacing: 0) {
             ZStack {
-                NotchShape(cornerRadius: currentRadius, isFloating: isFloating)
-                    .fill(isInErrorState ? Color(red: 0.55, green: 0.32, blue: 0.05) : Color.black)
-                    // floating 模式：贴边 1pt mode 主色细描边（不向外溢出）
-                    .overlay {
-                        if isFloating {
-                            NotchShape(cornerRadius: currentRadius, isFloating: true)
-                                .stroke(modeTint(currentMode).opacity(0.75), lineWidth: 1)
-                        }
-                    }
+                capsuleBackground
                 pillContent
             }
             .frame(width: currentWidth, height: currentHeight)
             .scaleEffect(shutterScale)
             .overlay { shutterOverlay }
+            // 悬浮胶囊：往下让出上边距，待在菜单栏里、顶上留白（展开时不留，避免撑出窗口被裁）
+            .padding(.top, (isFloating && !isExpanded) ? floatingTopMargin : 0)
 
             Spacer(minLength: 0)
         }
@@ -836,30 +986,48 @@ struct DynamicIslandPillView: View {
     /// Wave A3 polish：随机挑一句陪伴语。
     /// 70% 概率从通用池选（短而暖），30% 概率从当前时段池选（带时间感）。
     /// 写成 static 方便测试 + 不依赖 PillView 实例状态。
+    @MainActor
     static func pickCompanionPhrase() -> String {
         let general = [
-            "陪着你呢", "嗯，在哒", "你忙你的", "在这儿",
-            "我在", "嘿，在", "嗯哼～", "随你"
+            L("island.pill.companion.general.0"), L("island.pill.companion.general.1"),
+            L("island.pill.companion.general.2"), L("island.pill.companion.general.3"),
+            L("island.pill.companion.general.4"), L("island.pill.companion.general.5"),
+            L("island.pill.companion.general.6"), L("island.pill.companion.general.7")
         ]
         let hour = Calendar.current.component(.hour, from: Date())
         let timed: [String]
         if (6...10).contains(hour) {
-            timed = ["早呀～", "早安", "起这么早", "新一天～"]
+            timed = [
+                L("island.pill.companion.morning.0"), L("island.pill.companion.morning.1"),
+                L("island.pill.companion.morning.2"), L("island.pill.companion.morning.3")
+            ]
         } else if (11...13).contains(hour) {
-            timed = ["午饭了吗", "中午好", "歇会儿"]
+            timed = [
+                L("island.pill.companion.noon.0"), L("island.pill.companion.noon.1"),
+                L("island.pill.companion.noon.2")
+            ]
         } else if (14...17).contains(hour) {
-            timed = ["下午好", "继续吧", "在哒"]
+            timed = [
+                L("island.pill.companion.afternoon.0"), L("island.pill.companion.afternoon.1"),
+                L("island.pill.companion.afternoon.2")
+            ]
         } else if (18...21).contains(hour) {
-            timed = ["晚上好", "辛苦啦", "在呢"]
+            timed = [
+                L("island.pill.companion.evening.0"), L("island.pill.companion.evening.1"),
+                L("island.pill.companion.evening.2")
+            ]
         } else {
             // 22:00 - 05:59 深夜
-            timed = ["还在忙呢", "早点睡", "夜深啦", "注意休息"]
+            timed = [
+                L("island.pill.companion.night.0"), L("island.pill.companion.night.1"),
+                L("island.pill.companion.night.2"), L("island.pill.companion.night.3")
+            ]
         }
         // 70/30 通用 vs 时段
         if Int.random(in: 0..<10) < 7 {
-            return general.randomElement() ?? "陪着你呢"
+            return general.randomElement() ?? L("island.pill.companion.general.0")
         } else {
-            return timed.randomElement() ?? "在哒"
+            return timed.randomElement() ?? L("island.pill.companion.afternoon.2")
         }
     }
 
@@ -916,10 +1084,10 @@ struct DynamicIslandPillView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.yellow)
-                Text("连接已断开")
+                Text(L("island.pill.disconnected"))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
-                Text("· 点击重试")
+                Text(L("island.pill.clickRetry"))
                     .font(.system(size: 11, weight: .regular))
                     .foregroundStyle(.white.opacity(0.7))
             }
@@ -937,7 +1105,7 @@ struct DynamicIslandPillView: View {
                 Image(systemName: "checkmark.seal.fill")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.green)
-                Text("已修改 \(diffSummaryCount) 个文件")
+                Text(L("island.pill.filesChanged", diffSummaryCount))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
             }
@@ -948,7 +1116,8 @@ struct DynamicIslandPillView: View {
 
     /// 通知态卡片（截图、错误等短暂提示）
     private var notificationCard: some View {
-        let isError = notificationText.contains("⚠️") || notificationText.contains("失败") || notificationText.contains("权限")
+        // 错误横幅统一带「⚠️」前缀（emoji 跨语言一致，i18n 安全）
+        let isError = notificationText.contains("⚠️")
         return VStack(spacing: 0) {
             Color.clear.frame(height: notchHeight + contentTopPad)
             HStack(spacing: 8) {
@@ -1110,18 +1279,28 @@ struct DynamicIslandPillView: View {
         .frame(height: 3)
     }
 
-    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名 + 陪伴语）
+    /// hover 卡片（鼠标悬停时显示 mode + 状态点 + 模型名 + 陪伴语）。
+    /// 开了「灵动岛系统信息」时，完整系统仪表盘由 SystemStatsPanelController 在刘海下方
+    /// 独立窗口展开（决策 #1：灵动岛尺寸固定塞不下，必须独立窗口），这里灵动岛本体只显示
+    /// mode 名片当"标题条"，与下方仪表盘视觉上连成一体。
     private var hoverCard: some View {
         VStack(spacing: 0) {
             Color.clear.frame(height: notchHeight + contentTopPad)
-            HStack(spacing: 8) {
+            hoverModeRow
+        }
+        .transition(.opacity.combined(with: .scale(scale: 0.94)))
+    }
+
+    /// 原 hover 内容：状态点 + 放大的 mode 精灵 + mode 名 + 陪伴语
+    private var hoverModeRow: some View {
+        HStack(spacing: 8) {
                 Circle()
                     .fill(status.color)
                     .frame(width: 8, height: 8)
                     .shadow(color: status.color.opacity(0.55), radius: 3)
                 // hover 时 sprite 放大到 22pt（idle 12pt 圆点 → hover 22pt 完整 sprite）
                 ModeSpriteView(mode: currentMode, isWorking: spriteIsWorking, size: 22)
-                Text(currentMode.label)
+                Text(L(currentMode.labelKey))
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .tracking(0.3)
@@ -1139,15 +1318,16 @@ struct DynamicIslandPillView: View {
                 }
             }
             .frame(maxHeight: .infinity)
-        }
-        .transition(.opacity.combined(with: .scale(scale: 0.94)))
     }
 
     /// 默认 idle 行：左耳极简圆点 + (floating 中间桌宠名 · 状态) + 右耳指示器
     private var idleStateRow: some View {
         HStack(spacing: 0) {
-            IdleModeDot(tint: modeTint(currentMode))
-                .padding(.leading, 18)
+            // idle 时左侧（刘海耳朵 / 悬浮胶囊左端）显示当前 mode 的小宠物形象。
+            // 传 animated:false 画静态帧（零额外 CPU；pose 偶尔张望仍会触发一次重绘）；
+            // hover 时由 hoverCard 接管，露出更大的动态精灵。
+            ModeSpriteView(mode: currentMode, isWorking: false, size: 18, animated: false)
+                .padding(.leading, 13)
 
             // floating 模式：胶囊中间 ~200pt 黑色空白利用起来，显示桌宠名 + 状态
             // notch 模式中间被物理刘海遮住，保持极简不放文字
@@ -1184,31 +1364,28 @@ struct DynamicIslandPillView: View {
                 connectionStatus: status,
                 taskStatus: taskStatus,
                 voiceLevel: voiceLevel,
-                glowTint: modeTint(currentMode)
+                meetingCollapsed: meetingCollapsed,
+                meetingLevel: meetingLevel,
+                glowTint: modeTint(currentMode),
+                isFloating: isFloating
             )
-            .padding(.trailing, 14)
+            // 收窄右边距给指标腾空间（刘海右耳避开摄像头只有 ~40pt；悬浮胶囊够宽放三连排）
+            .padding(.trailing, 8)
         }
+        .offset(y: isFloating ? 0 : (statsPanelOpen ? 6 : 2))   // 刘海：展开时下挪到标准耳朵态(6)、平时齐平态(2)；悬浮胶囊不挪
         .animation(AnimTok.snappy, value: backgroundStreamingCount)
         .transition(.opacity)
     }
 
     /// 桌宠中文名 —— 跟 PetHeaderStrip / ResponseSummary 保持一致
-    private var idlePetName: String {
-        switch currentMode {
-        case .claudeCode: return "Clawd"
-        case .directAPI:  return "云朵"
-        case .openclaw:   return "fomo"   // PR-B 上线龙虾 sprite 后正式启用
-        case .hermes:     return "小马"
-        case .codex:      return "coco"
-        }
-    }
+    private var idlePetName: String { L(currentMode.petNameKey) }
 
     /// idle 时的状态文本：默认"在这呢"，后台 N 条对话流式 → "N 条对话在跑"
     private var idleStatusText: String {
         if backgroundStreamingCount > 0 {
-            return "\(backgroundStreamingCount) 条对话在跑"
+            return L("island.pill.status.running", backgroundStreamingCount)
         }
-        return "在这呢"
+        return L("island.pill.status.here")
     }
 }
 
@@ -1319,6 +1496,52 @@ struct BackgroundStreamingBadge: View {
     }
 }
 
+// MARK: - 会议录音收起态：灵动岛声波订阅（独立 ViewModifier，避免 PillView.body 超长 type-check）
+
+/// 监听会议「收起/展开/结束」通知 → 切 `meetingCollapsed` 声波态 + 喂会议音量。
+/// **独立于 taskStatus**：后台 AI 任务会无条件改 taskStatus，若共用会把录音声波顶掉且回不来
+/// （审查抓到的 bug）。这里用独立 @State，渲染时 meetingCollapsed 优先于 taskStatus。
+/// 抽成独立 modifier 是因为这几个 onReceive 直接挂 pillBody 会让 SwiftUI 编译器 type-check 超时。
+private struct MeetingIslandObservers: ViewModifier {
+    @Binding var meetingCollapsed: Bool
+    @Binding var meetingLevel: Float
+
+    func body(content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetMeetingCollapsed"))) { _ in
+                withAnimation(AnimTok.snappy) { meetingCollapsed = true }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetMeetingExpanded"))) { _ in
+                withAnimation(AnimTok.snappy) { meetingCollapsed = false }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetMeetingLevel"))) { note in
+                if meetingCollapsed, let lvl = note.userInfo?["level"] as? Float {
+                    meetingLevel = lvl
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetMeetingFinished"))) { _ in
+                withAnimation(AnimTok.snappy) { meetingCollapsed = false }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetMeetingCancelled"))) { _ in
+                withAnimation(AnimTok.snappy) { meetingCollapsed = false }
+            }
+    }
+}
+
+// MARK: - 系统信息采样器启停（独立 modifier，守 type-check）
+
+/// 跟「灵动岛系统信息」总开关联动：开启时启动 `SystemMonitor` 的 2s 采样，关闭时停掉省电。
+/// 抽成独立 modifier 是因为直接往 PillView 那条超长 observer 链上加 onChange 会让编译器 type-check 超时。
+private struct SystemStatsLifecycle: ViewModifier {
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        content.onChange(of: enabled) { _, on in
+            if on { SystemMonitor.shared.start() } else { SystemMonitor.shared.stop() }
+        }
+    }
+}
+
 // MARK: - 右耳任务指示器（loading 圈 / 完成对勾 / idle 状态图标）
 
 /// 灵动岛右耳的小图标 —— 根据任务状态切换：
@@ -1330,32 +1553,57 @@ struct RightEarIndicator: View {
     let taskStatus: DynamicIslandPillView.RightEarTaskStatus
     /// 录音中的实时电平（0~1），用于 listening 状态的 5 段音量条
     var voiceLevel: Float = 0
+    /// 会议录音收起态 —— 为 true 时**优先**显声波（无视 taskStatus），不被后台 AI 任务顶掉
+    var meetingCollapsed: Bool = false
+    /// 会议音量（收起态声波用，跟 voiceLevel 分开）
+    var meetingLevel: Float = 0
     /// 成功对勾完成时的光晕颜色（mode 主色）
     var glowTint: Color = .green
+    /// 悬浮胶囊（floating）：那条够长，CPU/内存/温度**三连排同时显**；刘海屏窄 → 轮播单指标
+    var isFloating: Bool = false
+
+    /// 「灵动岛系统信息」总开关 —— 开启时 idle 右耳显系统指标（替代静态对勾）
+    @AppStorage("systemStatsEnabled") private var systemStatsEnabled = true
 
     var body: some View {
         ZStack {
-            switch taskStatus {
-            case .idle:
-                Image(systemName: connectionStatus.iconName)
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(connectionStatus.color)
+            if meetingCollapsed {
+                // 会议录音收起态优先：右侧声波表示"还在录、没丢"（复用 ListeningMic，数据源为会议音量）
+                ListeningMic(level: CGFloat(meetingLevel))
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
+            } else {
+                switch taskStatus {
+                case .idle:
+                    // 系统信息开 + 已连接 → 显系统指标；否则回落到连接状态图标（✗ / ? 仍优先）
+                    // 悬浮胶囊：三连排同时显（CPU/内存/温度）；刘海屏窄：轮播单指标
+                    if systemStatsEnabled && connectionStatus == .connected {
+                        Group {
+                            if isFloating { SystemEarTriple() } else { SystemEarStat() }
+                        }
+                        .transition(.opacity)
+                    } else {
+                        Image(systemName: connectionStatus.iconName)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(connectionStatus.color)
+                            .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    }
 
-            case .working:
-                LoadingSpinner()
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                case .working:
+                    LoadingSpinner()
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
 
-            case .success:
-                AnimatedCheckmark(glowTint: glowTint)
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                case .success:
+                    AnimatedCheckmark(glowTint: glowTint)
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
 
-            case .listening:
-                ListeningMic(level: CGFloat(voiceLevel))
-                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                case .listening:
+                    ListeningMic(level: CGFloat(voiceLevel))
+                        .transition(.scale(scale: 0.6).combined(with: .opacity))
+                }
             }
         }
-        .frame(width: 14, height: 14)
+        // 轮询 chip 比图标略宽 → 用 minWidth 让它自适应（图标态仍居中占 14pt）
+        .frame(minWidth: 14, minHeight: 14, maxHeight: 16)
     }
 }
 

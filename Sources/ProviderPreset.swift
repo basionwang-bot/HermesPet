@@ -8,6 +8,8 @@ enum DirectResponsePreference: String, CaseIterable, Identifiable, Hashable {
 
     var id: String { rawValue }
 
+    /// ⚠️ 这个 label 会被 APIClient 拼进发给 AI 的身份 prompt（非 UI 场景、非 MainActor），
+    /// 所以**保持纯字符串、不接 L()**。UI 展示用的本地化文案见下面的 `localizedLabel`。
     var label: String {
         switch self {
         case .fast: return "快速"
@@ -16,11 +18,23 @@ enum DirectResponsePreference: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// UI 选择器里显示的本地化标签（仅在 SwiftUI / MainActor 调用）。
+    @MainActor
+    var localizedLabel: String {
+        switch self {
+        case .fast: return L("provider.pref.fast.label")
+        case .balanced: return L("provider.pref.balanced.label")
+        case .deep: return L("provider.pref.deep.label")
+        }
+    }
+
+    /// UI 说明文案，仅 SettingsView（MainActor）展示用，可本地化。
+    @MainActor
     var caption: String {
         switch self {
-        case .fast: return "更快，适合日常问答"
-        case .balanced: return "默认推荐，速度和质量均衡"
-        case .deep: return "更慢，适合复杂问题"
+        case .fast: return L("provider.pref.fast.caption")
+        case .balanced: return L("provider.pref.balanced.caption")
+        case .deep: return L("provider.pref.deep.caption")
         }
     }
 }
@@ -69,13 +83,30 @@ struct ProviderPreset: Identifiable, Hashable {
         self.visionModel = visionModel
     }
 
+    /// UI 显示用：品牌名（DeepSeek / OpenAI 等）中英一致，直接用 displayName；
+    /// 几个中文 UI 名（自定义 / 本地·云端 Gateway / 本地 OpenClaw）走 i18n。
+    /// displayName 本身保留原值 —— 它还被非 MainActor 代码拼进 opencode.json / AI 身份 prompt。
+    @MainActor
+    var localizedDisplayName: String {
+        switch displayName {
+        case "自定义":        return L("provider.name.custom")
+        case "本地 Gateway":  return L("provider.name.localGateway")
+        case "云端 Gateway":  return L("provider.name.cloudGateway")
+        case "本地 OpenClaw": return L("provider.name.localOpenclaw")
+        default:             return displayName
+        }
+    }
+
     /// 预设列表 —— 顺序就是 UI 上 Picker 显示的顺序。
     /// 模型字符串以 2026-05 各家官方 GET /models 实测为准（不是文档，文档可能落后）。
     /// **重要**：默认 / 平衡 / 深度 全部避开 reasoning_content 字段类型的推理模型
     /// （DeepSeek V4 / Kimi K2.x / OpenAI o1+ 都属此类），因为 opencode v1.15.1
     /// 还没适配 reasoning_content 字段（PR #25110/#24443/#24218 在修但未合并）。
     /// DeepSeek 例外：API 只暴露 V4 系列，没非推理可选，所以仍用 V4 但用户要知道风险
-    static let all: [ProviderPreset] = [
+    ///
+    /// ⭐ 这是**内置兜底清单**（编译进 App，永远可用、离线兜底）。对外暴露的 `all` = 兜底 + 远程
+    /// `presets.json` 合并。加新厂商优先改公开仓 JSON（不用发版）；这里只保底+老用户离线可用。
+    static let bundledDefaults: [ProviderPreset] = [
         ProviderPreset(
             id: "deepseek",
             displayName: "DeepSeek",
@@ -141,6 +172,16 @@ struct ProviderPreset: Identifiable, Hashable {
             visionModel: "gpt-4o"   // GPT-4o 对 vision 最稳，5.x 还有 quota 限制
         )
     ]
+
+    /// ⭐ 对外有效预设清单 = 内置兜底（`bundledDefaults`）+ 远程 `presets.json`（按 id 覆盖/追加）。
+    /// 所有调用方（SettingsView Picker / OpenCodeConfigGenerator / detect 反查）一律用这个。
+    /// 远程拉取失败 / 离线时自动回落到 `bundledDefaults`，零影响。
+    static var all: [ProviderPreset] { ProviderPresetRegistry.shared.effectivePresets }
+
+    /// ReasoningProxy 的 upstream 注册表**兜底种子**（内置 5 家 id → baseURL）。
+    /// 保证常见厂商即便注册时序异常也能被 proxy 路由；远程/自定义的由各自注册补充。
+    static let seedUpstreams: [String: String] = Dictionary(
+        uniqueKeysWithValues: bundledDefaults.map { ($0.id, $0.baseURL) })
 
     /// 自定义预设 —— 不在 all 里，由 UI 单独追加一项让用户自己填 URL/模型
     static let custom = ProviderPreset(

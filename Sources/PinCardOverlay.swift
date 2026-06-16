@@ -316,17 +316,19 @@ final class PinCardController {
         // 重新创建 NSHostingView 让 SwiftUI 拿到最新的 pin 数据
         // （PinCardView 是值类型不会自动重新订阅 PinStore）
         if let win = windows[id], let newPin = PinStore.shared.pins.first(where: { $0.id == id }) {
-            let host = NSHostingView(rootView: PinCardView(
+            // 同 createWindow：NSHostingController 防显示周期反推崩溃（决策 #6 / #143~#145）
+            let size = win.frame.size
+            let host = NSHostingController(rootView: PinCardView(
                 pin: newPin,
                 onClose: { [weak self] in self?.close(id: id) },
                 onCopy: { [weak self] in self?.copy(content: newPin.content) },
                 onOpen: { [weak self] in self?.openInChat(pin: newPin) },
                 onToggleDone: { [weak self] in self?.toggleTaskDone(id: id) }
             ))
-            host.frame = NSRect(origin: .zero, size: win.frame.size)
-            host.autoresizingMask = [.width, .height]
             if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-            win.contentView = host
+            win.contentViewController = host
+            host.view.autoresizingMask = [.width, .height]   // v1.4.5 回归修复：铺满全窗，不被 safe-area 顶移
+            win.setContentSize(size)
         }
     }
 
@@ -382,17 +384,22 @@ final class PinCardController {
         delegates[pin.id] = delegate
 
         let pinID = pin.id
-        let host = NSHostingView(rootView: PinCardView(
+        // ⭐ #143/#144/#145 启动崩溃根治：Pin 卡片窗在启动 bootstrap() 即 orderFront，旧版用裸
+        // NSHostingView 当 contentView —— macOS 26.5.1 在显示周期重算窗口 content-size 极值时会经
+        // updateWindowContentSizeExtremaIfNecessary 反推约束更新 → NSException 必崩（任何 pin 过
+        // 回答的用户一升级就启动崩）。改 NSHostingController + sizingOptions=[] 真正禁掉反推
+        //（决策 #6 成熟范式，照 MiniIsland/QuickAsk/ClawdBubble）。
+        let host = NSHostingController(rootView: PinCardView(
             pin: pin,
             onClose: { [weak self] in self?.close(id: pinID) },
             onCopy: { [weak self] in self?.copy(content: pin.content) },
             onOpen: { [weak self] in self?.openInChat(pin: pin) },
             onToggleDone: { [weak self] in self?.toggleTaskDone(id: pinID) }
         ))
-        host.frame = NSRect(x: 0, y: 0, width: Self.cardWidth, height: Self.cardHeight)
-        host.autoresizingMask = [.width, .height]
         if #available(macOS 13.0, *) { host.sizingOptions = [] }  // 决策 #6
-        w.contentView = host
+        w.contentViewController = host
+        host.view.autoresizingMask = [.width, .height]   // v1.4.5 回归修复：铺满全窗，不被 safe-area 顶移
+        w.setContentSize(NSSize(width: Self.cardWidth, height: Self.cardHeight))
 
         windows[pin.id] = w
 
@@ -455,11 +462,11 @@ final class PinCardController {
         let stampFmt = DateFormatter()
         stampFmt.dateFormat = "yyyyMMdd-HHmm"
 
-        var lines: [String] = ["# Pin 导出", "", "> 导出时间：\(dateFmt.string(from: Date()))  共 \(pins.count) 条", "", "---", ""]
+        var lines: [String] = ["# " + L("pin.export.title"), "", L("pin.export.meta", dateFmt.string(from: Date()), pins.count), "", "---", ""]
         for pin in pins {
             lines.append("## \(pin.title)")
             lines.append("")
-            lines.append("> \(pin.mode.label) · \(dateFmt.string(from: pin.pinnedAt))\(pin.isTask ? " · 任务\(pin.isDone ? "（已完成）" : "")" : "")")
+            lines.append("> \(L(pin.mode.labelKey)) · \(dateFmt.string(from: pin.pinnedAt))\(pin.isTask ? " · " + L("pin.export.task") + (pin.isDone ? L("pin.export.taskDone") : "") : "")")
             lines.append("")
             lines.append(pin.content)
             lines.append("")
@@ -470,8 +477,8 @@ final class PinCardController {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.text]
         panel.allowsOtherFileTypes = true
-        panel.nameFieldStringValue = "pins-\(stampFmt.string(from: Date())).md"
-        panel.title = "导出全部 Pin 为 Markdown"
+        panel.nameFieldStringValue = "\(L("pin.export.filePrefix"))-\(stampFmt.string(from: Date())).md"
+        panel.title = L("pin.export.panel.title")
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -500,6 +507,7 @@ struct PinCardView: View {
         case .openclaw:   return Color(red: 0.706, green: 0.773, blue: 0.910)
         case .claudeCode: return .orange
         case .codex:      return .cyan
+        case .qwenCode:   return .teal
         }
     }
 
@@ -510,18 +518,20 @@ struct PinCardView: View {
         case .openclaw:   return "bolt.circle.fill"
         case .claudeCode: return "terminal.fill"
         case .codex:      return "wand.and.stars"
+        case .qwenCode:   return "q.circle.fill"
         }
     }
 
     /// 相对时间 —— "刚刚 / 3 分钟前 / 1 小时前 / 昨天 / 2 月 14 日"
+    @MainActor
     private var relativeTime: String {
         let secs = Date().timeIntervalSince(pin.pinnedAt)
-        if secs < 60 { return "刚刚" }
-        if secs < 3600 { return "\(Int(secs / 60)) 分钟前" }
-        if secs < 86400 { return "\(Int(secs / 3600)) 小时前" }
-        if secs < 86400 * 2 { return "昨天" }
+        if secs < 60 { return L("pin.time.justNow") }
+        if secs < 3600 { return L("pin.time.minutesAgo", Int(secs / 60)) }
+        if secs < 86400 { return L("pin.time.hoursAgo", Int(secs / 3600)) }
+        if secs < 86400 * 2 { return L("pin.time.yesterday") }
         let f = DateFormatter()
-        f.dateFormat = "M 月 d 日"
+        f.dateFormat = L("pin.time.date.format")
         return f.string(from: pin.pinnedAt)
     }
 
@@ -538,7 +548,8 @@ struct PinCardView: View {
             .padding(.top, 12)
             .padding(.bottom, 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(.ultraThinMaterial)
+            // 轻量 scrim：保留 Pin 飘在桌面上的通透感，但给文字一个对比度下限
+            .legibleGlass(scrim: 0.28)
             .overlay(alignment: .top) {
                 // 顶部 mode 主色细色条 —— 视觉锚点，让 pin 一眼能看出是哪个 AI 的回答
                 Rectangle()
@@ -576,7 +587,7 @@ struct PinCardView: View {
         .onHover { hovering in
             isHovering = hovering
         }
-        .help("点击转聊天 · 拖动调整位置")
+        .help(L("pin.card.help"))
     }
 
     // MARK: - 子视图
@@ -593,7 +604,7 @@ struct PinCardView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help(pin.isDone ? "标记为未完成" : "标记为已完成")
+                .help(pin.isDone ? L("pin.task.markUndone") : L("pin.task.markDone"))
             } else {
                 // 普通 Pin 显示 mode 图标圆形徽章
                 ZStack {
@@ -620,7 +631,7 @@ struct PinCardView: View {
                 actionButton(
                     systemName: didCopy ? "checkmark" : "doc.on.doc",
                     tint: didCopy ? .green : .secondary,
-                    help: didCopy ? "已复制" : "复制内容"
+                    help: didCopy ? L("pin.action.copied") : L("pin.action.copy")
                 ) {
                     onCopy()
                     didCopy = true
@@ -632,7 +643,7 @@ struct PinCardView: View {
                 .transition(.opacity.combined(with: .scale))
             }
 
-            actionButton(systemName: "xmark", tint: .secondary, help: "关闭") {
+            actionButton(systemName: "xmark", tint: .secondary, help: L("pin.action.close")) {
                 onClose()
             }
         }
@@ -652,7 +663,7 @@ struct PinCardView: View {
     /// 底部：mode label · 相对时间
     private var footerRow: some View {
         HStack(spacing: 6) {
-            Text(pin.mode.label)
+            Text(L(pin.mode.labelKey))
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundStyle(modeTint.opacity(0.85))
 
@@ -669,7 +680,7 @@ struct PinCardView: View {
             // hover 时显示"点击打开"提示
             if isHovering {
                 HStack(spacing: 3) {
-                    Text("打开")
+                    Text(L("pin.footer.open"))
                         .font(.system(size: 10, weight: .medium))
                     Image(systemName: "arrow.up.right")
                         .font(.system(size: 9, weight: .semibold))

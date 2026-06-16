@@ -36,6 +36,10 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
     case voiceInput
     case quickAsk
     case pinLastAnswer
+    case knowledgeGraph
+    case notes
+    case meeting
+    case voiceChat
 
     var id: String { rawValue }
 
@@ -46,6 +50,10 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
         case .voiceInput:     return 3
         case .quickAsk:       return 4
         case .pinLastAnswer:  return 5
+        case .knowledgeGraph: return 6
+        case .notes:          return 7
+        case .meeting:        return 8
+        case .voiceChat:      return 9
         }
     }
 
@@ -56,8 +64,15 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
         case .voiceInput:     return "按住说话"
         case .quickAsk:       return "快问浮窗"
         case .pinLastAnswer:  return "Pin 最新回答"
+        case .knowledgeGraph: return "知识图谱云图"
+        case .notes:          return "写作模式"
+        case .meeting:        return "会议纪要"
+        case .voiceChat:      return "语音陪聊"
         }
     }
+
+    /// 设置面板用的 i18n key（GlobalHotkey 失败通知仍用上面的中文 title）—— rawValue 即 toggleChat / …
+    var titleKey: String { "settings.hotkey.\(rawValue)" }
 
     var icon: String {
         switch self {
@@ -66,6 +81,10 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
         case .voiceInput:     return "mic.fill"
         case .quickAsk:       return "bolt.fill"
         case .pinLastAnswer:  return "pin.fill"
+        case .knowledgeGraph: return "point.3.connected.trianglepath.dotted"
+        case .notes:          return "note.text"
+        case .meeting:        return "waveform.badge.mic"
+        case .voiceChat:      return "person.wave.2.fill"
         }
     }
 
@@ -85,6 +104,14 @@ enum HotkeyAction: String, CaseIterable, Identifiable {
             return Hotkey(keyCode: UInt32(kVK_Space), modifiers: UInt32(cmdKey | shiftKey))
         case .pinLastAnswer:
             return Hotkey(keyCode: UInt32(kVK_ANSI_P), modifiers: UInt32(cmdKey | shiftKey))
+        case .knowledgeGraph:
+            return Hotkey(keyCode: UInt32(kVK_ANSI_G), modifiers: UInt32(cmdKey | shiftKey))
+        case .notes:
+            return Hotkey(keyCode: UInt32(kVK_ANSI_N), modifiers: UInt32(cmdKey | shiftKey))
+        case .meeting:
+            return Hotkey(keyCode: UInt32(kVK_ANSI_M), modifiers: UInt32(cmdKey | shiftKey))
+        case .voiceChat:
+            return Hotkey(keyCode: UInt32(kVK_ANSI_L), modifiers: UInt32(cmdKey | shiftKey))
         }
     }
 
