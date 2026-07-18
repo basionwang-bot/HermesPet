@@ -8,10 +8,17 @@
 
 原生 macOS AI 桌面伙伴 · 7 类 AI 终端 · 系统遥测 · 多任务并行 · 手机配套端持续开发中
 
+[![Website](https://img.shields.io/badge/Website-hermespet.cc-0B7285?logo=safari&logoColor=white)](https://hermespet.cc)
 [![Latest Release](https://img.shields.io/github/v/release/basionwang-bot/HermesPet?label=Latest&color=2ea44f&logo=github)](https://github.com/basionwang-bot/HermesPet/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111111?logo=apple&logoColor=white)](https://github.com/basionwang-bot/HermesPet/releases/latest)
 [![Apple Notarized](https://img.shields.io/badge/Apple-Notarized-5c6cff?logo=apple&logoColor=white)](https://github.com/basionwang-bot/HermesPet/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/basionwang-bot/HermesPet/total?label=Downloads&color=0aa8d8)](https://github.com/basionwang-bot/HermesPet/releases)
+<br/>
+![AI Nodes](https://img.shields.io/badge/AI%20Nodes-7-0AA8D8)
+![System Diagnostics](https://img.shields.io/badge/System%20Diagnostics-Live-24324A)
+![Companion Apps](https://img.shields.io/badge/Companion%20Apps-In%20development-F59F00?logo=apple&logoColor=white)
+
+🇨🇳 **简体中文** · 🇺🇸 [English](./README.en.md)
 
 ### [下载最新版 DMG](https://github.com/basionwang-bot/HermesPet/releases/latest) · [访问官网](https://hermespet.cc) · [提交反馈](https://github.com/basionwang-bot/HermesPet/issues)
 
