@@ -225,7 +225,7 @@ HermesPet 由独立开发者长期设计、开发和维护。一个 Star、一�
 
 ### Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=basionwang-bot/HermesPet&type=Date)](https://star-history.com/#basionwang-bot/HermesPet&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=basionwang-bot/HermesPet&type=Date)](https://star-history.dera.page/#basionwang-bot/HermesPet&type=Date)
 
 ---
 
