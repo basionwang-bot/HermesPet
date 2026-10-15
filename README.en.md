@@ -28,6 +28,25 @@ Native macOS AI desktop companion · 7 AI endpoints · system telemetry · paral
 
 ---
 
+## 🤝 Project sponsor
+
+### 🔗 HermesPet × [Infistar.cc 无限星河](https://infistar.cc)
+
+**One API for multiple models · Keep your desktop AI companion active**
+
+Thank you to **[Infistar.cc 无限星河](https://infistar.cc)** for sponsoring HermesPet!
+
+- 🔥 **Affordable, reliable access**: prices starting at **1% of official provider rates**, with transparent pricing multipliers; redundant nodes help reduce the impact of HTTP 429 rate limits during long conversations.
+- 🌐 **Multiple models, one API key**: access Claude, GPT, Gemini, DeepSeek, and more for roleplay, companionship, and everyday questions.
+- 🐾 **Built for ongoing companionship**: high concurrency and low latency support background listening, autonomous behaviors, and extended interactions.
+- 🎁 **Welcome offers**: the sponsor offers **$5 in trial credits** and an **exclusive first top-up discount**. Visit the website for eligibility and redemption details.
+
+**[Visit Infistar.cc →](https://infistar.cc)**
+
+<sub>Service and promotion details above are supplied by the sponsor. Current pricing, model availability, credits, and offer terms are governed by the information on Infistar.cc.</sub>
+
+---
+
 ## AI should not live in only one chat window
 
 HermesPet makes AI part of your macOS desktop: the notch becomes a live task entry point, the screen edge becomes an always-ready console, and the pet changes with your current AI mode, notifies you when work is done, and accepts files and images you drop onto it.
