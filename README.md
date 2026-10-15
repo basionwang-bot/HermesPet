@@ -257,3 +257,20 @@ HermesPet 由独立开发者长期设计、开发和维护。一个 Star、一�
 **[前往 Infistar.cc 无限星河 →](https://infistar.cc)**
 
 <sub>以上服务与活动信息由赞助商提供；价格、模型供应、额度及优惠活动以 Infistar.cc 官网最新说明为准。</sub>
+
+---
+
+### 🔗 HermesPet × [MoreNeed API](https://api.getmoreneed.com/)
+
+**多模型 API 中转 · 一个 Key 连接多种 AI**
+
+感谢 **[MoreNeed API](https://api.getmoreneed.com/)** 赞助本项目！
+
+- 🌐 **多模型统一接入**：汇聚 GPT、Claude、Gemini、DeepSeek、通义、Kimi、Grok 等模型，通过一个 API Key 按需切换。
+- 🔌 **OpenAI 兼容接口**：支持自定义 API 地址，方便接入兼容 OpenAI 接口的 AI 应用与工具。
+- 💳 **人民币按量计费**：按实际 Token 用量扣费，无月费；调用模型、用量与费用可在活动记录中核对。
+- 🔑 **独立 Key 管理**：为不同应用分别创建 Key，设置额度上限、到期时间及可用模型，按需停用。
+
+**[前往 MoreNeed API →](https://api.getmoreneed.com/)**
+
+<sub>服务信息来自 MoreNeed API 官网；模型清单、价格及服务规则以官网最新说明为准。</sub>

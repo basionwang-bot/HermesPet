@@ -241,7 +241,7 @@ Desktop AI should feel alive — and remain transparent and controllable.
 
 ---
 
-## 🤝 Project sponsor
+## 🤝 Project sponsors
 
 ### 🔗 HermesPet × [Infistar.cc 无限星河](https://infistar.cc)
 
@@ -257,3 +257,20 @@ Thank you to **[Infistar.cc 无限星河](https://infistar.cc)** for sponsoring 
 **[Visit Infistar.cc →](https://infistar.cc)**
 
 <sub>Service and promotion details above are supplied by the sponsor. Current pricing, model availability, credits, and offer terms are governed by the information on Infistar.cc.</sub>
+
+---
+
+### 🔗 HermesPet × [MoreNeed API](https://api.getmoreneed.com/)
+
+**Multi-model API gateway · One key for multiple AI models**
+
+Thank you to **[MoreNeed API](https://api.getmoreneed.com/)** for sponsoring HermesPet!
+
+- 🌐 **Multiple models, one key**: access GPT, Claude, Gemini, DeepSeek, Qwen, Kimi, Grok, and more.
+- 🔌 **OpenAI-compatible API**: connect compatible apps and tools using a custom API endpoint.
+- 💳 **Pay as you go in RMB**: token-based billing with no monthly fee; review models, usage, and costs in the activity log.
+- 🔑 **Per-app API keys**: set spending limits, expiry dates, and allowed models, and disable keys individually.
+
+**[Visit MoreNeed API →](https://api.getmoreneed.com/)**
+
+<sub>Information sourced from the MoreNeed API website. Refer to the website for current models, pricing, and service terms.</sub>
