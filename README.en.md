@@ -225,7 +225,7 @@ HermesPet is designed, built, and maintained long-term by an independent develop
 
 ### Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=basionwang-bot/HermesPet&type=Date)](https://star-history.com/#basionwang-bot/HermesPet&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=basionwang-bot/HermesPet&type=Date)](https://star-history.dera.page/#basionwang-bot/HermesPet&type=Date)
 
 ---
 
